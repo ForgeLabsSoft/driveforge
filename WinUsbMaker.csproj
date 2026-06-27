@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <PropertyGroup>
+    <AssemblyName>WinUsbMaker</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>True</UseWPF>
+    <UseWindowsForms>True</UseWindowsForms>
+    <TargetFramework>net10.0-windows</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+    <PublishReadyToRun>true</PublishReadyToRun>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="WinUsbMaker\Resources\wimlib-1.14.4-windows-x86_64-bin.zip">
+      <LogicalName>WinUsbMaker.wimlib.zip</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <ItemGroup />
+</Project>

@@ -1,0 +1,1241 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window x:Class="WinUsbMaker.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="DriveForge" Height="720" Width="1100" MinHeight="620" MinWidth="820" WindowStartupLocation="CenterScreen" WindowState="Maximized" Background="{DynamicResource NavyBrush}" xmlns:winusbmaker="clr-namespace:WinUsbMaker;assembly=WinUsbMaker" Loaded="Window_Loaded" Closing="Window_Closing" AllowDrop="True" DragOver="Window_DragOver" Drop="Window_Drop">
+  <Window.TaskbarItemInfo>
+    <TaskbarItemInfo x:Name="TaskbarInfo" />
+  </Window.TaskbarItemInfo>
+  <FrameworkElement.Resources>
+    <ResourceDictionary>
+      <SolidColorBrush x:Key="NavyBrush" Color="#0F172A" />
+      <SolidColorBrush x:Key="PanelBrush" Color="#111827" />
+      <SolidColorBrush x:Key="PanelAltBrush" Color="#172033" />
+      <SolidColorBrush x:Key="BlueBrush" Color="#2563EB" />
+      <SolidColorBrush x:Key="GreenBrush" Color="#16A34A" />
+      <SolidColorBrush x:Key="OrangeBrush" Color="#F59E0B" />
+      <SolidColorBrush x:Key="RedBrush" Color="#DC2626" />
+      <SolidColorBrush x:Key="TextBrush" Color="#F8FAFC" />
+      <SolidColorBrush x:Key="MutedBrush" Color="#CBD5E1" />
+      <SolidColorBrush x:Key="BoxBrush" Color="#0B1220" />
+      <SolidColorBrush x:Key="DividerBrush" Color="#1E3A5F" />
+      <SolidColorBrush x:Key="Border2Brush" Color="#334155" />
+      <Style x:Key="{x:Type TextBlock}" TargetType="{x:Type TextBlock}">
+        <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+        <Setter Property="FontFamily" Value="Segoe UI" />
+      </Style>
+      <Style x:Key="{x:Type Button}" TargetType="{x:Type Button}">
+        <Setter Property="Foreground" Value="#F8FAFC" />
+        <Setter Property="Background" Value="{DynamicResource BlueBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BlueBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="FrameworkElement.Cursor" Value="Hand" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="{x:Type Button}">
+              <Border x:Name="Bd" CornerRadius="7" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" SnapsToDevicePixels="True">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" />
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="Bd" Property="Opacity" Value="0.86" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                  <Setter TargetName="Bd" Property="Opacity" Value="0.70" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                  <Setter TargetName="Bd" Property="Opacity" Value="0.4" />
+                  <Setter Property="FrameworkElement.Cursor" Value="Arrow" />
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="GhostButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BlueBrush}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+      </Style>
+      <Style x:Key="{x:Type ProgressBar}" TargetType="{x:Type ProgressBar}">
+        <Setter Property="Foreground" Value="{DynamicResource BlueBrush}" />
+        <Setter Property="Background" Value="{DynamicResource BoxBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="{x:Type ProgressBar}">
+              <Border CornerRadius="6" Background="{TemplateBinding Background}" SnapsToDevicePixels="True" ClipToBounds="True">
+                <Grid>
+                  <Border x:Name="PART_Track" />
+                  <Border x:Name="PART_Indicator" HorizontalAlignment="Left" CornerRadius="6" Background="{TemplateBinding Foreground}" />
+                </Grid>
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="GreenButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="{StaticResource GreenBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource GreenBrush}" />
+      </Style>
+      <Style x:Key="OrangeButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="{StaticResource OrangeBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource OrangeBrush}" />
+        <Setter Property="Foreground" Value="#111827" />
+      </Style>
+      <Style x:Key="{x:Type TextBox}" TargetType="{x:Type TextBox}">
+        <Setter Property="Foreground" Value="#0F172A" />
+        <Setter Property="Background" Value="#F8FAFC" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BlueBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="FontSize" Value="13" />
+      </Style>
+      <Style x:Key="{x:Type ComboBox}" TargetType="{x:Type ComboBox}">
+        <Setter Property="Foreground" Value="#0F172A" />
+        <Setter Property="Background" Value="#F8FAFC" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BlueBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="7,3" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="ItemTemplate">
+          <Setter.Value>
+            <DataTemplate>
+              <TextBlock Foreground="#0F172A" TextWrapping="NoWrap" Text="{Binding}" />
+            </DataTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="{x:Type ComboBoxItem}" TargetType="{x:Type ComboBoxItem}">
+        <Setter Property="Foreground" Value="#0F172A" />
+        <Setter Property="Background" Value="#F8FAFC" />
+        <Setter Property="Padding" Value="9,7" />
+        <Style.Triggers>
+          <Trigger Property="ComboBoxItem.IsHighlighted" Value="True">
+            <Setter Property="Foreground" Value="#0F172A" />
+            <Setter Property="Background" Value="#BFDBFE" />
+          </Trigger>
+          <Trigger Property="ListBoxItem.IsSelected" Value="True">
+            <Setter Property="Foreground" Value="#0F172A" />
+            <Setter Property="Background" Value="#DBEAFE" />
+          </Trigger>
+        </Style.Triggers>
+      </Style>
+    </ResourceDictionary>
+  </FrameworkElement.Resources>
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="62" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="78" />
+    </Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="{DynamicResource NavyBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="0,0,0,1">
+      <Grid Margin="24,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Name="AppTitleText" Text="DriveForge" FontSize="24" FontWeight="SemiBold" />
+          <TextBlock Name="AppSubtitleText" Text="Create Windows USB drives, clone this PC, and check drive quality" FontSize="12" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Text="&#xE774;" FontFamily="Segoe MDL2 Assets" FontSize="15" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="0,0,6,0" />
+          <ComboBox Name="LanguageBox" Width="140" Height="30" VerticalAlignment="Center" SelectionChanged="LanguageBox_SelectionChanged" />
+          <Button Name="HelpButton" Content="&#xE897;" FontFamily="Segoe MDL2 Assets" Width="40" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="HelpButton_Click" ToolTip="How to use DriveForge" />
+          <Button Name="SettingsButton" Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Width="40" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="SettingsButton_Click" ToolTip="Settings" />
+          <Border VerticalAlignment="Center" Margin="10,0,0,0" CornerRadius="7" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" Background="{DynamicResource PanelBrush}" Padding="14,8">
+            <StackPanel Orientation="Horizontal">
+              <Ellipse Name="AdminDot" Width="12" Height="12" Fill="{StaticResource OrangeBrush}" VerticalAlignment="Center" />
+              <TextBlock Name="AdminStatusText" Text="Checking administrator mode" Margin="10,0,0,0" VerticalAlignment="Center" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="1" Margin="10,6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="246" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+      <Border Grid.Column="0" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Margin="0,0,6,0" Padding="8">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel>
+          <TextBlock Name="SbTasks" Text="TASKS" Foreground="{DynamicResource MutedBrush}" FontSize="11" FontWeight="SemiBold" Margin="6,0,0,4" />
+          <Button Name="NavCreate" Tag="0" Click="NavTask_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE88E;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbCreateT" Text="Create Windows USB" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbCreateS" Text="Install Windows from an ISO file" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavClonePortable" Tag="2" Click="NavTask_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE8C8;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbClonePT" Text="Clone to USB / external drive" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbClonePS" Text="Portable Windows that boots on any PC" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavCloneInternal" Tag="3" Click="NavTask_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE977;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbCloneIT" Text="Clone to internal disk" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbCloneIS" Text="Normal Windows install on another disk" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavBackup" Tag="4" Click="NavTask_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE74E;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbBackupT" Text="Back up to image" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbBackupS" Text="Save this PC to a .wim image file" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavRestore" Tag="1" Click="NavTask_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbRestoreT" Text="Restore image" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbRestoreS" Text="Write a saved image back to a drive" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavLinux" Tag="5" Click="NavTask_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xEB9F;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbLinuxT" Text="Bootable USB from ISO" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbLinuxS" Text="Linux or any ISO — written as a disk image" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavDownloadIso" Click="NavDownloadIso_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbDownloadT" Text="Download an ISO" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbDownloadS" Text="Get Windows or Linux install images" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavMultiBoot" Click="NavMultiBoot_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE8FD;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbMultiBootT" Text="Multi-boot USB" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbMultiBootS" Text="Many ISOs on one stick — pick at boot" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Border Height="1" Background="{DynamicResource DividerBrush}" Margin="6,4" />
+          <TextBlock Name="SbTools" Text="TOOLS" Foreground="{DynamicResource MutedBrush}" FontSize="11" FontWeight="SemiBold" Margin="6,0,0,4" />
+          <Button Name="NavTools" Click="NavTools_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE90F;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbToolsT" Text="Drive tools" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbToolsS" Text="Health, speed and file-system scan" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavRecover" Click="NavRecover_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbRecoverT" Text="Recover deleted files" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbRecoverS" Text="Undelete files from a drive (NTFS)" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+          <Button Name="NavClean" Click="NavClean_Click" Style="{StaticResource GhostButtonStyle}" HorizontalContentAlignment="Stretch" Padding="10,4" Margin="0,0,0,2">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+              <TextBlock Text="&#xE894;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1">
+                <TextBlock Name="SbCleanT" Text="Clean traces" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbCleanS" Text="Free space &amp; wipe usage traces" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Button>
+        </StackPanel>
+        </ScrollViewer>
+      </Border>
+      <ScrollViewer Name="LeftPanelScroll" Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel>
+        <Border Visibility="Collapsed" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8">
+          <StackPanel>
+            <ComboBox Name="ModeBox" Height="30" SelectionChanged="ModeBox_SelectionChanged" />
+            <Button Name="CreateKitButton" Content="Prepare current computer clone" Margin="0,5,0,0" Style="{StaticResource OrangeButtonStyle}" Click="CreateKitButton_Click" />
+          </StackPanel>
+        </Border>
+        <Border Name="TaskHeaderBorder" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="10">
+          <StackPanel>
+            <TextBlock Name="TaskTitleText" Text="Create Windows USB" FontSize="18" FontWeight="SemiBold" />
+            <TextBlock Name="SourceHelpTextTop" Text="" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
+          </StackPanel>
+        </Border>
+        <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
+          <StackPanel>
+            <TextBlock Name="Step2Title" Text="2. Windows source" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="SourceHelpText" Text="ISO / WIM / ESD or current Windows." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
+            <Grid Name="SourceFileRow">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="88" />
+              </Grid.ColumnDefinitions>
+              <TextBox Name="SourcePathBox" IsReadOnly="True" Height="30" />
+              <Button Name="BrowseButton" Grid.Column="1" Content="Browse" Margin="8,0,0,0" Click="BrowseSource_Click" />
+            </Grid>
+            <TextBlock Name="EditionLabel" Text="Windows edition" Margin="0,4,0,2" FontWeight="SemiBold" />
+            <ComboBox Name="EditionBox" Height="30" />
+            <Button Name="VerifyIsoButton" Content="Verify ISO checksum" Margin="0,6,0,0" HorizontalAlignment="Left" Width="170" Style="{StaticResource GhostButtonStyle}" Click="VerifyIsoButton_Click" ToolTip="Compute the SHA-256 of the selected ISO so you can compare it with the value on the official download page — confirms the file is genuine and not corrupted." />
+          </StackPanel>
+        </Border>
+        <Border Name="TargetSection" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
+          <StackPanel>
+            <TextBlock Name="Step3Title" Text="3. Target USB / SSD / HDD" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="Step3Desc" Text="Selected disk will be formatted." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
+            <ComboBox Name="DiskBox" Height="30" SelectionChanged="DiskBox_SelectionChanged" ToolTip="Pick the USB stick / SSD / HDD to write to. Everything on it will be erased. Your system disk is hidden so it cannot be picked by mistake." />
+            <Border Name="DriveVerdictBorder" CornerRadius="6" Padding="8,5" Margin="0,6,0,0" Visibility="Collapsed">
+              <TextBlock Name="DriveVerdictText" TextWrapping="Wrap" FontWeight="SemiBold" Foreground="White" />
+            </Border>
+            <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+              <Button Name="RefreshDisksButton" Content="Refresh disks" Width="112" Click="RefreshDisks_Click" />
+              <Button Name="CheckDriveButton" Content="Check drive" Width="104" Margin="8,0,0,0" Click="SpeedTest_Click" />
+              <Button Name="EjectDriveButton" Content="Safely remove" Width="116" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="EjectDrive_Click" ToolTip="Flush and eject the selected drive so you can unplug it safely (for USB / external drives)." />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+        <Border Name="OptionsSection" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
+          <StackPanel>
+            <TextBlock Name="Step4Title" Text="4. Options" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="BootModeText" Text="Boot mode: Automatic." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
+            <CheckBox Name="BypassRequirementsCheck" Content="Bypass Windows 11 system requirements" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Lets Windows 11 install on PCs without TPM 2.0 / Secure Boot / new CPU. Only matters for a fresh ISO install — check it if your PC is &quot;not supported&quot;." />
+            <CheckBox Name="BypassAccountCheck" Content="Bypass Microsoft account requirements" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Skip the Microsoft-account requirement on first boot. You will be asked to choose a local account name and password during creation." />
+            <CheckBox Name="DebloatCheck" Content="Remove bloatware (Copilot, Teams, ads, telemetry)" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Writes Microsoft's own group-policy settings into the new Windows to turn off Copilot, the Teams/Chat icon, suggested apps and ads, web search in Start, the advertising ID, and to set telemetry to the minimum. Applied offline to the install image — reversible, installs nothing extra." />
+            <CheckBox Name="AddNetworkDriversCheck" Content="Add this PC's network / Wi-Fi drivers" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Copies this computer's network and Wi-Fi drivers into the new Windows so Wi-Fi appears during first-time setup. Most useful when you will install on the same or a similar PC." />
+            <CheckBox Name="AddAllDriversCheck" Content="Add ALL of this PC's drivers (slower)" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Copies every third-party driver from this PC into the new Windows (graphics, chipset, audio, network…). Best when installing on the same hardware. Takes longer and uses more space." />
+            <CheckBox Name="BitLockerCheck" Content="Enable BitLocker and save recovery key" Foreground="{DynamicResource TextBrush}" ToolTip="Encrypt the new drive so the data is protected if it is lost or stolen. You choose a password; a recovery key is also saved to a file you pick." />
+            <CheckBox Name="BitLockerResumeCheck" Content="Let me remove the drive before encryption finishes (resumes after first boot)" IsChecked="True" Foreground="{DynamicResource MutedBrush}" Margin="18,2,0,0" ToolTip="Encryption can take a while. With this on you can unplug as soon as the clone is done — Windows finishes encrypting automatically the first time the clone boots." />
+            <CheckBox Name="DataPartitionCheck" Content="Create a data partition with the leftover space" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Cap Windows at a sensible size and turn the remaining free space into a second, empty drive (e.g. for your files)." />
+            <CheckBox Name="CloneOtherPartitionsCheck" Content="Also clone the other data partitions from this PC's disk" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="If this PC's disk has other data partitions (e.g. a D: drive), copy them onto the target too, each into its own partition." />
+            <CheckBox Name="VerifyContentCheck" Content="Verify cloned data after writing (slower, safer)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="After cloning, re-read every file from the drive and compare it to the original to catch a bad USB stick. Adds time; uncheck only if you trust the drive." />
+            <CheckBox Name="CompactImageCheck" Content="Compact image (smaller on disk, slightly slower at runtime)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Store Windows compressed so it takes less space on the drive. Saves space; apps open a hair slower. Good for smaller USB drives." />
+            <CheckBox Name="EjectWhenDoneCheck" Content="Eject the drive when finished" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="When the operation completes, safely flush and eject the drive so you can unplug it right away. Skipped if BitLocker is still encrypting." />
+          </StackPanel>
+        </Border>
+        <Button Name="ScheduleCloneButton" Content="Schedule this clone (automatic backup)…" Margin="0,6,0,0" HorizontalAlignment="Left" Visibility="Collapsed" Style="{StaticResource GhostButtonStyle}" Click="ScheduleCloneButton_Click" ToolTip="Create a Windows scheduled task that re-runs this clone automatically (daily or weekly) to the selected drive — an automatic backup. Keep the drive connected at that time." />
+        <Border Name="Step5Section" Visibility="Collapsed" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
+          <StackPanel>
+            <TextBlock Name="Step5Title" Text="5. HDD / USB tools" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="Step5Desc" Text="Use the standalone diagnostic center on the right for health, speed, SMART, surface scan, repair, and tool kit." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
+          </StackPanel>
+        </Border>
+      </StackPanel>
+      </ScrollViewer>
+      <Grid Name="DiagnosticPanel" Grid.Column="1" Visibility="Collapsed">
+        <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="10">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="210" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="7" Padding="8" Margin="0,0,10,0" VerticalAlignment="Top">
+              <StackPanel>
+                <TextBlock Name="ToolGrpDiagnose" Text="Diagnostics" Foreground="{DynamicResource MutedBrush}" FontSize="11" FontWeight="SemiBold" Margin="2,0,0,5" />
+                <Button Name="HealthToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectHealthTool_Click" ToolTip="Read SMART / reliability health with a Good / Caution / Bad verdict and a temperature trend.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE95E;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbHealth" Text="Health" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="SpeedToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectSpeedTool_Click" ToolTip="Measure sequential and random write speed and rate the drive.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE916;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbSpeed" Text="Speed" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="ScanToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectScanTool_Click" ToolTip="Check the file system for errors with CHKDSK /scan (read-only).">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE8FE;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbScan" Text="Scan" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="SurfaceToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SurfaceTest_Click" ToolTip="Read every sector to find bad / unreadable blocks (read-only surface test).">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE9D9;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbSurface" Text="Surface" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="CapacityToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="CapacityTest_Click" ToolTip="Verify the drive's REAL capacity (detects fake/counterfeit USB drives). Tests the free space.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xEDA2;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbCapacity" Text="Capacity" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <TextBlock Name="ToolGrpMaintain" Text="Maintenance" Foreground="{DynamicResource MutedBrush}" FontSize="11" FontWeight="SemiBold" Margin="2,10,0,5" />
+                <Button Name="FormatToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="FormatDrive_Click" ToolTip="Quick-format the selected drive (erases everything). Choose NTFS, exFAT or FAT32. Your system disk is protected.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE777;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbFormat" Text="Format" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="PartitionToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="PartitionTool_Click" ToolTip="Partition tools: resize, move, create, delete, quick-partition, initialize, convert MBR/GPT, check, set active, find lost. Your system disk is protected.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbPartition" Text="Partition" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="TestBootToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="TestBoot_Click" ToolTip="Boot the drive in a temporary Hyper-V VM to verify it actually starts, without rebooting your PC. Requires Hyper-V.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE768;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbTestBoot" Text="Test boot" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <TextBlock Name="ToolGrpErase" Text="Erase" Foreground="#F0A8A8" FontSize="11" FontWeight="SemiBold" Margin="2,10,0,5" />
+                <Button Name="WipeToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Click="WipeDrive_Click" ToolTip="Securely erase the whole drive (overwrite) or the free space, or SSD TRIM-erase. Your system disk is protected.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xEA99;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbWipe" Text="Wipe" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="ShredToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Click="ShredFiles_Click" ToolTip="Securely erase specific files or a whole folder (overwrite then delete). Does not touch the rest of the drive.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbShred" Text="Shred" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+              </StackPanel>
+            </Border>
+            <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="7" Padding="10">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                  <TextBlock Name="DiagTitle" Text="Drive Diagnostic Center" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
+                  <TextBlock Name="ToolStatusText" Text="Pick the drive to test, then choose a tool (health, speed, SMART, scan, repair)." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" />
+                  <TextBlock Name="DiagDriveToTestLabel" Text="Drive to test" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,8,0,3" />
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ComboBox Name="DiagDiskBox" Height="30" SelectionChanged="DiagDiskBox_SelectionChanged" ToolTip="Choose which disk to run the diagnostic on (includes your system disk — diagnostics never format or write to it)." />
+                    <Button Name="DiagRefreshButton" Grid.Column="1" Content="Refresh" Width="84" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RefreshDisks_Click" />
+                  </Grid>
+                </StackPanel>
+                <!-- tool buttons moved to the left rail -->
+              </Grid>
+            </Border>
+            <!-- Disk/Speed/Result summary cards hidden: info now lives in the Overview tab (kept in tree so UpdateDiskSummary still runs) -->
+            <Grid Grid.Row="1" Margin="0" Visibility="Collapsed">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Border Background="{DynamicResource NavyBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" Padding="7" Margin="0,0,6,0">
+                <StackPanel>
+                  <TextBlock Name="DiagDiskCardLabel" Text="Disk" Foreground="{DynamicResource MutedBrush}" />
+                  <TextBlock Name="DiskSummaryText" Text="No disk selected" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,2,0,0" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="1" Background="{DynamicResource NavyBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" Padding="7" Margin="0,0,6,0">
+                <StackPanel>
+                  <TextBlock Name="DiagSpeedCardLabel" Text="Speed" Foreground="{DynamicResource MutedBrush}" />
+                  <TextBlock Name="SpeedSummaryText" Text="Not tested" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,2,0,0" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="2" Background="{DynamicResource NavyBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" Padding="7">
+                <StackPanel>
+                  <TextBlock Name="DiagResultCardLabel" Text="Result" Foreground="{DynamicResource MutedBrush}" />
+                  <TextBlock Name="RecommendationText" Text="Select a disk" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,2,0,0" />
+                </StackPanel>
+              </Border>
+            </Grid>
+            <Border Name="WarningBox" Grid.Row="2" Visibility="Collapsed" Background="#2A1B08" BorderBrush="{StaticResource OrangeBrush}" BorderThickness="1" CornerRadius="6" Padding="8" Margin="0,8,0,0">
+              <TextBlock Name="WarningText" Text="Windows To Go needs fast random I/O. Slow USB sticks may feel broken." TextWrapping="Wrap" Foreground="#FDE68A" />
+            </Border>
+            <Border Grid.Row="3" Background="{DynamicResource NavyBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="6" Padding="8" Margin="0,8,0,0">
+              <Grid>
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TabControl Name="DriveToolsTabs" Grid.Row="0" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" Foreground="{DynamicResource TextBrush}">
+                  <TabControl.ItemContainerStyle>
+                    <Style TargetType="{x:Type TabItem}">
+                      <Setter Property="Height" Value="0" />
+                      <Setter Property="Padding" Value="0" />
+                      <Setter Property="Margin" Value="0" />
+                      <Setter Property="BorderThickness" Value="0" />
+                    </Style>
+                  </TabControl.ItemContainerStyle>
+                  <TabItem Name="TabOverview" Header="Overview">
+                    <Grid Background="{DynamicResource NavyBrush}" Margin="6">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="300" />
+                        <ColumnDefinition Width="*" />
+                      </Grid.ColumnDefinitions>
+                      <!-- LEFT: drive info (scrolls if it gets tall) -->
+                      <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="0,0,12,0">
+                        <StackPanel>
+                          <Grid>
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="*" />
+                              <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Name="HealthStatusCard" Background="#475569" CornerRadius="6" Padding="8" Margin="0,0,4,0">
+                              <StackPanel>
+                                <TextBlock Name="LblHealthStatus" Text="Health Status" FontSize="12" Foreground="White" />
+                                <TextBlock Name="ToolHealthText" Text="Unknown" FontSize="20" FontWeight="Bold" Foreground="White" TextWrapping="Wrap" />
+                              </StackPanel>
+                            </Border>
+                            <Border Grid.Column="1" Background="{DynamicResource BlueBrush}" CornerRadius="6" Padding="8" Margin="4,0,0,0">
+                              <StackPanel>
+                                <TextBlock Name="LblTemperature" Text="Temperature" FontSize="12" />
+                                <TextBlock Name="ToolTemperatureText" Text="-- °C" FontSize="20" FontWeight="Bold" />
+                              </StackPanel>
+                            </Border>
+                          </Grid>
+                          <TextBlock Name="ToolDriveTitleText" Text="No drive selected" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,10,0,0" />
+                          <TextBlock Name="ToolFirmwareText" Text="Firmware: unknown" Margin="0,6,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" />
+                          <TextBlock Name="ToolSerialText" Text="Serial: unknown" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" />
+                          <TextBlock Name="ToolInterfaceText" Text="Interface: unknown" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" />
+                          <TextBlock Name="ToolSizeText" Text="Size: unknown" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" />
+                          <TextBlock Name="ToolRecommendationDetailText" Text="Run a health or speed test to get a recommendation." Margin="0,8,0,0" TextWrapping="Wrap" />
+                          <TextBlock Name="HealthTrendText" Text="" Margin="0,8,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="12" />
+                          <Border Name="HealthTrendBox" Visibility="Collapsed" Margin="0,10,0,0" Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="6" Padding="8">
+                            <StackPanel>
+                              <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <TextBlock Name="HealthTrendGraphLabel" Text="Temperature trend" Foreground="{DynamicResource MutedBrush}" FontSize="12" FontWeight="SemiBold" />
+                                <TextBlock Grid.Column="1" Name="HealthTrendRangeText" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="11" />
+                              </Grid>
+                              <Canvas Name="HealthTrendCanvas" Height="66" Margin="0,6,0,0" ClipToBounds="True" SizeChanged="HealthTrendCanvas_SizeChanged" />
+                            </StackPanel>
+                          </Border>
+                          <TextBlock x:Name="PartitionMapLabel" Text="Partition map" Foreground="{DynamicResource MutedBrush}" FontSize="13" FontWeight="SemiBold" Margin="0,12,0,6" />
+                          <Grid Name="PartitionMapGrid" Height="34" Margin="0,0,0,4" />
+                        </StackPanel>
+                      </ScrollViewer>
+                      <!-- RIGHT: SMART / drive details table, fills full height so it never clips -->
+                      <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                          <RowDefinition Height="Auto" />
+                          <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Name="DriveDetailsLabel" Text="Drive details" Foreground="{DynamicResource MutedBrush}" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6" />
+                        <DataGrid Grid.Row="1" Name="SmartGrid"
+                                  Background="#0E1830" Foreground="{DynamicResource TextBrush}"
+                                  RowBackground="#0E1830" AlternatingRowBackground="#0C1526" AlternationCount="2"
+                                  BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1"
+                                  GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#1B2A45"
+                                  RowHeaderWidth="0" VerticalScrollBarVisibility="Auto"
+                                  AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" CanUserAddRows="False">
+                          <DataGrid.ColumnHeaderStyle>
+                            <Style TargetType="{x:Type DataGridColumnHeader}">
+                              <Setter Property="Background" Value="#13213A" />
+                              <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                              <Setter Property="FontWeight" Value="SemiBold" />
+                              <Setter Property="Padding" Value="8,6" />
+                              <Setter Property="BorderBrush" Value="#1B2A45" />
+                              <Setter Property="BorderThickness" Value="0,0,0,1" />
+                            </Style>
+                          </DataGrid.ColumnHeaderStyle>
+                          <DataGrid.CellStyle>
+                            <Style TargetType="{x:Type DataGridCell}">
+                              <Setter Property="Background" Value="Transparent" />
+                              <Setter Property="BorderThickness" Value="0" />
+                              <Setter Property="Padding" Value="8,5" />
+                              <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                              <Style.Triggers>
+                                <Trigger Property="IsSelected" Value="True">
+                                  <Setter Property="Background" Value="{DynamicResource BlueBrush}" />
+                                  <Setter Property="Foreground" Value="White" />
+                                </Trigger>
+                              </Style.Triggers>
+                            </Style>
+                          </DataGrid.CellStyle>
+                          <DataGrid.Columns>
+                            <DataGridTextColumn Header="Attribute" Binding="{Binding Name}" Width="*" />
+                            <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="120" />
+                            <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100">
+                              <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="{x:Type TextBlock}">
+                                  <Setter Property="FontWeight" Value="SemiBold" />
+                                  <Setter Property="Padding" Value="6,0,0,0" />
+                                  <Setter Property="VerticalAlignment" Value="Center" />
+                                  <Setter Property="Foreground" Value="#94A3B8" />
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding StatusKind}" Value="good"><Setter Property="Foreground" Value="#22C55E" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding StatusKind}" Value="warn"><Setter Property="Foreground" Value="#F59E0B" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding StatusKind}" Value="bad"><Setter Property="Foreground" Value="#EF4444" /></DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                          </DataGrid.Columns>
+                        </DataGrid>
+                      </Grid>
+                    </Grid>
+                  </TabItem>
+                  <TabItem Name="TabSpeed" Header="Speed">
+                    <StackPanel Background="{DynamicResource NavyBrush}" Margin="8">
+                      <TextBlock Name="LblBenchmark" Text="Benchmark result" FontSize="15" FontWeight="SemiBold" />
+                      <TextBlock Name="SpeedVisualText" Text="No speed test completed yet." Margin="0,6,0,8" TextWrapping="Wrap" />
+                      <Grid Margin="0,0,0,10">
+                        <ProgressBar Name="LiveTestBar" Height="24" Minimum="0" Maximum="100" Value="0" />
+                        <TextBlock Name="LiveTestPercentText" Text="Idle" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12" Foreground="White" />
+                      </Grid>
+                      <TextBlock Name="LblSeqWrite" Text="Sequential write" Foreground="{DynamicResource MutedBrush}" />
+                      <ProgressBar Name="SequentialSpeedBar" Height="14" Minimum="0" Maximum="150" Value="0" Margin="0,3,0,8" />
+                      <TextBlock Name="LblRandWrite" Text="Random 4K write" Foreground="{DynamicResource MutedBrush}" />
+                      <ProgressBar Name="RandomSpeedBar" Height="14" Minimum="0" Maximum="20" Value="0" Margin="0,3,0,8" />
+                      <TextBlock Name="SpeedAdviceText" Text="Run Speed test for a Good / Usable / Not recommended rating." TextWrapping="Wrap" />
+                    </StackPanel>
+                  </TabItem>
+                  <TabItem Name="TabScan" Header="Scan">
+                    <StackPanel Background="{DynamicResource NavyBrush}" Margin="8">
+                      <TextBlock Name="LblFsScan" Text="File-system scan" FontSize="15" FontWeight="SemiBold" />
+                      <TextBlock Name="LblScanDesc" Text="Checks the selected drive letter with CHKDSK /scan. It looks for file-system and volume errors. It does not format, clone, erase, or run a full physical bad-sector test." Margin="0,6,0,8" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" />
+                      <Border Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="5" Padding="8" Margin="0,0,0,8">
+                        <StackPanel>
+                          <TextBlock Name="LblWhenUse" Text="When to use it" FontWeight="SemiBold" />
+                          <TextBlock Name="LblScanWhenDesc" Text="Use Scan for a quick, safe read-only check of the file system. It never writes to or formats the drive." Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" />
+                        </StackPanel>
+                      </Border>
+                      <TextBlock Name="ScanStatusText" Text="No scan has been run yet." Margin="0,0,0,8" TextWrapping="Wrap" />
+                      <ProgressBar Name="ScanProgressBar" Height="14" Minimum="0" Maximum="100" Value="0" Margin="0,0,0,8" />
+                      <TextBlock Name="ScanAdviceText" Text="Scan checks logical file-system problems. For a deep physical surface test, a dedicated third-party surface-scan tool can be used." TextWrapping="Wrap" />
+                    </StackPanel>
+                  </TabItem>
+                  <TabItem Name="TabDetails" Header="Details">
+                    <TextBox Name="ToolOutputBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12" Background="#F8FAFC" Foreground="#0F172A" />
+                  </TabItem>
+                </TabControl>
+              </Grid>
+            </Border>
+            <Border Grid.Row="4" Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="6" Padding="8" Margin="0,8,0,0">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="98" />
+                  <ColumnDefinition Width="98" />
+                  <ColumnDefinition Width="98" />
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Name="LblDiagControls" Text="Diagnostic controls" FontWeight="SemiBold" />
+                  <TextBlock Name="LblDiagControlsDesc" Text="Choose a diagnostic tool above, then use Start, Pause, or Stop for that test." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,2,8,0" />
+                </StackPanel>
+                <Button Name="ToolStartButton" Grid.Column="1" Content="Start" Height="34" Margin="0,0,6,0" Style="{StaticResource GreenButtonStyle}" Click="ToolStartButton_Click" />
+                <Button Name="ToolPauseButton" Grid.Column="2" Content="Pause" Height="34" Margin="0,0,6,0" IsEnabled="False" Style="{StaticResource OrangeButtonStyle}" Click="ToolPauseButton_Click" />
+                <Button Name="ToolStopButton" Grid.Column="3" Content="Stop" Height="34" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="ToolStopButton_Click" />
+              </Grid>
+            </Border>
+            <Expander Grid.Row="5" Name="ExpShowLogs" Header="Show logs" IsExpanded="False" Foreground="{DynamicResource TextBrush}" Margin="0,8,0,0">
+              <StackPanel>
+                <Button Name="OpenReportButton" Content="Open last report" HorizontalAlignment="Left" Height="30" Margin="0,6,0,0" IsEnabled="False" Style="{StaticResource GhostButtonStyle}" Click="OpenReportButton_Click" />
+                <TextBox Name="LogBox" Margin="0,6,0,0" Height="150" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12" Background="#F8FAFC" Foreground="#0F172A" />
+              </StackPanel>
+            </Expander>
+            </Grid>
+          </Grid>
+        </Border>
+      </Grid>
+      <Grid Name="MultiBootPanel" Grid.Column="1" Visibility="Collapsed">
+        <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="16" VerticalAlignment="Top">
+          <StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE8FD;" FontFamily="Segoe MDL2 Assets" FontSize="24" VerticalAlignment="Center" Margin="0,0,12,0" />
+              <TextBlock Name="MbPanelTitle" Text="Multi-boot USB" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock Name="MbPanelDesc" Text="Hold many ISOs on one stick — Windows, Linux, rescue tools. Set it up once, then copy ISO files onto the drive and pick one from a menu at boot." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,10,0,0" MaxWidth="640" HorizontalAlignment="Left" />
+            <Button Name="MultiBootStartButton" Content="Set up / manage multi-boot USB" HorizontalAlignment="Left" Margin="0,18,0,0" Height="42" Padding="20,0" Style="{StaticResource GreenButtonStyle}" Click="MultiBootStartButton_Click" />
+            <TextBlock Name="MbPanelNote" Text="Powered by the open-source Ventoy engine — downloaded once and cached for offline use." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,14,0,0" MaxWidth="640" HorizontalAlignment="Left" />
+          </StackPanel>
+        </Border>
+      </Grid>
+      <Grid Name="DownloadIsoPanel" Grid.Column="1" Visibility="Collapsed">
+        <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="16" VerticalAlignment="Top">
+          <StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="24" VerticalAlignment="Center" Margin="0,0,12,0" />
+              <TextBlock Name="DlPanelTitle" Text="Download an ISO" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock Name="DlPanelDesc" Text="Open an official download page, or paste a direct ISO link to download it here with progress. Files are saved to your Downloads folder under their original name." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,10,0,0" MaxWidth="660" HorizontalAlignment="Left" />
+            <TextBlock Name="DlSourcesLabel" Text="Official download pages" Foreground="{DynamicResource MutedBrush}" FontSize="12" FontWeight="SemiBold" Margin="0,16,0,8" />
+            <WrapPanel>
+              <Button Content="Windows 11" Tag="https://www.microsoft.com/software-download/windows11" Margin="0,0,8,8" Style="{StaticResource GhostButtonStyle}" Click="OpenIsoSource_Click" />
+              <Button Content="Windows 10" Tag="https://www.microsoft.com/software-download/windows10" Margin="0,0,8,8" Style="{StaticResource GhostButtonStyle}" Click="OpenIsoSource_Click" />
+              <Button Content="Ubuntu" Tag="https://ubuntu.com/download/desktop" Margin="0,0,8,8" Style="{StaticResource GhostButtonStyle}" Click="OpenIsoSource_Click" />
+              <Button Content="Linux Mint" Tag="https://linuxmint.com/download.php" Margin="0,0,8,8" Style="{StaticResource GhostButtonStyle}" Click="OpenIsoSource_Click" />
+              <Button Content="Debian" Tag="https://www.debian.org/distrib/" Margin="0,0,8,8" Style="{StaticResource GhostButtonStyle}" Click="OpenIsoSource_Click" />
+              <Button Content="Fedora" Tag="https://fedoraproject.org/workstation/download" Margin="0,0,8,8" Style="{StaticResource GhostButtonStyle}" Click="OpenIsoSource_Click" />
+            </WrapPanel>
+            <Border Height="1" Background="{DynamicResource DividerBrush}" Margin="0,8,0,14" />
+            <TextBlock Name="DlUrlHint" Text="Or paste a direct ISO link to download it here:" Foreground="{DynamicResource MutedBrush}" FontSize="13" Margin="0,0,0,6" />
+            <Grid MaxWidth="660" HorizontalAlignment="Left">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+              <TextBox Name="IsoUrlBox" Height="34" MinWidth="532" VerticalContentAlignment="Center" Padding="8,0,0,0" />
+              <Button Name="DownloadIsoButton" Grid.Column="1" Content="Download" Width="120" Margin="8,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="DownloadIsoButton_Click" />
+            </Grid>
+            <Border Height="1" Background="{DynamicResource DividerBrush}" Margin="0,14,0,14" MaxWidth="660" HorizontalAlignment="Left" />
+            <TextBlock Name="DlAutoLabel" Text="Or fetch the latest version automatically:" Foreground="{DynamicResource MutedBrush}" FontSize="13" Margin="0,0,0,6" />
+            <Grid MaxWidth="660" HorizontalAlignment="Left">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+              <ComboBox Name="DistroBox" Height="32" VerticalContentAlignment="Center" />
+              <Button Name="FetchLatestIsoButton" Grid.Column="1" Content="Get latest" Width="120" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="FetchLatestIso_Click" />
+            </Grid>
+            <TextBlock Name="DlSaveHint" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap" MaxWidth="660" HorizontalAlignment="Left" />
+          </StackPanel>
+        </Border>
+      </Grid>
+      <Grid Name="RecoverPanel" Grid.Column="1" Visibility="Collapsed">
+        <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="24" VerticalAlignment="Center" Margin="0,0,12,0" />
+              <TextBlock Name="RecPanelTitle" Text="Recover deleted files" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock Grid.Row="1" Name="RecPanelDesc" Text="Scan an NTFS drive for recently deleted files, tick the ones you want, and recover them with their original names. Fast, read-only scan — your drive is never written to." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,10,0,12" />
+            <StackPanel Grid.Row="2" Margin="0,0,0,8">
+              <Border Background="#0E1830" BorderBrush="#2A3E5E" BorderThickness="1" CornerRadius="10" Padding="10,7">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Name="RecVolumeLabel" Text="Drive to scan" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="2,0,10,0" />
+                  <ComboBox Name="RecoverVolumeBox" Grid.Column="1" Height="32" VerticalAlignment="Center" DropDownOpened="RecoverVolumeBox_DropDownOpened" />
+                  <Button Name="RecoverScanButton" Grid.Column="2" Content="Scan" Width="92" Height="32" Margin="10,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="RecoverScanButton_Click" />
+                  <Button Name="RecoverDeepScanButton" Grid.Column="3" Content="Deep scan" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverDeepScan_Click" ToolTip="Find files by their content signature (header/footer) across the whole drive, even when the file system has no record of them. Best for photos and documents; carved files have no original name." />
+                  <Button Name="RecoverRecycleButton" Grid.Column="4" Content="Recycle Bin" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverRecycle_Click" ToolTip="List files still in the Recycle Bin — original name, folder and date, recovered with a safe copy." />
+                  <Button Name="RecoverPauseButton" Grid.Column="5" Content="Pause" Width="80" Height="32" Margin="8,0,0,0" IsEnabled="False" Style="{StaticResource GhostButtonStyle}" Click="RecoverPause_Click" ToolTip="Pause a long deep scan; press again to resume. Save a session while stopped to continue it later." />
+                  <Button Name="RecoverStopButton" Grid.Column="6" Content="Stop" Width="74" Height="32" Margin="8,0,0,0" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="RecoverStopButton_Click" />
+                  <Button Name="RecoverMoreButton" Grid.Column="7" Content="&#x22EF;" FontSize="16" Width="40" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverMore_Click" ToolTip="More: disk image &amp; sessions">
+                    <Button.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Create disk image…" Click="CreateImage_Click" />
+                        <MenuItem Header="Open image…" Click="OpenImage_Click" />
+                        <Separator />
+                        <MenuItem Header="Save session…" Click="RecoverSaveSession_Click" />
+                        <MenuItem Header="Open session…" Click="RecoverOpenSession_Click" />
+                      </ContextMenu>
+                    </Button.ContextMenu>
+                  </Button>
+                </Grid>
+              </Border>
+              <Grid Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="220" />
+                  <ColumnDefinition Width="150" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Name="RecFilterLabel" Text="Filter" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="0,0,10,0" />
+                <TextBox Name="RecoverSearchBox" Grid.Column="1" Height="28" VerticalContentAlignment="Center" TextChanged="RecoverSearch_Changed" />
+                <ComboBox Name="RecoverTypeBox" Grid.Column="2" Height="28" Margin="8,0,0,0" VerticalContentAlignment="Center" SelectionChanged="RecoverType_Changed" />
+                <Button Name="RecSelectAllButton" Grid.Column="3" Content="Select all" Height="28" Margin="10,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverSelectAll_Click" />
+                <Button Name="RecSelectNoneButton" Grid.Column="4" Content="Select none" Height="28" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverSelectNone_Click" />
+                <TextBlock Grid.Column="5" Name="RecoverStatusText" Text="" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="14,0,0,0" Foreground="{DynamicResource MutedBrush}" TextTrimming="CharacterEllipsis" />
+              </Grid>
+            </StackPanel>
+            <Grid Grid.Row="3">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <DataGrid Name="RecoverGrid" Background="#0E1830" Foreground="#DCE6F4" RowBackground="#0E1830" AlternatingRowBackground="#0C1526" AlternationCount="2" BorderBrush="#23364F" BorderThickness="1" AutoGenerateColumns="False" HeadersVisibility="Column" CanUserAddRows="False" CanUserSortColumns="True" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#16243F" RowHeight="26" ColumnHeaderHeight="32" SelectionChanged="RecoverGrid_SelectionChanged">
+                <DataGrid.ColumnHeaderStyle>
+                  <Style TargetType="DataGridColumnHeader">
+                    <Setter Property="Background" Value="#13213A" />
+                    <Setter Property="Foreground" Value="#8AA0BD" />
+                    <Setter Property="BorderBrush" Value="#2A3E5E" />
+                    <Setter Property="BorderThickness" Value="0,0,1,1" />
+                    <Setter Property="Padding" Value="9,7" />
+                    <Setter Property="FontSize" Value="11" />
+                    <Setter Property="FontWeight" Value="SemiBold" />
+                    <Setter Property="HorizontalContentAlignment" Value="Left" />
+                  </Style>
+                </DataGrid.ColumnHeaderStyle>
+                <DataGrid.CellStyle>
+                  <Style TargetType="DataGridCell">
+                    <Setter Property="Background" Value="Transparent" />
+                    <Setter Property="BorderThickness" Value="0" />
+                    <Setter Property="Foreground" Value="#DCE6F4" />
+                    <Setter Property="Padding" Value="4,2" />
+                    <Style.Triggers>
+                      <Trigger Property="IsSelected" Value="True">
+                        <Setter Property="Background" Value="{DynamicResource BlueBrush}" />
+                        <Setter Property="Foreground" Value="White" />
+                      </Trigger>
+                    </Style.Triggers>
+                  </Style>
+                </DataGrid.CellStyle>
+                <DataGrid.Columns>
+                  <DataGridCheckBoxColumn Header="Recover" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="62" />
+                  <DataGridTextColumn Header="File name" Binding="{Binding Name}" Width="2*" IsReadOnly="True" />
+                  <DataGridTextColumn Header="Folder" Binding="{Binding Path}" Width="2*" IsReadOnly="True" />
+                  <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" SortMemberPath="Size" Width="90" IsReadOnly="True" />
+                  <DataGridTextColumn Header="Modified" Binding="{Binding ModifiedText}" SortMemberPath="ModifiedUtc" Width="130" IsReadOnly="True" />
+                  <DataGridTemplateColumn Header="Status" Width="175" SortMemberPath="RecoverPercent">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                          <Ellipse Width="9" Height="9" VerticalAlignment="Center" Margin="0,0,7,0">
+                            <Ellipse.Style>
+                              <Style TargetType="Ellipse">
+                                <Setter Property="Fill" Value="#64748B" />
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding StatusKind}" Value="good"><Setter Property="Fill" Value="#22C55E" /></DataTrigger>
+                                  <DataTrigger Binding="{Binding StatusKind}" Value="warn"><Setter Property="Fill" Value="#F59E0B" /></DataTrigger>
+                                  <DataTrigger Binding="{Binding StatusKind}" Value="bad"><Setter Property="Fill" Value="#EF4444" /></DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </Ellipse.Style>
+                          </Ellipse>
+                          <TextBlock Text="{Binding Status}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                          <TextBlock Text="{Binding PercentText}" VerticalAlignment="Center" Margin="6,0,0,0" Opacity="0.7" />
+                        </StackPanel>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                </DataGrid.Columns>
+              </DataGrid>
+              <Border Grid.Column="1" Width="248" Margin="10,0,0,0" Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="6" Padding="8">
+                <StackPanel>
+                  <TextBlock Name="RecPreviewLabel" Text="Preview" Foreground="{DynamicResource MutedBrush}" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,6" />
+                  <Border Height="210" Background="#0B1220" CornerRadius="4">
+                    <Image Name="RecoverPreviewImage" Stretch="Uniform" Margin="4" />
+                  </Border>
+                  <TextBlock Name="RecPreviewHint" Text="Select an image to preview it — handy for naming-less deep-scan results." Foreground="{DynamicResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0" />
+                  <Expander Name="RecHexExpander" Header="Hex / header" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,8,0,0" IsExpanded="False">
+                    <Border Background="#0B1220" CornerRadius="4" Padding="6" Margin="0,4,0,0" MaxHeight="170">
+                      <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                        <TextBlock Name="RecHexText" FontFamily="Consolas" FontSize="10" Foreground="#9FB3C8" TextWrapping="NoWrap" />
+                      </ScrollViewer>
+                    </Border>
+                  </Expander>
+                </StackPanel>
+              </Border>
+            </Grid>
+            <Grid Grid.Row="4" Margin="0,10,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Name="RecPanelNote" Text="Tip: recover to a DIFFERENT drive than the one you are scanning, so you don't overwrite the very files you're rescuing. On SSDs, TRIM may have already erased recently deleted data." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
+              <Button Grid.Column="1" Name="RecoverGalleryButton" Content="Gallery" Height="32" Margin="0,0,8,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverGallery_Click" ToolTip="See the found photos as thumbnails — tick the ones you want, then Recover." />
+              <Button Grid.Column="2" Name="RecoverZipButton" Content="Recover to ZIP…" Height="32" Style="{StaticResource GhostButtonStyle}" Click="RecoverZip_Click" ToolTip="Recover the ticked files straight into a single .zip archive." />
+              <Button Grid.Column="3" Name="RecoverButton" Content="Recover selected" Width="150" Height="32" Margin="8,0,0,0" IsEnabled="False" Style="{StaticResource OrangeButtonStyle}" Click="RecoverButton_Click" />
+            </Grid>
+          </Grid>
+        </Border>
+      </Grid>
+      <Grid Name="CleanPanel" Grid.Column="1" Visibility="Collapsed">
+        <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
+          <TabControl Background="Transparent" BorderThickness="0">
+            <TabControl.Resources>
+              <Style TargetType="{x:Type TabItem}">
+                <Setter Property="Background" Value="{DynamicResource PanelAltBrush}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource Border2Brush}" />
+                <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="Padding" Value="14,6" />
+                <Setter Property="Margin" Value="0,0,4,0" />
+                <Setter Property="Template">
+                  <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TabItem}">
+                      <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6,6,0,0" SnapsToDevicePixels="True">
+                        <ContentPresenter x:Name="contentPresenter" ContentSource="Header" Focusable="False" RecognizesAccessKey="True" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                          <Setter TargetName="bd" Property="Background" Value="{DynamicResource BlueBrush}" />
+                          <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource BlueBrush}" />
+                          <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                          <Setter TargetName="bd" Property="Background" Value="{DynamicResource PanelBrush}" />
+                          <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                        </Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </Setter.Value>
+                </Setter>
+              </Style>
+            </TabControl.Resources>
+          <TabItem Name="CleanTab1Header" Header="Clean traces">
+          <StackPanel Margin="0,12,0,0">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE894;" FontFamily="Segoe MDL2 Assets" FontSize="24" VerticalAlignment="Center" Margin="0,0,12,0" />
+              <TextBlock Name="CleanPanelTitle" Text="Clean traces" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock Name="CleanPanelDesc" Text="Reclaim disk space and remove the usage traces Windows and your apps leave behind. Tick what to clear, hit Analyze to see how much you'll free, then Clean now. Nothing ever leaves your PC." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,10,0,12" MaxWidth="680" HorizontalAlignment="Left" />
+            <Border MaxWidth="700" HorizontalAlignment="Left" Background="{DynamicResource BoxBrush}" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="6" Padding="14,10">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                  <Button Name="CleanRecommendedButton" Content="Recommended" Height="28" Padding="12,0" Style="{StaticResource GhostButtonStyle}" Click="CleanRecommended_Click" />
+                  <CheckBox Name="CleanAdvancedToggle" Content="Show advanced" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center" Margin="12,0,0,0" Click="CleanAdvancedToggle_Click" />
+                  <CheckBox Name="CleanToRecycleCheck" Content="Send to Recycle Bin (so I can restore)" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center" Margin="16,0,0,0" />
+                </StackPanel>
+                <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                  <ItemsControl Name="CleanCatItems">
+                    <ItemsControl.GroupStyle>
+                      <GroupStyle>
+                        <GroupStyle.HeaderTemplate>
+                          <DataTemplate>
+                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource MutedBrush}" Margin="0,10,0,3" />
+                          </DataTemplate>
+                        </GroupStyle.HeaderTemplate>
+                      </GroupStyle>
+                    </ItemsControl.GroupStyle>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Margin="0,3">
+                          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                          <CheckBox Grid.Column="0" IsChecked="{Binding IsChecked, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Width="9" Height="9" VerticalAlignment="Center" Margin="0,0,7,0">
+                              <Ellipse.Style>
+                                <Style TargetType="Ellipse">
+                                  <Setter Property="Fill" Value="#22C55E" />
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Risk}" Value="1"><Setter Property="Fill" Value="#F59E0B" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding Risk}" Value="2"><Setter Property="Fill" Value="#EF4444" /></DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </Ellipse.Style>
+                            </Ellipse>
+                            <TextBlock Text="{Binding Label}" Foreground="{DynamicResource TextBrush}" VerticalAlignment="Center" ToolTip="{Binding Desc}" />
+                          </StackPanel>
+                          <TextBlock Grid.Column="2" Text="{Binding SizeText}" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center" />
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </ScrollViewer>
+              </StackPanel>
+            </Border>
+            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+              <Button Name="CleanAnalyzeButton" Content="Analyze" Width="120" Height="32" Style="{StaticResource GhostButtonStyle}" Click="CleanAnalyze_Click" />
+              <Button Name="CleanRunButton" Content="Clean now" MinWidth="140" Height="32" Margin="8,0,0,0" Padding="14,0" Style="{StaticResource OrangeButtonStyle}" Click="CleanRun_Click" />
+              <Button Name="CleanSelectAllButton" Content="Select all" Width="100" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="CleanSelectAll_Click" />
+              <Button Name="CleanSecureDeleteButton" Content="Secure delete…" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="CleanSecureDelete_Click" />
+              <TextBlock Name="CleanStatusText" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="13" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap" />
+            </StackPanel>
+            <TextBlock Name="CleanNote" Text="Safe by design: only standard cache and temporary locations are cleared, and files in use are skipped. Emptying the Recycle Bin permanently deletes its contents. Some items (Prefetch, Windows Update cache) need administrator rights." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,12,0,0" MaxWidth="680" HorizontalAlignment="Left" />
+          </StackPanel>
+          </TabItem>
+          <TabItem Name="CleanTab2Header" Header="Disk space">
+            <Grid Margin="0,12,0,0">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="190" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Name="AnalyzePanelDesc" Text="Find what's eating your disk: scan any folder or drive, see a size map of its sub-folders, the biggest files, and duplicate copies you can safely delete. Read-only until you choose to delete." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,0,0,4" />
+              <StackPanel Grid.Row="1" Margin="0,8,0,0">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Name="AnalyzeFolderLabel" Text="Folder to scan" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="0,0,10,0" />
+                  <TextBox Name="AnalyzePathBox" Grid.Column="1" Height="30" VerticalContentAlignment="Center" IsReadOnly="True" />
+                  <Button Name="AnalyzeBrowseButton" Grid.Column="2" Content="Browse…" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeBrowse_Click" />
+                  <Button Name="AnalyzeScanButton" Grid.Column="3" Content="Scan" Width="96" Height="32" Margin="8,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="AnalyzeScan_Click" />
+                  <Button Name="AnalyzeStopButton" Grid.Column="4" Content="Stop" Width="80" Height="32" Margin="8,0,0,0" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="AnalyzeStop_Click" />
+                </Grid>
+                <Grid Margin="0,6,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Name="AnalyzeMasterLabel" Text="Protected folder" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="0,0,10,0" />
+                  <TextBox Name="AnalyzeMasterBox" Grid.Column="1" Height="28" VerticalContentAlignment="Center" IsReadOnly="True" ToolTip="Files inside this folder are scanned but never deleted — your master copies stay safe." />
+                  <Button Name="AnalyzeMasterBrowseButton" Grid.Column="2" Content="Browse…" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeMasterBrowse_Click" />
+                  <Button Name="AnalyzeMasterClearButton" Grid.Column="3" Content="Clear" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeMasterClear_Click" />
+                </Grid>
+              </StackPanel>
+              <Grid Grid.Row="2" Margin="0,12,0,6">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                  <StackPanel Name="AnalyzeBreadcrumb" Orientation="Horizontal" VerticalAlignment="Center" />
+                </ScrollViewer>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+                  <TextBlock Name="AnalyzeColorLensLabel" Text="Colour by:" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0" />
+                  <ComboBox Name="AnalyzeColorLens" Width="130" Height="26" />
+                </StackPanel>
+              </Grid>
+              <Border Grid.Row="3" Background="#0B1220" CornerRadius="4">
+                <Grid>
+                  <Canvas Name="AnalyzeTreemap" ClipToBounds="True" Background="Transparent" SizeChanged="AnalyzeTreemap_SizeChanged" />
+                  <TextBlock Name="AnalyzeEmptyHint" Foreground="{DynamicResource MutedBrush}" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Left" MaxWidth="620" LineHeight="22"
+                             Text="This shows what's filling your disk and the duplicate copies you can safely remove.&#x0a;&#x0a;1.  Pick a folder above and press Scan.&#x0a;2.  The map shows which sub-folders use the most space; the Largest files tab lists the biggest files.&#x0a;3.  Open the Duplicate files tab and click 'Select duplicates (keep 1)' — the green row is kept, the red ones are extra copies.&#x0a;4.  Press 'Delete selected' — files go to the Recycle Bin, so you can restore them if needed.&#x0a;&#x0a;Nothing on your PC is changed until you press Delete." />
+                </Grid>
+              </Border>
+              <Grid Grid.Row="4" Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TabControl Grid.Column="0" Background="Transparent" BorderThickness="0">
+                  <TabItem Name="AnalyzeBigFilesTab" Header="Largest files">
+                    <DataGrid Name="BigFilesGrid" Margin="0,8,0,0" Background="#F8FAFC" Foreground="#0F172A" AutoGenerateColumns="False" HeadersVisibility="Column" CanUserAddRows="False" CanUserSortColumns="True" GridLinesVisibility="Horizontal" RowHeight="24" SelectionChanged="AnalyzeGrid_SelectionChanged" MouseDoubleClick="AnalyzeRow_DoubleClick">
+                      <DataGrid.Columns>
+                        <DataGridCheckBoxColumn Header="Del" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="44" />
+                        <DataGridTextColumn Header="File name" Binding="{Binding Name}" Width="2*" IsReadOnly="True" />
+                        <DataGridTextColumn Header="Folder" Binding="{Binding Folder}" Width="3*" IsReadOnly="True" />
+                        <DataGridTextColumn Header="Modified" Binding="{Binding DateText}" SortMemberPath="Modified" Width="130" IsReadOnly="True" />
+                        <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" SortMemberPath="Size" Width="100" IsReadOnly="True" />
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </TabItem>
+                  <TabItem Name="AnalyzeDupesTab" Header="Duplicate files">
+                    <DataGrid Name="DupesGrid" Margin="0,8,0,0" Background="#F8FAFC" Foreground="#0F172A" AutoGenerateColumns="False" HeadersVisibility="Column" CanUserSortColumns="True" CanUserAddRows="False" GridLinesVisibility="Horizontal" RowHeight="24" SelectionChanged="AnalyzeGrid_SelectionChanged" MouseDoubleClick="AnalyzeRow_DoubleClick">
+                      <DataGrid.RowStyle>
+                        <Style TargetType="{x:Type DataGridRow}">
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding Keep}" Value="True">
+                              <Setter Property="Background" Value="#DCFCE7" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Selected}" Value="True">
+                              <Setter Property="Background" Value="#FEE2E2" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsReference}" Value="True">
+                              <Setter Property="Background" Value="#DBEAFE" />
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </DataGrid.RowStyle>
+                      <DataGrid.Columns>
+                        <DataGridCheckBoxColumn Header="Del" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="44">
+                          <DataGridCheckBoxColumn.ElementStyle>
+                            <Style TargetType="CheckBox">
+                              <Setter Property="HorizontalAlignment" Value="Center" />
+                              <Setter Property="IsEnabled" Value="{Binding CanDelete}" />
+                            </Style>
+                          </DataGridCheckBoxColumn.ElementStyle>
+                          <DataGridCheckBoxColumn.EditingElementStyle>
+                            <Style TargetType="CheckBox">
+                              <Setter Property="HorizontalAlignment" Value="Center" />
+                              <Setter Property="IsEnabled" Value="{Binding CanDelete}" />
+                            </Style>
+                          </DataGridCheckBoxColumn.EditingElementStyle>
+                        </DataGridCheckBoxColumn>
+                        <DataGridTextColumn Header="Group" Binding="{Binding Group}" SortMemberPath="Group" Width="60" IsReadOnly="True" />
+                        <DataGridTextColumn Header="File name" Binding="{Binding Name}" Width="2*" IsReadOnly="True" />
+                        <DataGridTextColumn Header="Folder" Binding="{Binding Folder}" Width="3*" IsReadOnly="True" />
+                        <DataGridTextColumn Header="Modified" Binding="{Binding DateText}" SortMemberPath="Modified" Width="130" IsReadOnly="True" />
+                        <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" SortMemberPath="Size" Width="100" IsReadOnly="True" />
+                      </DataGrid.Columns>
+                    </DataGrid>
+                  </TabItem>
+                </TabControl>
+                <Border Grid.Column="1" Width="250" Margin="10,8,0,0" Background="#0B1220" BorderBrush="{DynamicResource Border2Brush}" BorderThickness="1" CornerRadius="6">
+                  <Grid Margin="6">
+                    <Grid.RowDefinitions>
+                      <RowDefinition Height="*" />
+                      <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Name="AnalyzePreviewHint" Grid.Row="0" Text="Select a file to preview" Foreground="{DynamicResource MutedBrush}" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" Margin="6" />
+                    <Image Name="AnalyzePreviewImage" Grid.Row="0" Stretch="Uniform" />
+                    <TextBlock Name="AnalyzePreviewInfo" Grid.Row="1" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="2,8,2,2" />
+                  </Grid>
+                </Border>
+              </Grid>
+              <StackPanel Grid.Row="5" Margin="0,10,0,0">
+                <Border Name="AnalyzeUndoBar" Visibility="Collapsed" Background="#1E293B" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="6" Padding="10,6" Margin="0,0,0,8" HorizontalAlignment="Left">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Name="AnalyzeUndoText" Text="" Foreground="{DynamicResource TextBrush}" FontSize="13" VerticalAlignment="Center" Margin="0,0,12,0" />
+                    <Button Name="AnalyzeUndoButton" Content="Undo" Height="26" Padding="14,0" Style="{StaticResource GreenButtonStyle}" Click="AnalyzeUndo_Click" />
+                    <Button Name="AnalyzeUndoDismissButton" Content="✕" Height="26" Width="28" Margin="6,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeUndoDismiss_Click" />
+                  </StackPanel>
+                </Border>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                  <Border Width="13" Height="13" Background="#22C55E" CornerRadius="3" VerticalAlignment="Center" />
+                  <TextBlock Name="AnLegendKeep" Text="kept" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="6,0,18,0" VerticalAlignment="Center" />
+                  <Border Width="13" Height="13" Background="#EF4444" CornerRadius="3" VerticalAlignment="Center" />
+                  <TextBlock Name="AnLegendDel" Text="will be moved to the Recycle Bin (you can restore it)" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="6,0,0,0" VerticalAlignment="Center" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal">
+                <Button Name="AnalyzeSmartCleanButton" Content="Smart clean" Height="30" Margin="0,0,8,0" Style="{StaticResource GreenButtonStyle}" Click="AnalyzeSmartClean_Click" />
+                <Button Name="AnalyzeKeepFirstButton" Content="Select duplicates (keep 1)" Height="30" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeKeepFirst_Click" />
+                <Button Name="AnalyzeGalleryButton" Content="Gallery" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeGallery_Click" />
+                <Button Name="AnalyzeSimilarButton" Content="Similar photos" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeSimilar_Click" />
+                <Button Name="AnalyzeOpenFolderButton" Content="Open folder" Height="30" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeOpenFolder_Click" />
+                <Button Name="AnalyzeDeleteButton" Content="Delete selected" Height="30" Margin="8,0,0,0" Style="{StaticResource OrangeButtonStyle}" Click="AnalyzeDelete_Click" />
+                <TextBlock Name="AnalyzeStatusText" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="13" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </StackPanel>
+            </Grid>
+          </TabItem>
+          </TabControl>
+        </Border>
+      </Grid>
+    </Grid>
+    <Border Grid.Row="2" Background="#070B12" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="0,1,0,0">
+      <Grid Margin="24,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="112" />
+          <ColumnDefinition Width="112" />
+          <ColumnDefinition Width="180" />
+        </Grid.ColumnDefinitions>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Name="StatusText" Text="Ready." FontSize="14" />
+          <TextBlock Name="StartHintText" Text="" FontSize="13" FontWeight="SemiBold" Foreground="{StaticResource OrangeBrush}" TextWrapping="Wrap" Visibility="Collapsed" Margin="0,2,0,0" />
+          <TextBlock Name="ProgressStatsText" Text="Progress: 0.0% | Elapsed: 00:00:00 | Remaining: --:--:--" FontSize="13" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
+          <Grid Margin="0,8,24,0">
+            <ProgressBar Name="ProgressBar" Height="22" Minimum="0" Maximum="100" />
+            <TextBlock Name="ProgressPercentText" Text="0%" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
+          </Grid>
+        </StackPanel>
+        <Button Name="PauseButton" Grid.Column="1" Content="Pause" Height="44" Margin="0,0,8,0" VerticalAlignment="Center" IsEnabled="False" Style="{StaticResource OrangeButtonStyle}" Click="PauseButton_Click" />
+        <Button Name="StopButton" Grid.Column="2" Content="Stop" Height="44" Margin="0,0,8,0" VerticalAlignment="Center" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="StopButton_Click" />
+        <Button Name="StartButton" Grid.Column="3" Content="Create USB" Height="44" VerticalAlignment="Center" Style="{StaticResource GreenButtonStyle}" Click="StartButton_Click" />
+      </Grid>
+    </Border>
+    <Border Name="SettingsOverlay" Grid.Row="0" Grid.RowSpan="3" Background="#CC020617" Visibility="Collapsed" Panel.ZIndex="50">
+      <Border Width="520" MaxHeight="600" VerticalAlignment="Center" HorizontalAlignment="Center" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="12" Padding="0">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Background="{DynamicResource BlueBrush}" CornerRadius="12,12,0,0" Padding="18,14">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="18" VerticalAlignment="Center" Foreground="White" />
+                <TextBlock Name="SettingsTitleText" Text="Settings" FontSize="18" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center" Margin="10,0,0,0" />
+              </StackPanel>
+              <Button Grid.Column="1" Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Width="34" Height="30" Background="#33FFFFFF" BorderBrush="#33FFFFFF" Click="SettingsClose_Click" />
+            </Grid>
+          </Border>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="18,14">
+            <StackPanel>
+              <Expander Name="AccentColorExpander" Header="Accent color" IsExpanded="False" Foreground="{DynamicResource TextBrush}" FontSize="15" FontWeight="SemiBold">
+                <WrapPanel Name="AccentPresetsPanel" Margin="0,10,0,0" />
+              </Expander>
+              <TextBlock Name="SettingsAppearanceLabel" Text="Appearance" FontSize="15" FontWeight="SemiBold" Margin="0,4,0,8" />
+              <WrapPanel Margin="0,0,0,4">
+                <Button Name="ThemeDarkButton" Content="Dark" Tag="dark" Width="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Name="ThemeLightButton" Content="Light" Tag="light" Width="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Name="ThemeSystemButton" Content="System" Tag="system" Width="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
+              </WrapPanel>
+              <TextBlock Name="SettingsThemeLabel" Text="Base theme (dark accents)" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,8" />
+              <WrapPanel>
+                <Button Content="Midnight" Tag="0F172A" Width="120" Margin="0,0,8,8" Click="BaseTheme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Content="Carbon" Tag="0A0A0F" Width="120" Margin="0,0,8,8" Click="BaseTheme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Content="Slate" Tag="1A2233" Width="120" Margin="0,0,8,8" Click="BaseTheme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Content="Deep Plum" Tag="1A1024" Width="120" Margin="0,0,8,8" Click="BaseTheme_Click" Style="{StaticResource GhostButtonStyle}" />
+              </WrapPanel>
+              <Expander Name="CustomAccentExpander" Header="Custom accent" IsExpanded="False" Foreground="{DynamicResource TextBrush}" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,0">
+                <Grid Margin="0,10,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <Border Grid.Column="0" Width="64" Height="64" CornerRadius="8" Margin="0,0,14,0">
+                    <Border.Background>
+                      <SolidColorBrush x:Name="CustomPreviewBrush" Color="#2563EB" />
+                    </Border.Background>
+                  </Border>
+                  <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <Grid Margin="0,0,0,4">
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                      <TextBlock Text="R" VerticalAlignment="Center" Foreground="#F87171" FontWeight="SemiBold" />
+                      <Slider Grid.Column="1" Name="RedSlider" Minimum="0" Maximum="255" Value="37" ValueChanged="ColorSlider_Changed" />
+                    </Grid>
+                    <Grid Margin="0,0,0,4">
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                      <TextBlock Text="G" VerticalAlignment="Center" Foreground="#4ADE80" FontWeight="SemiBold" />
+                      <Slider Grid.Column="1" Name="GreenSlider" Minimum="0" Maximum="255" Value="99" ValueChanged="ColorSlider_Changed" />
+                    </Grid>
+                    <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                      <TextBlock Text="B" VerticalAlignment="Center" Foreground="#60A5FA" FontWeight="SemiBold" />
+                      <Slider Grid.Column="1" Name="BlueSlider" Minimum="0" Maximum="255" Value="235" ValueChanged="ColorSlider_Changed" />
+                    </Grid>
+                    <Button Name="ApplyCustomButton" Content="Apply custom accent" Margin="0,12,0,0" HorizontalAlignment="Left" FontWeight="SemiBold" Click="ApplyCustomAccent_Click" />
+                  </StackPanel>
+                </Grid>
+              </Expander>
+
+              <Expander Name="BehaviorExpander" Header="Behavior" IsExpanded="False" Foreground="{DynamicResource TextBrush}" FontSize="15" FontWeight="SemiBold" Margin="0,14,0,0">
+                <StackPanel Margin="0,10,0,0">
+                  <CheckBox Name="SoundOnFinishCheck" Content="Play a sound when an operation finishes" IsChecked="True" FontWeight="Normal" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,4" />
+                  <CheckBox Name="FlashOnFinishCheck" Content="Flash the taskbar when finished (if window is in background)" IsChecked="True" FontWeight="Normal" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,4" />
+                  <CheckBox Name="RememberTaskCheck" Content="Remember the last used task on startup" FontWeight="Normal" Foreground="{DynamicResource TextBrush}" />
+                </StackPanel>
+              </Expander>
+
+              <Expander Name="LogsExpander" Header="Files &amp; logs" IsExpanded="False" Foreground="{DynamicResource TextBrush}" FontSize="15" FontWeight="SemiBold" Margin="0,14,0,0">
+                <WrapPanel Margin="0,10,0,0">
+                  <Button Name="OpenLogsFolderButton" Content="Open logs folder" Margin="0,0,8,8" FontWeight="SemiBold" Style="{StaticResource GhostButtonStyle}" Click="OpenLogsFolder_Click" />
+                  <Button Name="OpenLastReportSettingsButton" Content="Open last report" Margin="0,0,8,8" FontWeight="SemiBold" Style="{StaticResource GhostButtonStyle}" Click="OpenReportButton_Click" />
+                </WrapPanel>
+              </Expander>
+
+              <Border Height="1" Background="{DynamicResource Border2Brush}" Margin="0,16,0,0" />
+              <TextBlock Name="SettingsAboutLabel" Text="About &amp; support" FontSize="15" FontWeight="SemiBold" Margin="0,14,0,8" />
+              <TextBlock Name="AboutVersionText" Text="DriveForge 4.1.0" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
+              <TextBlock Name="AboutPrivacyText" Text="Free and portable. No ads, no telemetry, no data collection — your files never leave your PC." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
+              <TextBlock Name="AboutEngineText" Text="Clone/backup engine: wimlib 1.14.4 (GPLv3), bundled inside the app." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
+              <TextBlock Name="SettingsSupportText" Text="DriveForge is free. If it helped you, you can support its development — thank you!" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,8" />
+              <Button Name="DonateButton" Content="☕  Support on Ko-fi" HorizontalAlignment="Left" Style="{StaticResource OrangeButtonStyle}" Click="OpenDonate_Click" ToolTip="Opens the DriveForge Ko-fi page in your browser (pay by card, Apple/Google Pay or PayPal — no account needed). The app never asks for or handles payment details itself." />
+              <CheckBox Name="ShowDonatePromptCheck" Content="Show a support message after a successful operation" IsChecked="True" Foreground="{DynamicResource MutedBrush}" Margin="0,10,0,0" />
+            </StackPanel>
+          </ScrollViewer>
+          <Border Grid.Row="2" Background="{DynamicResource BoxBrush}" CornerRadius="0,0,12,12" Padding="18,12">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <Button Grid.Column="0" Name="ResetThemeButton" Content="Reset to default" HorizontalAlignment="Left" Style="{StaticResource GhostButtonStyle}" Click="ResetTheme_Click" />
+              <Button Grid.Column="1" Name="SettingsDoneButton" Content="Done" Width="100" Style="{StaticResource GreenButtonStyle}" Click="SettingsClose_Click" />
+            </Grid>
+          </Border>
+        </Grid>
+      </Border>
+    </Border>
+  </Grid>
+</Window>

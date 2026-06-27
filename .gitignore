@@ -1,0 +1,18 @@
+# --- Build outputs & artifacts (regenerable — excluded from the source backup) ---
+bin/
+obj/
+publish-obf/
+publish-step104/
+WinUsbMaker-clean-log/
+*.log
+
+# Single-file / self-contained publish leftovers
+*.exe
+*.dll
+*.pdb
+
+# IDE / OS junk
+.vs/
+*.user
+Thumbs.db
+desktop.ini

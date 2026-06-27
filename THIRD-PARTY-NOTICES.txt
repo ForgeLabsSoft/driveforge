@@ -1,0 +1,82 @@
+DriveForge — Third-Party Notices
+==============================
+
+DriveForge's own code is licensed under the GNU General Public License v3.0
+(GPL-3.0) — see LICENSE.txt. DriveForge also uses the following third-party
+components, each licensed separately under its own terms.
+
+----------------------------------------------------------------------------
+1) wimlib 1.14.4
+----------------------------------------------------------------------------
+Copyright (C) 2012-2023 Eric Biggers and contributors.
+
+License:
+  - The wimlib library is licensed under the GNU Lesser General Public
+    License, version 3 (LGPL-3.0) or any later version.
+  - The wimlib-imagex command-line program is licensed under the GNU General
+    Public License, version 3 (GPL-3.0) or any later version.
+
+Project / source code:
+  - Website:  https://wimlib.net/
+  - Source:   https://wimlib.net/downloads/   (and https://github.com/ebiggers/wimlib)
+
+How DriveForge uses it:
+  DriveForge bundles the official, UNMODIFIED Windows x86-64 binary build of
+  wimlib 1.14.4, distributed as the archive:
+      wimlib-1.14.4-windows-x86_64-bin.zip
+      SHA-256: 6D99E242BFBC6D36FC987D433D63772180551B7F2D8DE43E9561535A3E2C16D8
+
+  The archive is embedded inside DriveForge.exe, extracted at first use to
+      %LocalAppData%\DriveForge\Tools\wimlib\
+  and invoked as a SEPARATE PROCESS. DriveForge does not statically or
+  dynamically link wimlib into its own executable; it only runs the
+  wimlib-imagex.exe tool at arm's length.
+
+License texts:
+  The official wimlib archive contains its own full license texts
+  (COPYING.txt, COPYING.GPLv3, COPYING.LGPLv3). These files are extracted
+  together with the wimlib binaries into the folder above, so a copy of the
+  applicable GPL-3.0 and LGPL-3.0 license texts always accompanies the
+  distributed binaries. The canonical texts are also available at:
+      https://www.gnu.org/licenses/gpl-3.0.txt
+      https://www.gnu.org/licenses/lgpl-3.0.txt
+
+Obtaining the corresponding source:
+  Because DriveForge redistributes the official, unmodified wimlib binaries,
+  the corresponding source code for exactly this version is available from
+  the wimlib project at https://wimlib.net/ (look for wimlib 1.14.4).
+
+----------------------------------------------------------------------------
+2) Ventoy
+----------------------------------------------------------------------------
+Copyright (C) longpanda and the Ventoy contributors.
+
+License:
+  - Ventoy is licensed under the GNU General Public License, version 3
+    (GPL-3.0). Some components bundled by Ventoy carry their own compatible
+    licenses; see the Ventoy project for the full breakdown.
+
+Project / source code:
+  - Website:  https://www.ventoy.net/
+  - Source:   https://github.com/ventoy/Ventoy
+
+How DriveForge uses it:
+  Ventoy powers the optional "multi-boot USB" feature. DriveForge does NOT
+  bundle Ventoy inside DriveForge.exe. When the user chooses to create a
+  multi-boot drive, DriveForge downloads the official Ventoy Windows release
+  from the project's GitHub releases at runtime and runs Ventoy2Disk.exe as a
+  SEPARATE PROCESS. Ventoy is neither statically nor dynamically linked into
+  DriveForge.
+
+Obtaining the corresponding source:
+  The corresponding source for Ventoy is available from the Ventoy project at
+  https://github.com/ventoy/Ventoy (match the version DriveForge downloaded).
+
+----------------------------------------------------------------------------
+Trademark / brand
+----------------------------------------------------------------------------
+The "DriveForge" name and the DriveForge logo/icon (logo-256.png, icon.ico) are
+brand assets of ForgeLabsSoft and are NOT licensed under the GPL-3.0. The GPL-3.0
+covers the source code only. If you fork or redistribute this software, use a
+different name and logo and do not imply endorsement by or affiliation with
+ForgeLabsSoft.
