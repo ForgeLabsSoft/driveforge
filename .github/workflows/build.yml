@@ -1,0 +1,69 @@
+name: build
+
+# Builds DriveForge.exe from source on a clean GitHub-hosted Windows runner.
+# This gives SignPath (and anyone) a verifiable, reproducible build from the public
+# source. On a version tag (vX.Y.Z) it also publishes a GitHub Release with the exe
+# and its SHA-256. Code signing (SignPath) will be added as a step here once approved.
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed only to create a Release on a version tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore WinUsbMaker.csproj
+
+      - name: Publish (self-contained single file, win-x64)
+        run: >
+          dotnet publish WinUsbMaker.csproj
+          -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+
+      - name: Stage DriveForge.exe + checksum
+        shell: pwsh
+        run: |
+          $src = "bin/Release/net10.0-windows/win-x64/publish/WinUsbMaker.exe"
+          if (-not (Test-Path $src)) { throw "Build output not found: $src" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $src dist/DriveForge.exe
+          $hash = (Get-FileHash dist/DriveForge.exe -Algorithm SHA256).Hash
+          "$hash  DriveForge.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          $mb = [math]::Round((Get-Item dist/DriveForge.exe).Length / 1MB, 1)
+          Write-Host "DriveForge.exe = $mb MB, SHA-256 = $hash"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriveForge
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (on version tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }}
+          dist/DriveForge.exe dist/SHA256SUMS.txt
+          --title "DriveForge ${{ github.ref_name }}"
+          --notes "Automated build from source on GitHub Actions. Verify the SHA-256 in SHA256SUMS.txt."
