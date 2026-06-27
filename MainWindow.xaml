@@ -1216,7 +1216,7 @@
 
               <Border Height="1" Background="{DynamicResource Border2Brush}" Margin="0,16,0,0" />
               <TextBlock Name="SettingsAboutLabel" Text="About &amp; support" FontSize="15" FontWeight="SemiBold" Margin="0,14,0,8" />
-              <TextBlock Name="AboutVersionText" Text="DriveForge 4.1.0" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
+              <TextBlock Name="AboutVersionText" Text="DriveForge 4.1.1" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
               <TextBlock Name="AboutPrivacyText" Text="Free and portable. No ads, no telemetry, no data collection — your files never leave your PC." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
               <TextBlock Name="AboutEngineText" Text="Clone/backup engine: wimlib 1.14.4 (GPLv3), bundled inside the app." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
               <TextBlock Name="SettingsSupportText" Text="DriveForge is free. If it helped you, you can support its development — thank you!" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,8" />

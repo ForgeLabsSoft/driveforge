@@ -29,6 +29,12 @@ requirements / Microsoft-account requirement for fresh installs, verify data
 after writing, compact images, and **scheduled automatic clones** (an
 unattended backup that runs when the drive is connected).
 
+## Download
+
+Grab the latest **`DriveForge.exe`** from the [**Releases**](https://github.com/ForgeLabsSoft/driveforge/releases/latest) page — a single self-contained file, no install.
+
+> **Code signing:** DriveForge has applied to the [SignPath Foundation](https://signpath.org) free code-signing program for open-source projects. Until a signed build is published, Windows SmartScreen may warn on first run — click **More info → Run anyway**. Builds are produced from source by GitHub Actions; verify the SHA-256 in `SHA256SUMS.txt`.
+
 ## Privacy
 
 - **No ads, no telemetry, no accounts.** Nothing about you is collected or sent anywhere.
