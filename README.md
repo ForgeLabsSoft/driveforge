@@ -48,6 +48,18 @@ unattended backup that runs when the drive is connected).
 4. (Optional) tick options in step 4 — hover any option for an explanation.
 5. Press the green button. When it finishes, boot the target PC and pick the drive from the boot menu (usually F12 / F9 / Esc / F2).
 
+## Note: antivirus during PC cloning
+
+When you clone a running Windows install to another drive, the clone needs a one-time
+first-boot repair of the built-in Store apps. Third-party antivirus installed inside the
+clone would start during that offline first boot and block the repair. To let it finish,
+DriveForge can **temporarily disable third-party antivirus services in the clone's offline
+registry** (never on your running PC) and writes a `Re-Enable-Antivirus.cmd` into the clone
+so you can turn protection back on — or reinstall it — afterward.
+
+This only happens on the clone path when a first-boot repair is needed (a *faithful* clone
+skips it), it is reversible, and **Windows Defender is left untouched**.
+
 ## License
 
 - DriveForge is **free and open source software**, licensed under the **GNU General
