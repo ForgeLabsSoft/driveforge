@@ -919,9 +919,9 @@ public partial class MainWindow
 				if (want <= maxHeader) break;
 				byte[] chunk = vr.Read(pos, want);
 				int limit = want - maxHeader;
-				for (int i = 0; i < limit; i++)
+				for (int i = 0; i < limit; i += 512) // pos is always 512-aligned, so step whole sectors: deleted data starts on a sector boundary; far less loop overhead than testing every byte
 				{
-					if (((pos + i) & 511) != 0) continue; // deleted file data starts on a sector boundary -> far fewer false hits + faster
+					// every i lands on a sector boundary because the loop steps by 512 and pos is 512-aligned
 					Sig? hit = null;
 					foreach (var s in CarveSigs) if (StartsWith(chunk, i, s.Header)) { hit = s; break; }
 					if (hit == null) continue;
@@ -947,7 +947,7 @@ public partial class MainWindow
 							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
 						});
 						long advance = (fileStart + len) - pos;
-						if (advance > i + 1) { i = (int)Math.Min(limit - 1, advance - 1); }
+						if (advance > i + 512) { long next = (advance + 511) & ~511L; i = (int)(Math.Min((long)limit, next) - 512); } // resume at the next sector past the carved file (-512 offsets the loop's += 512)
 					}
 				}
 				pos += block;
@@ -993,9 +993,9 @@ public partial class MainWindow
 				if (want <= maxHeader) break;
 				byte[] chunk = vr.Read(pos, want);
 				int limit = want - maxHeader;
-				for (int i = 0; i < limit; i++)
+				for (int i = 0; i < limit; i += 512) // pos is always 512-aligned, so step whole sectors: deleted data starts on a sector boundary; far less loop overhead than testing every byte
 				{
-					if (((pos + i) & 511) != 0) continue; // deleted file data starts on a sector boundary -> far fewer false hits + faster
+					// every i lands on a sector boundary because the loop steps by 512 and pos is 512-aligned
 					Sig? hit = null;
 					foreach (var s in CarveSigs) if (StartsWith(chunk, i, s.Header)) { hit = s; break; }
 					if (hit == null) continue;
@@ -1021,7 +1021,7 @@ public partial class MainWindow
 							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
 						});
 						long advance = (fileStart + len) - pos;
-						if (advance > i + 1) { i = (int)Math.Min(limit - 1, advance - 1); }
+						if (advance > i + 512) { long next = (advance + 511) & ~511L; i = (int)(Math.Min((long)limit, next) - 512); } // resume at the next sector past the carved file (-512 offsets the loop's += 512)
 					}
 				}
 				pos += block;

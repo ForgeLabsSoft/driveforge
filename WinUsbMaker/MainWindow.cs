@@ -519,7 +519,7 @@ public partial class MainWindow : Window, IComponentConnector
 			sb.AppendLine("\nNote: this drive may be slow for Windows To Go.");
 		sb.AppendLine("\nContinue?");
 
-		return MessageBox.Show(sb.ToString(), "Confirm — please review", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
+		return MessageBox.Show(sb.ToString(), "Confirm — please review", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
 	}
 
 	// Lists the partitions/volumes currently on a disk (letter, label, size, used) for the confirm dialog,
@@ -5885,8 +5885,8 @@ exit 0
 
 		// On flash media, overwriting free space is unreliable (wear-levelling/TRIM) and wears the drive — be honest.
 		var media = DetectWipeMedia(disk);
-		if (media == WipeMedia.Ssd && MessageBox.Show(L("WipeSsdWarn"), L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
-		if (media == WipeMedia.Unknown && MessageBox.Show(L("WipeUnknownWarn"), L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+		if (media == WipeMedia.Ssd && MessageBox.Show(L("WipeSsdWarn"), L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+		if (media == WipeMedia.Unknown && MessageBox.Show(L("WipeUnknownWarn"), L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 
 		// Single zero pass is sufficient on any modern drive (NIST SP 800-88) — flag it recommended, multi-pass as not safer.
 		string[] methods = { L("AmFreeZero") + " — " + L("WipeRecommended"), L("AmFreeRandom"), L("AmFree3") + " — " + L("WipeNotMoreSecure") };
@@ -6262,7 +6262,7 @@ exit 0
 
 		string contents = await GetDiskContentsAsync(disk.Number);
 		if (MessageBox.Show(string.Format(L("MbWipeConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-				L("MbWipeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+				L("MbWipeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		// Method dropdown. Each maps to a list of overwrite passes (0 = zeros, 1 = ones/0xFF, 2 = random).
@@ -6416,13 +6416,13 @@ exit 0
 		if (await LooksLikeWindowsIsoAsync(sourcePath))
 		{
 			if (MessageBox.Show(L("Mb025"),
-					"DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+					"DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
 				return;
 		}
 
 		string contents = await GetDiskContentsAsync(disk.Number);
 		if (MessageBox.Show(string.Format(L("MbWriteIsoConfirm"), Path.GetFileName(sourcePath), FormatBytes(isoSize), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-				L("MbWriteIsoTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+				L("MbWriteIsoTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		bool failed = false;
@@ -7260,7 +7260,7 @@ exit 0
 		string sel = string.Join("\n", cats.Select(c => "• " + c.Label));
 		// Extra warning when an advanced (red) privacy item is included.
 		string warn = cats.Any(c => c.Risk == 2) ? "\n\n⚠ " + L("CleanRedWarn") : "";
-		if (MessageBox.Show(this, L("CleanConfirmBody") + "\n\n" + sel + warn, L("CleanConfirmTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+		if (MessageBox.Show(this, L("CleanConfirmBody") + "\n\n" + sel + warn, L("CleanConfirmTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
 		bool toRecycle = CleanToRecycleCheck?.IsChecked == true;
 		_cleanBusy = true; isBusy = true;
 		if (CleanAnalyzeButton != null) CleanAnalyzeButton.IsEnabled = false;
@@ -7347,7 +7347,7 @@ exit 0
 		string path = dlg.FileName;
 		var media = MediaForPath(path);
 		string body = string.Format(L("SecureDelBody"), Path.GetFileName(path)) + (media != WipeMedia.Hdd ? "\n\n" + L("SecureDelSsdNote") : "");
-		if (MessageBox.Show(this, body, L("SecureDelTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+		if (MessageBox.Show(this, body, L("SecureDelTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		_cleanBusy = true; isBusy = true;
 		try
 		{
@@ -8176,7 +8176,7 @@ exit 0
 		if (paths.Count == 0) { if (AnalyzeStatusText != null) AnalyzeStatusText.Text = L("CleanNothingSelected"); return; }
 		long totalSel = paths.Sum(p => p.Size);
 		string confirmMsg = string.Format(L("AnRecycleConfirm"), paths.Count, FormatBytes(totalSel)) + (protectedSets > 0 ? "\n\n" + string.Format(L("AnKeepProtected"), protectedSets) : "");
-		if (MessageBox.Show(this, confirmMsg, L("AnalyzeDeleteTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+		if (MessageBox.Show(this, confirmMsg, L("AnalyzeDeleteTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
 		_analyzerBusy = true; isBusy = true;
 		try
 		{
@@ -9022,7 +9022,7 @@ exit 0
 		int src = PhysicalDiskOfVolume(_lastScan.Letter);
 		int dst = PhysicalDiskOfPath(destPath);
 		if (src >= 0 && src == dst)
-			return MessageBox.Show(L("RfSameDiskBlocked"), L("RfFilesTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK;
+			return MessageBox.Show(L("RfSameDiskBlocked"), L("RfFilesTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK;
 		return false;
 	}
 
@@ -9225,7 +9225,7 @@ exit 0
 				if (free < need * 2)
 				{
 					if (MessageBox.Show(string.Format(L("RfZipMayNotFit"), FormatBytes(need), FormatBytes(need * 2), FormatBytes(free)),
-							L("RfFilesTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+							L("RfFilesTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 						return;
 				}
 			}
@@ -9591,13 +9591,13 @@ exit 0
 			if (act == 0) { await OpenVentoyDataPartitionAsync(disk.Number); return; }
 			if (act == 1) update = true;
 			else if (MessageBox.Show(string.Format(L("MbReinstallConfirm"), disk.Number),
-					L("MbMultiBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+					L("MbMultiBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		}
 		else
 		{
 			string contents = await GetDiskContentsAsync(disk.Number);
 			if (MessageBox.Show(string.Format(L("MbMultiBootSetup"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-					L("MbMultiBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+					L("MbMultiBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		}
 
 		string? exe;
@@ -9987,7 +9987,7 @@ exit 0
 		int[] fills = sel.Value switch { 1 => new[] { 2 }, 2 => new[] { 0, 2, 0 }, 3 => new[] { 0, 1, 2, 0, 1, 2, 2 }, _ => new[] { 0 } };
 
 		if (MessageBox.Show(string.Format(L("MbShredConfirm"), files.Count, fills.Length),
-				L("MbShredTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+				L("MbShredTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		long totalBytes = 0;
@@ -10082,7 +10082,7 @@ exit 0
 
 		string contents = await GetDiskContentsAsync(disk.Number);
 		if (MessageBox.Show(string.Format(L("MbFormatConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-				L("MbFormatTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+				L("MbFormatTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		string[] fsOptions = { L("AmFsNtfs"), L("AmFsExfat"), L("AmFsFat32") };
@@ -10133,7 +10133,7 @@ exit 0
 	{
 		string contents = await GetDiskContentsAsync(disk.Number);
 		return MessageBox.Show(string.Format(L("PtConfirmBody"), action, disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-			"DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK;
+			"DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) == MessageBoxResult.OK;
 	}
 
 	private async void PartitionTool_Click(object sender, RoutedEventArgs e)
@@ -10224,7 +10224,7 @@ exit 0
 			string? amt = ShowInputDialog(L("PtShrink"), string.Format(L("PtShrinkPrompt"), letter, maxMb), maxMb > 0 ? maxMb.ToString() : "1024");
 			if (amt == null) return;
 			if (!long.TryParse(amt.Trim(), out long mb) || mb <= 0) { MessageBox.Show(L("PtBadAmount"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-			if (MessageBox.Show(string.Format(L("PtShrinkConfirm"), letter, mb), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+			if (MessageBox.Show(string.Format(L("PtShrinkConfirm"), letter, mb), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 			cmd = $"select volume {letter}\r\nshrink desired={mb}\r\nexit\r\n";
 			working = string.Format(L("PtResizeWorking"), letter);
 		}
@@ -10373,7 +10373,7 @@ exit 0
 		}
 
 		if (MessageBox.Show(string.Format(L("MvConfirm"), pick.Value + 1, p.Fs + " " + FormatBytes(p.Sectors * 512L), FormatBytes(p.StartLBA * 512L), FormatBytes(newStart * 512L)),
-				L("MvTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+				L("MvTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 
 		bool moved = false;
 		try
@@ -10575,7 +10575,7 @@ exit 0
 		}
 
 		if (MessageBox.Show(string.Format(L("MvConfirm"), pick.Value + 1, p.name + " " + FormatBytes(count * g.SectorSize), FormatBytes(p.first * g.SectorSize), FormatBytes(newFirst * g.SectorSize)),
-				L("MvTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+				L("MvTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 
 		bool moved = false;
 		try
@@ -10659,7 +10659,7 @@ exit 0
 		char letter;
 		if (letters.Count == 1) letter = letters[0];
 		else { int? pick = ShowChooserDialog(L("PtDelete"), L("PtPickVolume"), letters.Select(l => l + ":").ToArray(), 0); if (pick == null) return; letter = letters[pick.Value]; }
-		if (MessageBox.Show(string.Format(L("PtDeleteConfirm"), letter), L("PtDelete"), MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+		if (MessageBox.Show(string.Format(L("PtDeleteConfirm"), letter), L("PtDelete"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtDelete")));
@@ -10701,7 +10701,7 @@ exit 0
 		if (!GuardSystemDisk(disk)) return;
 		bool toGpt = !(disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true);
 		string target = toGpt ? "gpt" : "mbr";
-		if (MessageBox.Show(string.Format(L("PtConvertConfirm"), disk.Number, disk.PartitionStyle, target.ToUpperInvariant()), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+		if (MessageBox.Show(string.Format(L("PtConvertConfirm"), disk.Number, disk.PartitionStyle, target.ToUpperInvariant()), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtConvert")));
@@ -10847,7 +10847,7 @@ exit 0
 	{
 		if (!GuardSystemDisk(disk)) return;
 		string contents = await GetDiskContentsAsync(disk.Number);
-		if (MessageBox.Show(string.Format(L("SsdConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+		if (MessageBox.Show(string.Format(L("SsdConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		try
 		{
 			SetBusy(busy: true, string.Format(L("SsdWorking"), disk.Number));

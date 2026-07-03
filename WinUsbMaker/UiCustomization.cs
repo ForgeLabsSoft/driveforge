@@ -80,6 +80,12 @@ public partial class MainWindow
 		}
 
 		(string savedLang, string? savedAccent, string? savedBase, string savedTheme) = LoadSettings();
+		// First launch (no settings file yet): default to the OS display language so users see their own language.
+		if (!File.Exists(SettingsFilePath))
+		{
+			string osLang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+			if (Array.FindIndex(Languages, l => l.Code == osLang) >= 0) { savedLang = osLang; }
+		}
 		int langIndex = Array.FindIndex(Languages, l => l.Code == savedLang);
 		uiCustomizationReady = true;
 		LanguageBox.SelectedIndex = langIndex >= 0 ? langIndex : 0;
