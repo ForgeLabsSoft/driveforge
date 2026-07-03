@@ -79,6 +79,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private sealed record DiskItem(int Number, string FriendlyName, string BusType, string MediaType, string HealthStatus, string OperationalStatus, long Size, string PartitionStyle, bool IsSystem, IReadOnlyList<char> DriveLetters)
 	{
+		// Captured at scan time so a destructive write can re-check the disk number still points to the same
+		// physical drive (numbers can shift when drives are unplugged/replugged between the scan and the write).
+		public string Serial { get; init; } = "";
+
 		public bool IsLikelyUsbOrExternal
 		{
 			get
@@ -519,7 +523,47 @@ public partial class MainWindow : Window, IComponentConnector
 			sb.AppendLine("\nNote: this drive may be slow for Windows To Go.");
 		sb.AppendLine("\nContinue?");
 
-		return MessageBox.Show(sb.ToString(), "Confirm — please review", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
+		if (MessageBox.Show(sb.ToString(), "Confirm — please review", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+			return false;
+		// Last line of defence: make sure the drive at this number is still the exact one the user reviewed.
+		return await VerifyTargetDiskUnchangedAsync(disk);
+	}
+
+	// Disks are addressed by number, but Windows can renumber them if a drive is unplugged/replugged between the
+	// scan and the write. Re-read the target's identity immediately before erasing it and refuse if it changed.
+	private async Task<bool> VerifyTargetDiskUnchangedAsync(DiskItem disk)
+	{
+		try
+		{
+			string script =
+				"$d = Get-Disk -Number " + disk.Number + " -ErrorAction SilentlyContinue;" +
+				"if(-not $d){ 'MISSING'; return };" +
+				"[pscustomobject]@{ Size=[int64]$d.Size; Serial=$d.SerialNumber; Name=$d.FriendlyName } | ConvertTo-Json -Compress";
+			string raw = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument(script));
+			if (string.IsNullOrWhiteSpace(raw) || raw.Contains("MISSING")) return FailTargetDiskChanged();
+			string outp = ExtractJsonPayload(raw);
+			if (string.IsNullOrWhiteSpace(outp)) return FailTargetDiskChanged();
+			using JsonDocument doc = JsonDocument.Parse(outp);
+			JsonElement root = doc.RootElement;
+			long curSize = root.TryGetProperty("Size", out var sz) && sz.ValueKind == JsonValueKind.Number ? sz.GetInt64() : -1L;
+			string curSerial = GetJsonString(root, "Serial", "").Trim();
+			// Size is the strongest always-present signal; the serial confirms identity when the drive exposes one.
+			if (curSize != disk.Size) return FailTargetDiskChanged();
+			if (disk.Serial.Length > 0 && curSerial.Length > 0 && !string.Equals(curSerial, disk.Serial, StringComparison.OrdinalIgnoreCase))
+				return FailTargetDiskChanged();
+			return true;
+		}
+		catch
+		{
+			// If we truly cannot re-verify, fail safe — cancelling is always better than writing to the wrong disk.
+			return FailTargetDiskChanged();
+		}
+	}
+
+	private bool FailTargetDiskChanged()
+	{
+		MessageBox.Show(L("MbDiskChanged"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);
+		return false;
 	}
 
 	// Lists the partitions/volumes currently on a disk (letter, label, size, used) for the confirm dialog,
@@ -5682,6 +5726,7 @@ exit 0
 			bool jsonBool = GetJsonBool(item, "IsBoot");
 			bool jsonBool2 = GetJsonBool(item, "IsSystem");
 			string jsonString6 = GetJsonString(item, "PartitionStyle", "Unknown");
+			string jsonSerial = GetJsonString(item, "SerialNumber", "").Trim();
 			List<char> list2 = new List<char>();
 			if (item.TryGetProperty("DriveLetters", out var value2))
 			{
@@ -5715,11 +5760,11 @@ exit 0
 			}
 			if (jsonBool || jsonBool2)
 			{
-				list.Add(new DiskItem(@int, jsonString, jsonString2, jsonString3, jsonString4, jsonString5, int2, jsonString6, IsSystem: true, list2));
+				list.Add(new DiskItem(@int, jsonString, jsonString2, jsonString3, jsonString4, jsonString5, int2, jsonString6, IsSystem: true, list2) { Serial = jsonSerial });
 			}
 			else
 			{
-				list.Add(new DiskItem(@int, jsonString, jsonString2, jsonString3, jsonString4, jsonString5, int2, jsonString6, IsSystem: false, list2));
+				list.Add(new DiskItem(@int, jsonString, jsonString2, jsonString3, jsonString4, jsonString5, int2, jsonString6, IsSystem: false, list2) { Serial = jsonSerial });
 			}
 		}
 		return (from disk in list
@@ -6289,6 +6334,7 @@ exit 0
 			default: fills = new[] { 0 }; break;                     // Zero 1
 		}
 		string label = methods[sel.Value].Split('—')[0].Trim();
+		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 
 		bool failed = false;
 		try
@@ -6435,7 +6481,8 @@ exit 0
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, string.Format(L("BzWriteIso"), disk.Number));
 			ProgressBar.Value = 0.0;
-			await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
+			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
+				await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false);
@@ -10095,6 +10142,7 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("BzFormat"), disk.Number, fs.ToUpperInvariant()));
+			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 			string script = $"select disk {disk.Number}\r\nclean\r\ncreate partition primary\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n";
 			await File.WriteAllTextAsync(scriptPath, script, Encoding.ASCII);
 			string outp = await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(scriptPath));
@@ -10848,6 +10896,7 @@ exit 0
 		if (!GuardSystemDisk(disk)) return;
 		string contents = await GetDiskContentsAsync(disk.Number);
 		if (MessageBox.Show(string.Format(L("SsdConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 		try
 		{
 			SetBusy(busy: true, string.Format(L("SsdWorking"), disk.Number));
