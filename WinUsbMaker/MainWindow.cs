@@ -2916,12 +2916,12 @@ if ($failed -eq 0) {
   New-Item -ItemType File -Force -Path $donePath | Out-Null
   if (Test-Path $startupCmd) { Remove-Item -LiteralPath $startupCmd -Force -ErrorAction SilentlyContinue }
   if (Test-Path $startupVbs) { Remove-Item -LiteralPath $startupVbs -Force -ErrorAction SilentlyContinue }
-  # Repair finished. In SYSTEM mode (elevated, via the boot service) restore the antivirus we disabled
-  # on the clone so the user ends up with WORKING protection and no 'communication failure' from the AV UI.
+  # Repair finished. Re-enable the antivirus we disabled on the clone (redundant with the boot service's
+  # guaranteed restore) using the NON-INTERACTIVE script so it can never hang on a prompt. SYSTEM mode only.
   if (-not $UserMode) {
-    $reenable = Join-Path $repairRoot 'Re-Enable-Antivirus.cmd'
+    $reenable = Join-Path $repairRoot 'Restore-Antivirus-Auto.cmd'
     if (Test-Path $reenable) {
-      try { & $reenable | Out-Null } catch {}
+      try { & ""$env:SystemRoot\System32\cmd.exe"" /c ""$reenable"" | Out-Null } catch {}
       Add-Content -Path $logPath -Value ""[$modeName] Antivirus re-enabled after repair (reboot to activate).""
     }
   }
@@ -3085,6 +3085,22 @@ $svcDone   = Join-Path $repairRoot 'DriveForgeRepairSvc.done'
 $repairScript = Join-Path $repairRoot 'FirstBootAppRepair.ps1'
 try { & ""$env:SystemRoot\System32\sc.exe"" delete DriveForgeRepairSvc 2>$null | Out-Null } catch {}
 New-Item -ItemType File -Force -Path $svcDone -ErrorAction SilentlyContinue | Out-Null
+# Re-enable the third-party antivirus we temporarily disabled on this clone. Done HERE, as SYSTEM,
+# guaranteed at first boot and INDEPENDENTLY of the AppX repair result, so protection is never left off
+# (even if the repair fails or only the per-user pass runs). Changing a service's Start value takes effect
+# on the next reboot - it does not start the service now, so it does not interfere with this boot's repair.
+$avRestore = Join-Path $repairRoot 'Restore-Antivirus-Auto.cmd'
+$avDone    = Join-Path $repairRoot 'RestoreAntivirus.done'
+$avLog     = Join-Path $repairRoot 'DriveForge-antivirus.log'
+if ((Test-Path $avRestore) -and -not (Test-Path $avDone)) {
+    try {
+        & ""$env:SystemRoot\System32\cmd.exe"" /c ""$avRestore"" | Out-Null
+        New-Item -ItemType File -Force -Path $avDone -ErrorAction SilentlyContinue | Out-Null
+        Add-Content -Path $avLog -Value ""[Service] Antivirus re-enabled (reboot to activate protection): $(Get-Date -Format o)""
+    } catch {
+        Add-Content -Path $avLog -Value ""[Service] Antivirus re-enable failed: $($_.Exception.Message)""
+    }
+}
 if (-not (Test-Path $repairScript)) { exit 0 }
 # Spawn the real system-level AppX repair detached. It is its own process (not tied to this
 # service's lifetime), so SCM terminating the service does not kill it. FirstBootAppRepair.ps1
@@ -5106,12 +5122,23 @@ exit 0
 			{
 				File.WriteAllText(Path.Combine(publicDesktop, "Re-Enable-Antivirus.cmd"), cmd.ToString(), Encoding.ASCII);
 			}
+			// Non-interactive twin used by the first-boot SYSTEM service to re-enable the antivirus
+			// AUTOMATICALLY and UNCONDITIONALLY (no admin-check, no pause) regardless of whether the AppX
+			// repair succeeded. Changing a service's Start value takes effect on the next reboot.
+			StringBuilder auto = new StringBuilder();
+			auto.AppendLine("@echo off");
+			auto.AppendLine("REM Auto-restore of the third-party antivirus DriveForge temporarily disabled on this clone.");
+			foreach (KeyValuePair<string, int> kv in restored)
+			{
+				auto.AppendLine("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\" + kv.Key + "\" /v Start /t REG_DWORD /d " + kv.Value + " /f >nul 2>&1");
+			}
+			File.WriteAllText(Path.Combine(repairFolder, "Restore-Antivirus-Auto.cmd"), auto.ToString(), Encoding.ASCII);
 		}
 		catch (Exception ex)
 		{
 			Log("Antivirus neutralization: restore script not written: " + ex.Message);
 		}
-		Log($"Antivirus neutralization: disabled {restored.Count} third-party AV service(s) on the clone so first-boot repair is not blocked. Re-Enable-Antivirus.cmd placed on the clone Desktop.");
+		Log($"Antivirus neutralization: disabled {restored.Count} third-party AV service(s) on the clone so first-boot repair is not blocked. The clone's SYSTEM first-boot service re-enables them automatically and unconditionally (takes effect after a reboot); a manual Re-Enable-Antivirus.cmd is also placed on the clone Desktop as a fallback.");
 	}
 
 	private async Task MarkPortableWindowsAsync(char windowsLetter)
