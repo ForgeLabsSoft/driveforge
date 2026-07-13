@@ -8,7 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 
-namespace WinUsbMaker;
+namespace DriveForge;
 
 // UI customization: multi-language localization + live theming (accent colour + base theme).
 // Kept in a separate partial-class file so the cloning engine in MainWindow.cs is untouched.
@@ -269,12 +269,17 @@ public partial class MainWindow
 		bool restoreMode = mode == ModeRestoreSavedClone;
 		if (SourceHelpText != null)
 		{
-			SourceHelpText.Text = isoWriteMode ? L("DescIsoWrite") : backupMode ? L("DescBackup") : cloneMode ? L("DescClone")
+			SourceHelpText.Text = isoWriteMode ? L("DescIsoWrite") : backupMode ? (L("DescBackup") + "\n\n" + L("DescBackupVhdxHint")) : cloneMode ? L("DescClone")
 				: restoreMode ? L("DescRestore") : L("DescInstall");
 		}
 		// Step-2 heading: keep the per-mode override alive after a language switch (the generic FindName loop resets it).
 		if (Step2Title != null) Step2Title.Text = isoWriteMode ? L("Step2IsoImage") : restoreMode ? L("Step2ImageFile") : L("Step2Title");
 		if (BootModeText != null) BootModeText.Text = L("BootModeText");
+		// Export-to-VHDX panel: its controls have x:Names that don't match string keys, so ApplyLanguage's FindName
+		// loop skips them. Re-localize here so switching language while the panel is open updates it immediately.
+		if (ExPanelTitle != null) ExPanelTitle.Text = L("TbExportVhdx");
+		if (ExPanelDesc != null) ExPanelDesc.Text = L("SbExportVhdxS") + "\n\n" + L("ExportVhdxBackupHint");
+		if (ExportVhdxRunButton != null) ExportVhdxRunButton.Content = L("TbExportVhdx");
 		if (StartButton != null)
 		{
 			StartButton.Content = backupMode ? L("StartBackup") : cloneMode ? L("StartClone")
@@ -366,7 +371,7 @@ public partial class MainWindow
 	private void ApplyAccent(Color color, bool persist = true)
 	{
 		MutateBrush("BlueBrush", color);
-		if (RedSlider != null) { RedSlider.Value = color.R; GreenSlider.Value = color.G; BlueSlider.Value = color.B; }
+		if (RedSlider != null && GreenSlider != null && BlueSlider != null) { RedSlider.Value = color.R; GreenSlider.Value = color.G; BlueSlider.Value = color.B; }
 		if (CustomPreviewBrush != null) { CustomPreviewBrush.Color = color; }
 		if (persist) { SaveSettings(); }
 	}
@@ -415,10 +420,14 @@ public partial class MainWindow
 		hex = hex.TrimStart('#');
 		if (hex.Length == 6)
 		{
-			return Color.FromRgb(
-				Convert.ToByte(hex.Substring(0, 2), 16),
-				Convert.ToByte(hex.Substring(2, 2), 16),
-				Convert.ToByte(hex.Substring(4, 2), 16));
+			try
+			{
+				return Color.FromRgb(
+					Convert.ToByte(hex.Substring(0, 2), 16),
+					Convert.ToByte(hex.Substring(2, 2), 16),
+					Convert.ToByte(hex.Substring(4, 2), 16));
+			}
+			catch { /* corrupted (non-hex) settings value — fall back to the default accent below */ }
 		}
 		return Color.FromRgb(0x25, 0x63, 0xEB);
 	}
@@ -458,7 +467,10 @@ public partial class MainWindow
 		{
 			Directory.CreateDirectory(Path.GetDirectoryName(SettingsFilePath)!);
 			string accent = Resources["BlueBrush"] is SolidColorBrush a ? ColorToHex(a.Color) : "2563EB";
-			string baseTheme = Resources["NavyBrush"] is SolidColorBrush n ? ColorToHex(n.Color) : "0F172A";
+			// In Light mode the NavyBrush holds a light value; don't overwrite the user's saved DARK base with it.
+			string baseTheme = IsLightTheme(currentThemeMode)
+				? (LoadSettings().baseTheme ?? "0F172A")
+				: (Resources["NavyBrush"] is SolidColorBrush n ? ColorToHex(n.Color) : "0F172A");
 			File.WriteAllLines(SettingsFilePath, new[]
 			{
 				"lang=" + currentLanguage,

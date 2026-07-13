@@ -3,7 +3,7 @@ bin/
 obj/
 publish-obf/
 publish-step104/
-WinUsbMaker-clean-log/
+DriveForge-clean-log/
 *.log
 
 # Single-file / self-contained publish leftovers

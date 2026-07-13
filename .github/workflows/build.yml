@@ -14,7 +14,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed only to create a Release on a version tag
+  contents: write      # needed only to create a Release on a version tag
+  id-token: write      # for build-provenance attestation
+  attestations: write  # for build-provenance attestation
 
 jobs:
   build:
@@ -29,19 +31,20 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore
-        run: dotnet restore WinUsbMaker.csproj
+        run: dotnet restore DriveForge.csproj
 
       - name: Publish (self-contained single file, win-x64)
         run: >
-          dotnet publish WinUsbMaker.csproj
+          dotnet publish DriveForge.csproj
           -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
 
       - name: Stage DriveForge.exe + checksum
         shell: pwsh
         run: |
-          $src = "bin/Release/net10.0-windows/win-x64/publish/WinUsbMaker.exe"
+          $src = "bin/Release/net10.0-windows/win-x64/publish/DriveForge.exe"
           if (-not (Test-Path $src)) { throw "Build output not found: $src" }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item $src dist/DriveForge.exe
@@ -49,6 +52,12 @@ jobs:
           "$hash  DriveForge.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
           $mb = [math]::Round((Get-Item dist/DriveForge.exe).Length / 1MB, 1)
           Write-Host "DriveForge.exe = $mb MB, SHA-256 = $hash"
+
+      - name: Attest build provenance (on version tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/DriveForge.exe
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -62,8 +71,6 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create ${{ github.ref_name }}
-          dist/DriveForge.exe dist/SHA256SUMS.txt
-          --title "DriveForge ${{ github.ref_name }}"
-          --notes "Automated build from source on GitHub Actions. Verify the SHA-256 in SHA256SUMS.txt."
+        run: |
+          $notes = if (Test-Path CHANGELOG.md) { @("--notes-file","CHANGELOG.md") } else { @("--notes","Automated build from source on GitHub Actions. Verify the SHA-256 in SHA256SUMS.txt, and the build provenance with 'gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge'.") }
+          gh release create ${{ github.ref_name }} dist/DriveForge.exe dist/SHA256SUMS.txt --title "DriveForge ${{ github.ref_name }}" @notes

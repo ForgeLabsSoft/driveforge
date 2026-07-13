@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
   <PropertyGroup>
-    <AssemblyName>WinUsbMaker</AssemblyName>
+    <AssemblyName>DriveForge</AssemblyName>
+    <RootNamespace>DriveForge</RootNamespace>
     <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
     <OutputType>WinExe</OutputType>
     <UseWPF>True</UseWPF>
@@ -18,8 +19,8 @@
     <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
-    <EmbeddedResource Include="WinUsbMaker\Resources\wimlib-1.14.4-windows-x86_64-bin.zip">
-      <LogicalName>WinUsbMaker.wimlib.zip</LogicalName>
+    <EmbeddedResource Include="DriveForge\Resources\wimlib-1.14.4-windows-x86_64-bin.zip">
+      <LogicalName>DriveForge.wimlib.zip</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup />

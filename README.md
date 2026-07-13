@@ -15,13 +15,19 @@ Free • Portable (no install) • No ads • No telemetry • Works offline
 ## What it does
 
 DriveForge is a single-file Windows tool that turns common, normally-complicated
-disk jobs into a few clicks:
+disk jobs into a few clicks. Think of it as **a bootable-USB maker + a PC-clone tool + an undeleter +
+a drive doctor, in one portable exe** — free, offline, in 17 languages.
 
 - **Create a Windows USB** from an ISO / WIM / ESD (BIOS + UEFI bootable).
 - **Clone this PC → portable USB / external drive** (Windows To Go style) — boots like your own PC, with your apps and settings.
 - **Clone this PC → internal disk** (a normal Windows install on another drive).
 - **Back up this PC to an image file (.wim)** — full or incremental restore points.
 - **Restore a saved image** back onto a drive.
+- **Recover deleted files** — undelete on NTFS / exFAT / FAT, plus a deep-scan "carving" mode that finds files even after the filesystem entry is gone.
+- **Bootable USB from any ISO** — write Linux or any disk-image ISO straight to a stick.
+- **Multi-boot USB** — put many ISOs on one stick and pick at boot (Ventoy).
+- **Securely erase a drive**, wipe free space, or clean usage traces — with a wipe certificate.
+- **Partition tools** — create, delete, resize, move, convert (MBR ↔ GPT), set active, find lost partitions.
 - **Drive Diagnostic Center** — health, SMART, speed test, file-system scan, repair, and a portable tool kit.
 
 Extra options: BitLocker encryption with a saved recovery key, bypass Windows 11
@@ -33,7 +39,11 @@ unattended backup that runs when the drive is connected).
 
 Grab the latest **`DriveForge.exe`** from the [**Releases**](https://github.com/ForgeLabsSoft/driveforge/releases/latest) page — a single self-contained file, no install.
 
-> **Code signing:** DriveForge has applied to the [SignPath Foundation](https://signpath.org) free code-signing program for open-source projects. Until a signed build is published, Windows SmartScreen may warn on first run — click **More info → Run anyway**. Builds are produced from source by GitHub Actions; verify the SHA-256 in `SHA256SUMS.txt`.
+> **Code signing:** DriveForge has applied to the [SignPath Foundation](https://signpath.org) free code-signing program for open-source projects. Until a signed build is published, Windows SmartScreen may warn on first run — click **More info → Run anyway**. Builds are produced from source by GitHub Actions; verify the SHA-256 in `SHA256SUMS.txt`, and verify the build provenance cryptographically with:
+>
+> ```
+> gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge
+> ```
 
 ## Privacy
 

@@ -10,7 +10,7 @@ using System.Windows;
 using Microsoft.Win32.SafeHandles;
 using Forms = System.Windows.Forms;
 
-namespace WinUsbMaker;
+namespace DriveForge;
 
 // File "undelete" for NTFS and exFAT volumes. Scans the file-system metadata for deleted file records, lists
 // them with their ORIGINAL name, path, size and date, lets the user pick which to recover, and rebuilds each
@@ -208,12 +208,16 @@ public partial class MainWindow
 	// Opens whichever source a scan came from: a live volume, or a disk-image file.
 	private VolumeReader OpenSource(NtfsScanResult g) => string.IsNullOrEmpty(g.ImagePath) ? OpenVolume(g.Letter) : new VolumeReader(g.ImagePath);
 
-	private static void ApplyFixup(byte[] rec, int baseOff, int recSize, int bytesPerSector)
+	// Returns false if a sector's update-sequence sentinel does NOT match the record USN — a torn / partially-updated
+	// record whose sector tails hold stale bytes. Callers that must not parse inconsistent data (the destructive clone)
+	// skip such a record; the recovery scanner ignores the result (best-effort). true = consistent / nothing to verify.
+	private static bool ApplyFixup(byte[] rec, int baseOff, int recSize, int bytesPerSector)
 	{
 		int usaOff = BitConverter.ToUInt16(rec, baseOff + 0x04);
 		int usaCount = BitConverter.ToUInt16(rec, baseOff + 0x06);
-		if (usaCount < 1) return;
+		if (usaCount < 1) return true;
 		ushort usn = BitConverter.ToUInt16(rec, baseOff + usaOff);
+		bool consistent = true;
 		for (int i = 1; i < usaCount; i++)
 		{
 			int sectorEnd = baseOff + i * bytesPerSector - 2;
@@ -224,7 +228,9 @@ public partial class MainWindow
 				rec[sectorEnd] = rec[usaEntry];
 				rec[sectorEnd + 1] = rec[usaEntry + 1];
 			}
+			else consistent = false;   // sentinel mismatch = torn / partially-updated multi-sector record
 		}
+		return consistent;
 	}
 
 	private static List<(long Lcn, long Count)> DecodeRuns(byte[] rec, int pos, int end)
@@ -236,7 +242,9 @@ public partial class MainWindow
 			byte header = rec[pos++];
 			if (header == 0) break;
 			int lenBytes = header & 0x0F, offBytes = (header >> 4) & 0x0F;
-			if (lenBytes == 0 || pos + lenBytes + offBytes > rec.Length) break;
+			// Bound against the attribute's own mapping-pairs end, not the whole record — otherwise a run header at
+			// the tail with no 0x00 terminator decodes length/offset bytes out of the NEXT attribute into a bogus run.
+			if (lenBytes == 0 || pos + lenBytes + offBytes > end || pos + lenBytes + offBytes > rec.Length) break;
 			long count = 0;
 			for (int i = 0; i < lenBytes; i++) count |= (long)rec[pos + i] << (8 * i);
 			pos += lenBytes;
@@ -264,8 +272,8 @@ public partial class MainWindow
 			uint type = BitConverter.ToUInt32(rec, attrOff);
 			if (type == 0xFFFFFFFF) break;
 			int attrLen = BitConverter.ToInt32(rec, attrOff + 0x04);
-			if (attrLen <= 0) break;
-			if (type == 0x80 && rec[attrOff + 0x08] != 0)
+			if (attrLen <= 0 || attrOff + attrLen > rec.Length) break;   // don't overrun the record on a malformed attrLen
+			if (type == 0x80 && attrOff + 0x22 <= rec.Length && rec[attrOff + 0x08] != 0)   // bound the non-res flag + mapping-pairs-offset reads
 			{
 				int runOff = BitConverter.ToUInt16(rec, attrOff + 0x20);
 				return DecodeRuns(rec, attrOff + runOff, attrOff + attrLen);
@@ -368,8 +376,12 @@ public partial class MainWindow
 	private static string ResolvePath(long parent, Dictionary<long, (string name, long parent)> dirs)
 	{
 		var parts = new List<string>();
-		long cur = parent; int guard = 0;
-		while (cur != 5 && guard++ < 64 && dirs.TryGetValue(cur, out var d))
+		var seen = new HashSet<long>();
+		long cur = parent;
+		// Walk parent->root. A visited-set gives O(1) cycle protection (corrupt MFT parent loop) WITHOUT capping
+		// legitimate depth — the old fixed `guard < 64` silently dropped the top of trees deeper than 64 levels,
+		// misplacing files (the raw clone engine reuses this to build target paths).
+		while (cur != 5 && seen.Add(cur) && dirs.TryGetValue(cur, out var d))
 		{
 			parts.Add(d.name);
 			cur = d.parent;
@@ -592,7 +604,9 @@ public partial class MainWindow
 				if (baseType == 0x05) // File directory entry (0x85 in use / 0x05 deleted)
 				{
 					int secondaryCount = dir[p + 1];
-					if (p + 32 * (secondaryCount + 1) > dir.Length) { p += 32; continue; }
+					// A valid File entry has >=1 secondary (the stream extension). A corrupt/zeroed count at the last
+					// slot would otherwise let sp=p+32 index past the buffer end (IndexOutOfRange aborts the whole scan).
+					if (secondaryCount < 1 || p + 32 * (secondaryCount + 1) > dir.Length) { p += 32; continue; }
 					// Stream extension = next entry
 					int sp = p + 32;
 					byte streamType = (byte)(dir[sp] & 0x7F);
@@ -923,13 +937,16 @@ public partial class MainWindow
 				{
 					// every i lands on a sector boundary because the loop steps by 512 and pos is 512-aligned
 					Sig? hit = null;
-					foreach (var s in CarveSigs) if (StartsWith(chunk, i, s.Header)) { hit = s; break; }
+					// Match the signature at i+HeadBack: a carved file starts on the sector boundary (pos+i), but some
+					// containers put their magic a few bytes in (ISO-BMFF 'ftyp' is at file offset 4). Since the scan
+					// steps whole 512-byte sectors, testing only i would NEVER see 'ftyp' at i+4 — the whole MP4/MOV/
+					// HEIC/AVIF/3GP/M4A family would silently never carve.
+					foreach (var s in CarveSigs) if (StartsWith(chunk, i + s.HeadBack, s.Header)) { hit = s; break; }
 					if (hit == null) continue;
-					long fileStart = pos + i;
+					long fileStart = pos + i;   // file starts at the sector boundary; the header sits HeadBack bytes into it
 					long len = 0;
 					string ext = hit.Ext;
-					if (hit.HeadBack > 0 && fileStart >= hit.HeadBack) fileStart -= hit.HeadBack;
-					if (hit.Mp4) { len = Mp4Length(vr, fileStart, hit.MaxLen); if (len > 0) ext = Mp4BrandExt(chunk, i + 4); }
+					if (hit.Mp4) { len = Mp4Length(vr, fileStart, hit.MaxLen); if (len > 0) ext = Mp4BrandExt(chunk, i + hit.HeadBack + 4); }
 					else if (hit.Sqlite) { len = SqliteLen(chunk, i); }
 					else if (hit.Riff || hit.SizeAt >= 0) { len = HeaderDerivedLen(hit, chunk, i, ref ext); }
 					else
@@ -940,12 +957,12 @@ public partial class MainWindow
 					if (len >= hit.Header.Length && len <= hit.MaxLen)
 					{
 						count++;
-						lock (result.Files) result.Files.Add(new DeletedFile
+						lock (result.Files) { if (result.Files.Count < MaxRecoverEntries) result.Files.Add(new DeletedFile
 						{
 							Carved = true, ByteOffset = fileStart, Size = len, SizeText = FormatBytes(len),
 							Name = $"deepscan_{count:D5}{ext}", Path = "(deep scan)",
 							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
-						});
+						}); } // cap carved entries like every other scanner, so a noisy disk can't exhaust memory
 						long advance = (fileStart + len) - pos;
 						if (advance > i + 512) { long next = (advance + 511) & ~511L; i = (int)(Math.Min((long)limit, next) - 512); } // resume at the next sector past the carved file (-512 offsets the loop's += 512)
 					}
@@ -997,13 +1014,16 @@ public partial class MainWindow
 				{
 					// every i lands on a sector boundary because the loop steps by 512 and pos is 512-aligned
 					Sig? hit = null;
-					foreach (var s in CarveSigs) if (StartsWith(chunk, i, s.Header)) { hit = s; break; }
+					// Match the signature at i+HeadBack: a carved file starts on the sector boundary (pos+i), but some
+					// containers put their magic a few bytes in (ISO-BMFF 'ftyp' is at file offset 4). Since the scan
+					// steps whole 512-byte sectors, testing only i would NEVER see 'ftyp' at i+4 — the whole MP4/MOV/
+					// HEIC/AVIF/3GP/M4A family would silently never carve.
+					foreach (var s in CarveSigs) if (StartsWith(chunk, i + s.HeadBack, s.Header)) { hit = s; break; }
 					if (hit == null) continue;
-					long fileStart = pos + i;
+					long fileStart = pos + i;   // file starts at the sector boundary; the header sits HeadBack bytes into it
 					long len = 0;
 					string ext = hit.Ext;
-					if (hit.HeadBack > 0 && fileStart >= hit.HeadBack) fileStart -= hit.HeadBack;
-					if (hit.Mp4) { len = Mp4Length(vr, fileStart, hit.MaxLen); if (len > 0) ext = Mp4BrandExt(chunk, i + 4); }
+					if (hit.Mp4) { len = Mp4Length(vr, fileStart, hit.MaxLen); if (len > 0) ext = Mp4BrandExt(chunk, i + hit.HeadBack + 4); }
 					else if (hit.Sqlite) { len = SqliteLen(chunk, i); }
 					else if (hit.Riff || hit.SizeAt >= 0) { len = HeaderDerivedLen(hit, chunk, i, ref ext); }
 					else
@@ -1014,12 +1034,12 @@ public partial class MainWindow
 					if (len >= hit.Header.Length && len <= hit.MaxLen)
 					{
 						count++;
-						lock (result.Files) result.Files.Add(new DeletedFile
+						lock (result.Files) { if (result.Files.Count < MaxRecoverEntries) result.Files.Add(new DeletedFile
 						{
 							Carved = true, ByteOffset = fileStart, Size = len, SizeText = FormatBytes(len),
 							Name = $"deepscan_{count:D5}{ext}", Path = "(deep scan)",
 							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
-						});
+						}); } // cap carved entries like every other scanner, so a noisy disk can't exhaust memory
 						long advance = (fileStart + len) - pos;
 						if (advance > i + 512) { long next = (advance + 511) & ~511L; i = (int)(Math.Min((long)limit, next) - 512); } // resume at the next sector past the carved file (-512 offsets the loop's += 512)
 					}
@@ -1299,16 +1319,23 @@ public partial class MainWindow
 			}
 			if (files.Count >= MaxRecoverEntries) continue;
 			bool canRec = firstCluster >= 2 && size > 0;
+			// Contiguity/recoverability must respect the FAT width. RecoverOne's chain-walk (NtfsRecovery.cs ~1413)
+			// reads 32-bit FAT entries — correct for FAT32/exFAT, WRONG for FAT16/12. So:
+			//  - DELETED file → contiguous best-effort (the FAT chain is usually wiped on delete anyway);
+			//  - LIVE file on FAT32 → follow the intact 32-bit chain (correct even if fragmented);
+			//  - LIVE file on FAT16/12 → the 32-bit chain-walk can't reconstruct it and a contiguous read would
+			//    silently CORRUPT a fragmented live file; it's reachable in Explorer anyway, so don't offer recovery.
+			bool safeRecover = canRec && (deleted || fat32);
 			files.Add(new DeletedFile
 			{
-				ExFat = true, Contiguous = true,
+				ExFat = true, Contiguous = deleted,   // deleted → contiguous best-effort; live → follow the intact chain
 				Deleted = deleted,
 				Name = name, Path = path + name,
 				Size = size, SizeText = FormatBytes(size),
 				FirstCluster = firstCluster,
 				ModifiedUtc = FatDateTime(dir, p),
 				ModifiedText = FatDateTime(dir, p)?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "",
-				Recoverable = canRec,
+				Recoverable = safeRecover,
 				Status = !deleted ? L("RfStOnDrive") : (canRec ? L("RfStContiguous") : (size == 0 ? L("RfStEmpty") : L("RfStWiped")))
 			});
 		}

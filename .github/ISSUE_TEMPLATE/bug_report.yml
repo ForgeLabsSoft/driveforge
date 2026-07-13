@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a problem with DriveForge (a disk task failed, wrong result, crash, etc.)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve DriveForge. Please fill in as much as you can — the
+        in-app **log** (there's an "Open log" / "Save log" option) is the most useful thing
+        to attach. For security issues, use the Security tab instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: DriveForge version
+      placeholder: e.g. v4.1.2 (see the About box)
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 24H2 (winver)
+    validations:
+      required: true
+  - type: dropdown
+    id: task
+    attributes:
+      label: Which task?
+      options:
+        - Create Windows USB (from ISO)
+        - Clone this PC (portable / external)
+        - Clone to internal disk
+        - Back up to image
+        - Restore image
+        - Bootable USB from ISO (raw write)
+        - Recover deleted files
+        - Secure erase / wipe / clean traces
+        - Drive tools (health / speed / partition)
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: drive
+    attributes:
+      label: Drive(s) involved
+      placeholder: e.g. source = internal NVMe, target = SanDisk Extreme 1TB USB
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+  - type: textarea
+    id: log
+    attributes:
+      label: Log / error text
+      description: Paste the in-app log or the exact error message. A crash log is at %LocalAppData%\DriveForge\crash.log.
+      render: text
