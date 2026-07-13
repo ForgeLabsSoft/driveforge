@@ -2,6 +2,24 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.2.0 — 2026-07-13
+
+Adds faithful backup-image restore and completes the multi-language coverage.
+
+### Backup & restore
+- **Restore from a VHDX backup** (made by *Export VHDX*) now writes the image back to a drive *faithfully* — using the same raw engine that makes *Clone This PC* an exact copy (preserving apps, permissions, hardlinks, reparse points and alternate data streams). Verified end to end: the restored drive boots on real hardware.
+- The backup image is now attached through the **native Windows Virtual Disk API** instead of scripting an external mount — it is read-only, cleans up any leftover mount automatically, and can never leave the image file locked.
+- Restore reliability fixes: correct handling when Windows auto-assigns a drive letter to the mounted image, the right Windows volume is chosen inside multi-partition images, and the target is only formatted **after** the image is confirmed readable.
+
+### Language
+- **Full 17-language coverage**: every remaining stage/status message and completion dialog on the backup / clone / restore screens is now translated, so a chosen language shows no leftover English.
+
+### Under the hood
+- Renamed the project internals throughout (no functional change).
+- Numerous smaller reliability fixes across the imaging paths.
+
+*This release also carries the safety + reliability work listed under v4.1.2 below, which had not yet been published as a download.*
+
 ## v4.1.2 — 2026-07-04
 
 A large safety + reliability release. DriveForge writes whole disks, so this focuses on

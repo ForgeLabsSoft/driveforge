@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="logo-256.png" width="128" height="128" alt="DriveForge logo">
+<img src="driveforge-github-banner.png" width="100%" alt="DriveForge — Windows USB, PC clone, backup &amp; drive-health tool">
 
 # DriveForge
 
