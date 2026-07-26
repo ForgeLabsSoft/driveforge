@@ -162,6 +162,13 @@ public partial class MainWindow : Window, IComponentConnector
 	private readonly List<DiskItem> disks = new List<DiskItem>();
 
 	private readonly Dictionary<int, SpeedResult> speedResults = new Dictionary<int, SpeedResult>();
+	// Windows RECYCLES disk numbers when a removable drive is unplugged and another is inserted, so a number-keyed speed
+	// cache would hand the fast drive's measured MB/s — and its green "good for Windows To Go" verdict — to a slow stick
+	// that was never tested, and would even let the pre-flight skip measuring it. Remember which physical drive each
+	// cached result belongs to and drop it when the number starts pointing somewhere else.
+	private readonly Dictionary<int, string> speedResultIdentity = new Dictionary<int, string>();
+	private static string DiskIdentityKey(DiskItem d) =>
+		((d.Serial ?? "").Trim().Length > 0 ? d.Serial.Trim() : (d.FriendlyName ?? "?")) + "|" + d.Size;
 
 	private string? sourcePath;
 
@@ -186,6 +193,26 @@ public partial class MainWindow : Window, IComponentConnector
 	private volatile bool isPaused; // polled in worker-thread hot loops; volatile so Pause is always observed
 
 	private bool internalOperationStopped;
+
+	// Set true by an image/restore operation when a PRE-WRITE safety gate (target-health warning declined, or the
+	// identity re-verify detecting a changed/renumbered disk) aborts before anything is written. The shared success
+	// tail checks it so it never falsely reports "finished successfully" / ejects a drive that was never touched.
+	private bool operationAbortedBeforeWrite;
+
+	// Set true when the user asked for BitLocker but encryption did not actually start. The caller keeps the created
+	// drive but reports it as NOT encrypted (a warning) instead of a silent success, so the user is never handed an
+	// unencrypted stick they believe is protected.
+	private bool bitLockerFailedThisRun;
+
+	// Reentry guard for StartButton_Click: set synchronously before its async pre-write phase (during which isBusy is
+	// still false) so a double-click cannot launch two concurrent destructive operations on the same disk.
+	private bool _startInProgress;
+	// Synchronous reentrancy guard for the destructive TOOL handlers (Partition / Format / Wipe): each sets isBusy only
+	// AFTER its pre-SetBusy confirm + identity-verify awaits (which spawn a slow powershell.exe with no modal up), so
+	// during that ~1-2s window a second click on any of these always-enabled tool buttons would slip past the isBusy
+	// check and start a concurrent diskpart op on the same disk. This flag is set SYNCHRONOUSLY at entry to close it,
+	// mirroring _startInProgress for StartButton_Click.
+	private bool _toolOpStarting;
 
 	private int selectedDriveTool = ToolHealth;
 
@@ -258,6 +285,8 @@ public partial class MainWindow : Window, IComponentConnector
 		InitializeUiCustomization();
 		UpdateAdminStatus();
 		SetupDeviceChangeAutoRefresh();   // rescan the disk list automatically when a drive is plugged in / removed
+		_ = Task.Run(SweepStrandedWipeFiles); // reclaim fill files a crash/kill left behind during a previous wipe
+		_ = RecoverStrandedTestBootDiskAsync(); // re-online a disk a crash/kill left offline during a previous Test-boot
 		ModeBox.Items.Clear();
 		ModeBox.Items.Add("Create Windows USB (ISO / WIM / ESD)");
 		ModeBox.Items.Add("Advanced: restore full disk image");
@@ -380,14 +409,18 @@ public partial class MainWindow : Window, IComponentConnector
 		// is ambiguous → refuse (erasing the wrong data drive unattended is unrecoverable).
 		if (serial.Length > 0)
 		{
+			// Match on serial AND the recorded size (±1 GiB): cheap USB/card-reader controllers report a model-shared
+			// (VID/PID-derived) serial across physically different drives, so a same-serial drive of a DIFFERENT
+			// capacity would otherwise be wiped unattended. (size<=0 only for old schedules that recorded no size.)
 			var matches = disks.Where(d => !d.IsSystem && !string.IsNullOrEmpty(d.Serial)
-				&& string.Equals(d.Serial.Trim(), serial, StringComparison.OrdinalIgnoreCase)).ToList();
+				&& string.Equals(d.Serial.Trim(), serial, StringComparison.OrdinalIgnoreCase)
+				&& (size <= 0 || Math.Abs(d.Size - size) < 1024L * 1024 * 1024)).ToList();
 			if (matches.Count == 1) disk = matches[0];
 			else
 			{
 				Log(matches.Count == 0
-					? "Scheduled clone: no connected disk matches the saved serial number. Refusing to guess a target. Nothing to do."
-					: "Scheduled clone: " + matches.Count + " connected disks share the saved serial (non-unique / identical drives). Refusing to erase an ambiguous target. Nothing to do.");
+					? "Scheduled clone: no connected disk matches the saved serial number AND size. Refusing to guess a target. Nothing to do."
+					: "Scheduled clone: " + matches.Count + " connected disks share the saved serial+size (non-unique / identical drives). Refusing to erase an ambiguous target. Nothing to do.");
 				return true;
 			}
 		}
@@ -439,6 +472,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
 			isBusy = false;   // clear busy BEFORE Shutdown, else Window_Closing's "operation running?" modal blocks an unattended run forever
+			UpdateSleepBlock();   // headless runs skip Window_Closing's teardown, so release the sleep block here
 			Application.Current.Shutdown();
 		}
 	}
@@ -661,6 +695,11 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void ScheduleCloneButton_Click(object sender, RoutedEventArgs e)
 	{
+		// This button's IsEnabled is never managed by SetBusy, so it stays live during a running clone — and the
+		// schtasks.exe it launches becomes `activeProcess`, overwriting the clone's own. schtasks exits in about a
+		// second and nulls the field, after which Stop can no longer kill the running dism/robocopy tree and the
+		// stall watchdog goes dead for the rest of the clone. Same guard every other operation handler opens with.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!(DiskBox.SelectedItem is DiskItem disk) || disk.IsSystem)
 		{
 			MessageBox.Show(L("Mb001"), "Schedule clone", MessageBoxButton.OK, MessageBoxImage.Exclamation);
@@ -714,13 +753,14 @@ public partial class MainWindow : Window, IComponentConnector
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
 		{
-			MessageBox.Show(L("Mb003"), "Verify checksum", MessageBoxButton.OK, MessageBoxImage.Exclamation);
+			MessageBox.Show(L("Mb003"), L("DlgIsoChecksum"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
 			return;
 		}
 		string path = sourcePath;
 		try
 		{
 			SetBusy(busy: true, L("BzSha"));
+			stopRequested = false; isPaused = false;   // Stop is enabled during hashing; reset the flag so the loop below can honor it
 			ProgressBar.Value = 0.0;
 			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
@@ -735,6 +775,7 @@ public partial class MainWindow : Window, IComponentConnector
 				int lastPct = -1;
 				while ((read = fs.Read(buf, 0, buf.Length)) > 0)
 				{
+					if (stopRequested) throw new OperationCanceledException("Checksum stopped.");
 					sha.TransformBlock(buf, 0, read, null, 0);
 					done += read;
 					int pct = total > 0 ? (int)(done * 100 / total) : 0;
@@ -749,6 +790,7 @@ public partial class MainWindow : Window, IComponentConnector
 			});
 			ShowIsoChecksumDialog(Path.GetFileName(path), hash);
 		}
+		catch (OperationCanceledException) { Log("Checksum stopped by user."); }
 		catch (Exception ex)
 		{
 			ShowError(L("ErrChecksum"), ex);
@@ -757,8 +799,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
 			SetBusy(busy: false);
-			ProgressBar.Value = 0;
-			ProgressPercentText.Text = "0%";
+			ResetProgressWidgets();   // the stats line too — it was left reading "Progress: 100.0%" beside an empty bar
 			StatusText.Text = L("SxReady");
 		}
 	}
@@ -776,26 +817,38 @@ public partial class MainWindow : Window, IComponentConnector
 			Background = (Brush)FindResource("NavyBrush")
 		};
 		var panel = new StackPanel { Margin = new Thickness(16) };
-		panel.Children.Add(new TextBlock { Text = "SHA-256 of " + fileName + ":", Foreground = (Brush)FindResource("TextBrush"), Margin = new Thickness(0, 0, 0, 6) });
+		panel.Children.Add(new TextBlock { Text = string.Format(L("ChkHashOf"), fileName), Foreground = (Brush)FindResource("TextBrush"), Margin = new Thickness(0, 0, 0, 6) });
 		var hashBox = new TextBox { Text = sha256, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, FontFamily = new System.Windows.Media.FontFamily("Consolas"), Margin = new Thickness(0, 0, 0, 10) };
 		panel.Children.Add(hashBox);
-		panel.Children.Add(new TextBlock { Text = "Compare this with the SHA-256 on the official download page. Or paste the expected value below to check automatically:", Foreground = (Brush)FindResource("MutedBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 6) });
+		panel.Children.Add(new TextBlock { Text = L("ChkCompareHint"), Foreground = (Brush)FindResource("MutedBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 6) });
 		var expectedBox = new TextBox { FontFamily = new System.Windows.Media.FontFamily("Consolas"), Margin = new Thickness(0, 0, 0, 8) };
 		panel.Children.Add(expectedBox);
 		var resultText = new TextBlock { FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
 		panel.Children.Add(resultText);
 		var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-		var compareBtn = new Button { Content = "Check match", Width = 110, Margin = new Thickness(0, 0, 8, 0) };
-		var closeBtn = new Button { Content = "Close", Width = 90 };
+		var compareBtn = new Button { Content = L("ChkCheckBtn"), Width = 110, Margin = new Thickness(0, 0, 8, 0) };
+		var closeBtn = new Button { Content = L("ChkClose"), Width = 90 };
 		buttons.Children.Add(compareBtn);
 		buttons.Children.Add(closeBtn);
 		panel.Children.Add(buttons);
 		dialog.Content = panel;
 		compareBtn.Click += delegate
 		{
-			string expected = new string(expectedBox.Text.Where(c => !char.IsWhiteSpace(c)).ToArray());
-			if (expected.Length == 0) { resultText.Text = L("ChkPasteFirst"); resultText.Foreground = (Brush)FindResource("MutedBrush"); return; }
-			bool match = string.Equals(expected, sha256, StringComparison.OrdinalIgnoreCase);
+			// Extract a BOUNDED 64-hex SHA-256 token: tolerates a full "<hash>  filename" checksum-file line and a
+			// "sha256:" prefix, and does NOT match a 32/40/128-hex MD5/SHA-1/SHA-512 (those get a distinct "not a
+			// SHA-256" note instead of a scary false "corrupt" verdict on a genuinely good ISO). Old code stripped all
+			// whitespace and compared the whole thing, so any pasted filename/prefix/wrong-algo falsely read as no-match.
+			var mm = System.Text.RegularExpressions.Regex.Matches(expectedBox.Text ?? "", "(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])");
+			if (mm.Count == 0)
+			{
+				resultText.Text = string.IsNullOrWhiteSpace(expectedBox.Text) ? L("ChkPasteFirst") : L("ChkNotSha256");
+				resultText.Foreground = (Brush)FindResource("MutedBrush");
+				return;
+			}
+			// Match if ANY 64-hex token equals the file's hash — handles a bare hash, a "<hash>  file" line, AND a whole
+			// multi-line SHA256SUMS pasted in (the user's ISO may not be the first entry). Cannot false-match: sha256 is
+			// the file's real hash, so a token only matches when a listed hash genuinely equals it.
+			bool match = mm.Cast<System.Text.RegularExpressions.Match>().Any(x => string.Equals(x.Value, sha256, StringComparison.OrdinalIgnoreCase));
 			resultText.Text = match ? L("ChkMatch") : L("ChkNoMatch");
 			resultText.Foreground = new SolidColorBrush(match ? Color.FromRgb(22, 163, 74) : Color.FromRgb(220, 60, 60));
 		};
@@ -832,6 +885,14 @@ public partial class MainWindow : Window, IComponentConnector
 		if (!e.Cancel)
 		{
 			SaveUserSettings();
+			// Hygiene: the kernel drops the request when the process dies anyway, but a torn-down window whose
+			// operation `finally` never gets to run (the Dispatcher is going away) should not be the only thing
+			// standing between this machine and a normal sleep.
+			ReleasePowerRequest();
+			_sleepBlocked = false;
+			// "Clean up all request objects and associated handles before the process exits" — the kernel would
+			// reclaim it anyway, but closing it here keeps the documented contract.
+			if (_powerRequest != IntPtr.Zero) { try { CloseHandle(_powerRequest); } catch { } _powerRequest = IntPtr.Zero; }
 		}
 	}
 
@@ -945,6 +1006,9 @@ public partial class MainWindow : Window, IComponentConnector
 
 	// ---------- Auto-refresh the disk list on USB plug/unplug (WM_DEVICECHANGE) ----------
 	private const int WM_DEVICECHANGE = 0x0219;
+	private const int WM_POWERBROADCAST = 0x0218;         // resume notifications — a suspend can drop a held power request
+	private const int PBT_APMRESUMESUSPEND = 0x0007;
+	private const int PBT_APMRESUMEAUTOMATIC = 0x0012;
 	private const int DBT_DEVICEARRIVAL = 0x8000;         // a device or piece of media has been inserted
 	private const int DBT_DEVICEREMOVECOMPLETE = 0x8004;  // a device or piece of media has been removed
 	private System.Windows.Threading.DispatcherTimer? _deviceChangeDebounce;
@@ -969,6 +1033,48 @@ public partial class MainWindow : Window, IComponentConnector
 			if (evt == DBT_DEVICEARRIVAL || evt == DBT_DEVICEREMOVECOMPLETE)
 				ScheduleDiskAutoRefresh();
 		}
+		else if (msg == WM_POWERBROADCAST)
+		{
+			// Coming back from a suspend can drop a held power request (this is why PowerToys' Awake re-applies it on
+			// resume). If an operation somehow survived, re-take the request rather than silently running unprotected.
+			//
+			// RELEASE FIRST. The kernel REFCOUNTS PowerSetRequest per handle per type, so simply zeroing our own
+			// bookkeeping and setting again would leave the count at 2 while teardown only ever decrements once —
+			// stranding a request for the life of the process, i.e. a PC that never idle-sleeps again. That is the
+			// exact opposite of what this feature is for. PowerClearRequest against a request Windows already
+			// cancelled just returns false, which is harmless.
+			// Only genuine RESUME events belong here: an AC<->battery change (PBT_APMPOWERSTATUSCHANGE) is not a
+			// resume and does not disturb the request, so re-asserting on it was pure risk for no benefit.
+			int evt = wParam.ToInt32();
+			// Gate on the busy flags, NOT on _sleepBlocked: the single most useful thing this branch can do is leave
+			// evidence that the machine suspended mid-operation, and that must be recorded even when the request was
+			// never held (an admin override neutralises the request at policy level while PowerSetRequest still
+			// returns true — exactly the case where a PC sleeps anyway and nothing else would say so).
+			if (evt == PBT_APMRESUMEAUTOMATIC || evt == PBT_APMRESUMESUSPEND)
+			{
+				// Log on the FIRST event only: Windows sends PBT_APMRESUMEAUTOMATIC and then, if it sees user
+				// activity, PBT_APMRESUMESUSPEND — so logging on both printed one wake as two suspends, in the one
+				// place this is meant to be unambiguous evidence. Re-assert on both, which is harmless and balanced.
+				if (evt == PBT_APMRESUMEAUTOMATIC && (isBusy || _cleanBusy || _analyzerBusy))
+					Log("This PC suspended and resumed while an operation was running — re-applying the keep-awake request.");
+				if (_sleepBlocked)
+				{
+					_sleepHeldTicks += UnbiasedTicksNow() - _sleepBlockStartTicks;   // bank the segment before rebasing
+					ReleasePowerRequest();
+					_sleepBlocked = false;   // so UpdateSleepBlock re-asserts instead of seeing "already held"
+					_sleepReasserting = true;
+					try { UpdateSleepBlock(); } finally { _sleepReasserting = false; }
+				}
+				else if (isBusy || _cleanBusy || _analyzerBusy)
+				{
+					// Nothing was held — this is the state left behind when acquiring FAILED earlier. A resume is a
+					// natural retry point (the failure may well have been transient) and, without this, the message
+					// above would promise a re-apply that never happened and no other attempt would occur before the
+					// operation ends.
+					UpdateSleepBlock();
+				}
+			}
+		}
 		return IntPtr.Zero;
 	}
 
@@ -986,6 +1092,7 @@ public partial class MainWindow : Window, IComponentConnector
 				try { await RefreshDisksAsync(silent: true); } catch { }   // passive: never pop a modal from a background rescan
 			};
 		}
+		_silentRescanRetries = 0;   // a genuine new device event earns a fresh auto-retry budget
 		_deviceChangeDebounce.Stop();
 		_deviceChangeDebounce.Start();
 	}
@@ -1004,40 +1111,138 @@ public partial class MainWindow : Window, IComponentConnector
 	// entry points instead: the device-change timer (checks isBusy) and RefreshDisks_Click (checks isBusy).
 	private async Task RefreshDisksAsync(bool silent = false)
 	{
+		// ...and because of that, it must not TOUCH the busy state when it is called nested. It used to raise and then
+		// clear it unconditionally, so a refresh issued near the end of an operation switched the whole app back to
+		// "idle" while the operation was still running: Stop/Pause got disabled, `activeProcess` was nulled (so Stop
+		// could no longer kill the external tool), the status text was overwritten with "Scanning disks…" and never
+		// restored — and now it would also have released the sleep block. SsdSecureEraseFlow is the worst case: it
+		// refreshes and THEN runs a multi-minute Optimize-Volume ReTrim. Only own the busy state when nothing else does.
+		//
+		// Ownership is a TOKEN, not a snapshot taken at entry. The scan awaits a multi-second PowerShell enumeration,
+		// and a real operation can start during that window — SetBusy clears the token whenever anyone else raises
+		// busy, so this method hands back only a busy state it still owns. With an entry snapshot instead, a refresh
+		// that began while idle would release busy in the middle of the operation that started meanwhile: Stop would
+		// go dead, Start would re-enable on a disk being written, and the sleep block would drop. That is reachable
+		// today — the Write-ISO flow clears busy for its "verify?" prompt, and the just-repartitioned stick fires
+		// device-change events that start exactly such a refresh behind the modal.
+		bool wasBusy = isBusy;
+		long myScan = ++_diskScanSeq;   // identifies THIS scan, so a failing one cannot blank a newer scan's good list
 		try
 		{
-			int? selectedDiskNumber = (DiskBox.SelectedItem as DiskItem)?.Number;
-			SetBusy(busy: true, L("BzScanDisks"));
-			disks.Clear();
-			_syncingDisk = true;
-			DiskBox.Items.Clear();
-			if (DiagDiskBox != null) DiagDiskBox.Items.Clear();
-			foreach (DiskItem item in await GetDisksAsync())
+			if (!wasBusy) { SetBusy(busy: true, L("BzScanDisks")); _refreshOwnsBusy = true; _refreshBusyScan = myScan; }   // set AFTER: SetBusy(true) clears the token
+			// Enumerate FIRST, then swap the lists in one synchronous block. Clearing before the await let two
+			// overlapping refreshes interleave as clear(A) -> clear(B) -> add(A) -> add(B), leaving every physical
+			// drive listed twice (reachable from Eject, which refreshes after a modal while a device-change refresh
+			// is already in flight).
+			List<DiskItem> found = await GetDisksAsync();
+			// Completion order is NOT start order — each scan spawns its own powershell.exe, and one that stalls on a
+			// settling/removed device can return long after a later scan already published good results. Publishing
+			// then would put the REMOVED drive back in `disks` and drive the ticket backwards, leaving exactly the
+			// stale list this method works to avoid. An overtaken scan drops its findings and just tidies up.
+			if (myScan > _diskListScan)
 			{
-				disks.Add(item);
-				DiskBox.Items.Add(item);
-				if (DiagDiskBox != null) DiagDiskBox.Items.Add(item);
+				// Capture the selection AFTER the scan, not before it. The list now stays live for the 1-3 s the
+				// enumeration takes, and neither picker is disabled while busy — so a user who selects a different disk
+				// during a background refresh had their choice silently reverted when the rebuild restored the old one.
+				int? selectedDiskNumber = (DiskBox.SelectedItem as DiskItem)?.Number;
+				disks.Clear();
+				_syncingDisk = true;
+				DiskBox.Items.Clear();
+				if (DiagDiskBox != null) DiagDiskBox.Items.Clear();
+				foreach (DiskItem item in found)
+				{
+					disks.Add(item);
+					DiskBox.Items.Add(item);
+					if (DiagDiskBox != null) DiagDiskBox.Items.Add(item);
+				}
+				_syncingDisk = false;
+				// Drop any cached speed result whose disk number no longer points at the drive it was measured on (numbers are
+				// recycled when removable drives are swapped) — otherwise the new drive inherits the old one's MB/s and verdict.
+				foreach (int cachedNumber in speedResults.Keys.ToList())
+				{
+					DiskItem? nowAt = disks.FirstOrDefault(d => d.Number == cachedNumber);
+					string wanted = speedResultIdentity.TryGetValue(cachedNumber, out string? id) ? id : "";
+					if (nowAt == null || !string.Equals(wanted, DiskIdentityKey(nowAt), StringComparison.OrdinalIgnoreCase))
+					{
+						speedResults.Remove(cachedNumber);
+						speedResultIdentity.Remove(cachedNumber);
+					}
+				}
+				// Same treatment for the cached health/SMART report: it holds reliability counters that feed the failure
+				// verdict, so it must never survive onto a different physical drive that inherited the same disk number.
+				if (_diagDisk != null)
+				{
+					DiskItem? diagNowAt = disks.FirstOrDefault(d => d.Number == _diagDisk.Number);
+					if (diagNowAt == null || !string.Equals(DiskIdentityKey(diagNowAt), DiskIdentityKey(_diagDisk), StringComparison.OrdinalIgnoreCase))
+					{ _diagDisk = null; _diagReport = null; }
+				}
+				if (DiskBox.Items.Count > 0)
+				{
+					DiskItem? previousSelection = selectedDiskNumber.HasValue ? disks.FirstOrDefault((DiskItem disk) => disk.Number == selectedDiskNumber.Value) : null;
+					DiskBox.SelectedItem = previousSelection ?? DiskBox.Items[0];
+					if (DiagDiskBox != null) DiagDiskBox.SelectedItem = DiskBox.SelectedItem;
+				}
+				Log($"Disks found: {disks.Count}");
+				_diskListScan = myScan;   // this scan's results are what the lists now hold
 			}
-			_syncingDisk = false;
-			if (DiskBox.Items.Count > 0)
-			{
-				DiskItem? previousSelection = selectedDiskNumber.HasValue ? disks.FirstOrDefault((DiskItem disk) => disk.Number == selectedDiskNumber.Value) : null;
-				DiskBox.SelectedItem = previousSelection ?? DiskBox.Items[0];
-				if (DiagDiskBox != null) DiagDiskBox.SelectedItem = DiskBox.SelectedItem;
-			}
-			Log($"Disks found: {disks.Count}");
-			StatusText.Text = L("SxReady");
+			_silentRescanRetries = 0;   // a scan got through: the auto-retry budget is spent only on consecutive failures
+			// Only claim "Ready" if THIS invocation owns the busy state. The token alone is not enough — two refreshes
+			// can be in flight at once, and a straggler would otherwise speak for the one that actually holds it.
+			// Comparing the ticket gives true per-invocation identity, so a nested or overtaken scan stays quiet
+			// instead of painting "Ready" over a running operation — worst case SsdSecureEraseFlow, which refreshes
+			// and then runs a multi-minute ReTrim.
+			if (_refreshOwnsBusy && _refreshBusyScan == myScan) StatusText.Text = L("SxReady");
 		}
 		catch (Exception ex)
 		{
+			// Drop the stale list when the scan fails. Enumerating before clearing (above) means a throw would
+			// otherwise leave the PRE-operation entries on screen and, worse, in `disks` — and SsdSecureEraseFlow
+			// reads `disks` right after its wipe to find the drive letter to TRIM. With a stale entry it would
+			// TRIM a letter the disk no longer has, the non-terminating PowerShell error would go unnoticed, and
+			// the flow would claim the controller discarded the blocks when no TRIM was ever issued. An empty list
+			// makes that path fail honestly instead.
+			// ...but only if nothing NEWER has populated the lists meanwhile: two refreshes can overlap, and a
+			// straggler that fails must not wipe out the good results a later scan already delivered.
+			bool cleared = _diskListScan < myScan;
+			if (cleared)
+			{
+				disks.Clear();
+				_syncingDisk = true;
+				DiskBox.Items.Clear();
+				if (DiagDiskBox != null) DiagDiskBox.Items.Clear();
+				PartitionMapGrid?.Children.Clear();   // else the vanished disk's map stays drawn beside an empty picker
+				_partitionMapDisk = -1;               // and stop an in-flight BuildPartitionMapAsync from redrawing it
+				// The EMPTY list is this scan's published state. Leaving the ticket at the older value would let a
+				// scan that started BEFORE this failure — one still stalled in powershell.exe on the settling device —
+				// come back and republish the removed drive, undoing the clear and defeating its whole purpose.
+				_diskListScan = myScan;
+			}
 			// A device-change auto-refresh is passive — log a transient scan failure instead of popping a modal.
 			if (silent) Log(L("ErrDiskScan") + ": " + ex.Message);
 			else ShowError(L("ErrDiskScan"), ex);
+			// Say so in the status bar as well. Without this the bar keeps reading "Scanning disks…" for ever, which
+			// next to a now-empty picker (and, when silent, no dialog at all) looks exactly like a hung app.
+			if (_refreshOwnsBusy && _refreshBusyScan == myScan) StatusText.Text = L("ErrDiskScan");
+			// A silent scan is the device-change rescan, and its timer already stopped itself, so re-arming here is
+			// the only way a transient failure during a plug/unplug storm heals without a manual Refresh. BOUND it:
+			// the retry feeds itself (tick -> scan -> throw -> re-arm -> tick), so on a PERMANENT failure — WinPE
+			// images without the PowerShell component, a wedged Storage service — an unbounded version would spawn a
+			// powershell.exe every 900 ms for ever, appending the whole captured output to the log each time.
+			// Skip it entirely when a newer scan already published good results: that failure changed nothing.
+			if (silent && cleared && _silentRescanRetries < 3)
+			{
+				_silentRescanRetries++;
+				_deviceChangeDebounce?.Start();
+			}
 		}
 		finally
 		{
 			_syncingDisk = false;   // never leave the selection-sync suppressor stranded true if the scan threw mid-rebuild
-			SetBusy(busy: false);
+			// Release only a busy state THIS invocation still owns. Both conditions are needed: the ticket says WE
+			// took it (a nested refresh, or a straggler from an earlier scan, must never release another refresh's
+			// state), and the token says nobody has taken over since (a real operation that started during the scan
+			// owns it now, and clearing here would strand it with the controls wrong and the sleep block dropped).
+			if (_refreshOwnsBusy && _refreshBusyScan == myScan) { _refreshOwnsBusy = false; SetBusy(busy: false); }
 		}
 	}
 
@@ -1360,6 +1565,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void BrowseSource_Click(object sender, RoutedEventArgs e)
 	{
+		// Block a second Browse while a prior pick's LoadEditionsAsync (mount + dism) is still running: two concurrent
+		// loads can leave EditionBox showing one ISO's editions while sourcePath points at another, so the wrong
+		// edition index would be applied after the destructive diskpart clean. LoadEditionsAsync holds isBusy.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		OpenFileDialog openFileDialog = new OpenFileDialog
 		{
 			Filter = (ModeBox.SelectedIndex == ModeRestoreSavedClone ? L("FltRestoreImage") : L("FltInstallImage")),
@@ -1400,7 +1609,7 @@ public partial class MainWindow : Window, IComponentConnector
 				}
 				if (EditionBox.Items.Count == 0)
 				{
-					EditionBox.Items.Add(new EditionItem(1, "Windows image index 1"));
+					EditionBox.Items.Add(new EditionItem(1, string.Format(L("EdImageIndexFallback"), 1)));
 				}
 				EditionBox.SelectedIndex = 0;
 				Log($"Editions found: {EditionBox.Items.Count}");
@@ -1625,6 +1834,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void SpeedTest_Click(object sender, RoutedEventArgs e)
 	{
+		// "Check drive" is bound straight to this handler, bypassing ToolStartButton_Click's guard — and the analyzer
+		// flows raise busy without greying the button out. The guard belongs HERE and not in RunSpeedTestAsync, which
+		// is also called with auto:true from the pre-flight INSIDE an operation, where busy is legitimately true.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		SelectDriveTool(ToolSpeed, 1, "Speed test selected. Press Start to run it again, or wait for the current test to finish.");
 		await RunSpeedTestAsync(auto: false);
 	}
@@ -1641,6 +1854,16 @@ public partial class MainWindow : Window, IComponentConnector
 			SetBusy(busy: true, L("BzReadHealth"));
 			SetToolStatus(L("StHealthReadingDisk") + disk.Number + "...");
 			string report = await GetDriveHealthReportAsync(disk);
+			// The disk pickers stay interactive during this ~1-3s PowerShell round trip. If the user switched to a
+			// DIFFERENT disk while it was in flight, painting THIS disk's data over the now-selected one would show
+			// the wrong drive's health/SMART under the wrong name, with no visual sign of the mismatch. Discard —
+			// UpdateHealthVisuals is not called, so nothing overwrites what's currently shown.
+			if (!(DiskBox.SelectedItem is DiskItem curDisk) || !string.Equals(DiskIdentityKey(curDisk), DiskIdentityKey(disk), StringComparison.OrdinalIgnoreCase))
+			{
+				Log($"Health report for Disk {disk.Number} arrived after the selection changed — discarded.");
+				SetToolStatus(L("StHealthDone"));
+				return;
+			}
 			SetToolOutput(report);
 			UpdateHealthVisuals(disk, report);
 			Log($"Health Disk {disk.Number}: {disk.HealthText}; status: {disk.OperationalStatus}; bus: {disk.BusType}; media: {disk.MediaType}");
@@ -1682,6 +1905,15 @@ public partial class MainWindow : Window, IComponentConnector
 			SetBusy(busy: true, L("BzReadSmart"));
 			SetToolStatus(L("StSmartReadingDisk") + disk.Number + "...");
 			string report = await GetSmartDetailsAsync(disk);
+			// Same stale-selection race as HealthCheck_Click: the disk pickers stay interactive during this PowerShell
+			// round trip, so re-verify the selection is still THIS disk before painting its data over whatever the
+			// user switched to in the meantime.
+			if (!(DiskBox.SelectedItem is DiskItem curDisk) || !string.Equals(DiskIdentityKey(curDisk), DiskIdentityKey(disk), StringComparison.OrdinalIgnoreCase))
+			{
+				Log($"SMART report for Disk {disk.Number} arrived after the selection changed — discarded.");
+				SetToolStatus(L("StSmartDone"));
+				return;
+			}
 			SetToolOutput(report);
 			UpdateSmartVisuals(disk, report);
 			SetToolStatus(L("StSmartDone"));
@@ -1704,7 +1936,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			SetToolStatus(L("StKitCreating"));
 			string path = CreateDriveDiagnosticKit();
-			SetToolOutput("Diagnostic kit created:\r\n" + path + "\r\n\r\nOpen the README.txt inside it for the recommended tools and workflow.");
+			SetToolOutput(string.Format(L("KitOutputBody"), path));
 			Log("Drive diagnostic kit created: " + path);
 			MessageBox.Show(string.Format(L("MbKitCreated"), path), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
 		}
@@ -1750,6 +1982,12 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void ToolStartButton_Click(object sender, RoutedEventArgs e)
 	{
+		// The three disk-analyzer flows raise `isBusy` with a raw write, which — unlike SetBusy — never greys this
+		// button out. So without this guard a chkdsk /r /x could be launched during a Space-Analyzer scan, and when
+		// the scan finished its SetBusy(false) would null `activeProcess` (leaving the running chkdsk unkillable by
+		// Stop), re-enable Start on a disk being repaired, and release the keep-awake block mid-repair. Same guard
+		// StartButton_Click has opened with for exactly this reason.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		switch (selectedDriveTool)
 		{
 			case ToolSpeed:
@@ -1793,6 +2031,13 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
+		// This "diagnostic" WRITES ~80 MB into the drive's free space to measure real write speed. Its neighbours in the
+		// same panel are labelled read-only, so that is not what a user expects — and on a drive someone is about to run
+		// Recover on, those writes land in exactly the free clusters still holding their deleted files. Disclose it and
+		// ask. (The automatic pre-flight run is exempt: there the drive is the target of an operation that erases it.)
+		if (!auto && MessageBox.Show(L("MbSpeedWritesWarn"), "DriveForge",
+				MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
+			return;
 		try
 		{
 			stopRequested = false; isPaused = false;
@@ -1809,6 +2054,7 @@ public partial class MainWindow : Window, IComponentConnector
 			})));
 			StopLiveTest(success: true);
 			speedResults[disk.Number] = speedResult;
+			speedResultIdentity[disk.Number] = DiskIdentityKey(disk);   // so a swapped drive reusing this number can't inherit it
 			UpdateDiskSummary();
 			UpdateSpeedVisuals(speedResult);
 			SetToolOutput(string.Format(L("DSpdReport"), disk.Number, disk.FriendlyName, speedResult.SequentialWriteMb.ToString("F1"), speedResult.Random4KWriteMb.ToString("F1"), speedResult.Message, BuildSpeedRecommendation(speedResult)));
@@ -1823,13 +2069,17 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			operationTimer.Stop(); operationStopwatch.Stop(); ProgressBar.Value = 0.0;
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();   // bar AND label AND stats line — zeroing only the bar left "100%" beside an empty one
 			SetBusy(busy: false);
 		}
 	}
 
 	private async void CreateKitButton_Click(object sender, RoutedEventArgs e)
 	{
+		// See ToolStartButton_Click: the analyzer flows raise busy without greying this button out, so it needs the
+		// same explicit guard or it can start a second operation on top of a running one.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		try
 		{
 			SetBusy(busy: true, L("BzCloneHelper"));
@@ -1849,6 +2099,14 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void StartButton_Click(object sender, RoutedEventArgs e)
 	{
+		// Reentry guard: this handler runs an async pre-write phase (RunRequiredPreflightAsync + ConfirmOperationSummary)
+		// during which isBusy is still false and StartButton stays enabled, so a double-click / second click could launch
+		// two concurrent destructive ops on the same disk. Set the flag synchronously (before any await); clear it in the
+		// finally below. Matches the isBusy guard every other operation handler opens with.
+		if (isBusy || _startInProgress) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		_startInProgress = true;
+		try
+		{
 		// Backup-to-image needs no target disk — it writes a file. Handle it first.
 		if (ModeBox.SelectedIndex == ModeBackupImage)
 		{
@@ -1925,11 +2183,19 @@ public partial class MainWindow : Window, IComponentConnector
 						operationTimer.Stop();
 						operationStopwatch.Stop();
 						UpdateProgressStats();
+						SetBusy(busy: false);
+						// AFTER SetBusy: its stop-branch resets the stats line, and the most common way to reach
+						// cloneFailed IS the user's Stop (killing the child process throws) — writing first meant the
+						// "Failed after hh:mm:ss" message was immediately overwritten with a bare "Progress: 0.0%".
 						if (cloneFailed)
 						{
-							ProgressStatsText.Text = string.Format(L("ProgFailed"), operationStopwatch.Elapsed.ToString(@"hh\:mm\:ss"));
+							ProgressStatsText.Text = string.Format(L("ProgFailed"), FormatDuration(operationStopwatch.Elapsed));
+							// The op is over and has reported its verdict — drop the flag. It is global and sticky, so
+							// leaving it set meant the NEXT SetBusy(false) from anywhere (a device-change refresh when
+							// the user unplugs the stick, the Refresh button, a health read) re-ran the stop-reset and
+							// silently wiped this "Failed" line.
+							stopRequested = false;
 						}
-						SetBusy(busy: false);
 					}
 					return;
 			}
@@ -1951,6 +2217,12 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				PromptLocalAccount();
 			}
+			else
+			{
+				// Clear any local-account values left from a previous in-session run so an earlier account/password is
+				// never baked into this stick's unattend.xml when the bypass box is unchecked.
+				localAccountName = ""; localAccountPassword = "";
+			}
 			if (BitLockerCheck.IsChecked == true)
 			{
 				PromptBitLockerPassword();
@@ -1963,6 +2235,8 @@ public partial class MainWindow : Window, IComponentConnector
 			try
 			{
 				stopRequested = false;
+				operationAbortedBeforeWrite = false;
+				bitLockerFailedThisRun = false;
 				bitLockerEncrypting = false;
 				isPaused = false;
 				PauseButton.Content = L("BtnPause");
@@ -1998,18 +2272,32 @@ public partial class MainWindow : Window, IComponentConnector
 				{
 					await ApplyFfuAsync(sourcePath, diskItem);
 				}
-				ProgressBar.Value = 100.0;
-				StatusText.Text = L("SxDone");
-				Log("Operation finished successfully.");
-				// Freeze the timer/stopwatch BEFORE the modal dialog so elapsed time stops at completion,
-				// not when the user dismisses the dialog (the DispatcherTimer keeps ticking while it is open).
-				operationTimer.Stop();
-				operationStopwatch.Stop();
-				UpdateProgressStats();
-				NotifyOperationDone(true);
-				string bootHelp = L("MbBootHelp");
-				MessageBox.Show(L("MbUsbDone") + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + BuildDriverDebloatSummary() + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Asterisk);
-				if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(diskItem.Number);
+				if (operationAbortedBeforeWrite)
+				{
+					// A pre-write safety gate (target-health warning declined, or the identity re-verify catching a
+					// changed/renumbered disk) aborted before anything was written. The operation already set its
+					// "cancelled" stage message — do NOT claim success, notify success, pop the "USB created" dialog,
+					// or eject a drive that was never touched.
+					Log("Operation aborted before any write — no changes were made to the target drive.");
+					operationTimer.Stop();
+					operationStopwatch.Stop();
+					UpdateProgressStats();
+				}
+				else
+				{
+					ProgressBar.Value = 100.0;
+					StatusText.Text = L("SxDone");
+					Log("Operation finished successfully.");
+					// Freeze the timer/stopwatch BEFORE the modal dialog so elapsed time stops at completion,
+					// not when the user dismisses the dialog (the DispatcherTimer keeps ticking while it is open).
+					operationTimer.Stop();
+					operationStopwatch.Stop();
+					UpdateProgressStats();
+					NotifyOperationDone(true);
+					string bootHelp = L("MbBootHelp");
+					MessageBox.Show(L("MbUsbDone") + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
+					if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(diskItem.Number);
+				}
 			}
 			catch (Exception ex)
 			{
@@ -2024,13 +2312,18 @@ public partial class MainWindow : Window, IComponentConnector
 				operationTimer.Stop();
 				operationStopwatch.Stop();
 				UpdateProgressStats();
+				SetBusy(busy: false);
+				// AFTER SetBusy — see the clone path above: its stop-branch resets the stats line, and a user Stop is
+				// the most common route to operationFailed.
 				if (operationFailed)
 				{
-					ProgressStatsText.Text = string.Format(L("ProgFailed"), operationStopwatch.Elapsed.ToString(@"hh\:mm\:ss"));
+					ProgressStatsText.Text = string.Format(L("ProgFailed"), FormatDuration(operationStopwatch.Elapsed));
+					stopRequested = false;   // see the clone path: the sticky flag would let a later refresh wipe this line
 				}
-				SetBusy(busy: false);
 			}
 		}
+		}
+		finally { _startInProgress = false; }
 	}
 
 	private static bool IsExperimentalNtfsMode(int mode)
@@ -2080,30 +2373,56 @@ public partial class MainWindow : Window, IComponentConnector
 				// also fixes the false "Issues found" report on non-English Windows. (Was hard-gated to !repair before,
 				// which made the repair path ALWAYS fall through to the damage report.)
 				|| (result.ExitCode != 0 && disk.IsSystem);
-			if (result.ExitCode == 0)
+			// chkdsk's documented repair-mode exit codes: 0 = no errors; 1 = errors were found AND FIXED (only
+			// meaningful with /r /x, i.e. repair=true — /scan alone never fixes anything). The old code only ever
+			// treated exit 0 as success, so a REPAIR THAT WORKED (exit 1) fell through to the "issues found, back up
+			// your data" branch below — reporting a successful fix as a failure, every time repair actually worked.
+			bool repairSucceeded = repair && result.ExitCode == 1;
+			// Single source of truth for the verdict, computed ONCE and reused for BOTH the status panel below and
+			// the completion MessageBox — a prior version of this fix left the MessageBox's text/icon as SEPARATE
+			// ternaries that re-evaluated ExitCode==0/offlineRepairRequired independently, and re-verify caught real
+			// cases where they disagreed with the panel (e.g. ExitCode==0 co-occurring with an offlineRepairRequired
+			// text-match produced a "needs offline check" popup with a green success icon over a "healthy" panel).
+			// 0=ok, 1=offline-required, 2=repaired, 3=issues. ExitCode==0 wins first (unchanged from before this fix):
+			// immune to the text-match clauses, none of which require ExitCode!=0, so a genuinely clean run can never
+			// be misrouted by them. offlineRepairRequired is next: its disk.IsSystem clause is an invariant about the
+			// RUNNING system disk — ANY nonzero exit there (including 1) means chkdsk could not run online and was
+			// scheduled for the next reboot, NOT that it fixed anything live, so it must outrank repairSucceeded.
+			int verdict = result.ExitCode == 0 ? 0 : offlineRepairRequired ? 1 : repairSucceeded ? 2 : 3;
+			switch (verdict)
 			{
-				ScanStatusText.Text = string.Format(L("DScanOk"), driveLetter);
-				ScanAdviceText.Text = L("DScanOkAdvice");
-				SetToolStatus(L("DScanOkTool"));
-			}
-			else if (offlineRepairRequired)
-			{
-				ScanStatusText.Text = string.Format(L("DScanOffline"), driveLetter);
-				ScanAdviceText.Text = string.Format(L("DScanOfflineAdvice"), driveLetter);
-				SetToolStatus(L("DScanOfflineTool"));
-			}
-			else
-			{
-				ScanStatusText.Text = string.Format(L("DScanIssues"), driveLetter, result.ExitCode);
-				ScanAdviceText.Text = L("DScanIssuesAdvice");
-				SetToolStatus(L("DScanIssuesTool"));
+				case 0:
+					ScanStatusText.Text = string.Format(L("DScanOk"), driveLetter);
+					ScanAdviceText.Text = L("DScanOkAdvice");
+					SetToolStatus(L("DScanOkTool"));
+					break;
+				case 1:
+					ScanStatusText.Text = string.Format(L("DScanOffline"), driveLetter);
+					// The generic offline advice says "press Repair" as the next step — wrong wording when repair was
+					// the very thing that just ran and still couldn't lock the drive; use the repair-aware variant then.
+					ScanAdviceText.Text = repair ? L("DScanOfflineAdviceRepair") : string.Format(L("DScanOfflineAdvice"), driveLetter);
+					SetToolStatus(L("DScanOfflineTool"));
+					break;
+				case 2:
+					ScanStatusText.Text = string.Format(L("DScanRepaired"), driveLetter);
+					ScanAdviceText.Text = L("DScanRepairedAdvice");
+					SetToolStatus(L("DScanOkTool"));
+					break;
+				default:
+					ScanStatusText.Text = string.Format(L("DScanIssues"), driveLetter, result.ExitCode);
+					// The English-text signals above can't match chkdsk's LOCALIZED console output on a non-English
+					// Windows install, so on a non-system drive a merely busy/locked drive (common, benign) is
+					// indistinguishable here from real corruption. Don't assert "read-only scan" when repair was
+					// actually attempted (it isn't read-only), and be honest that a busy drive can look like this too —
+					// the raw CHKDSK output above (in the user's own language) is the real source of truth.
+					ScanAdviceText.Text = repair ? L("DScanIssuesAdviceRepair") : L("DScanIssuesAdvice");
+					SetToolStatus(L("DScanIssuesTool"));
+					break;
 			}
 			Log((repair ? "Repair scan finished for " : "Error scan finished for ") + driveLetter + ":");
-			MessageBox.Show(offlineRepairRequired
-				? string.Format(L("DScanMsgOffline"), driveLetter)
-				: ScanStatusText.Text,
+			MessageBox.Show(verdict == 1 ? string.Format(L("DScanMsgOffline"), driveLetter) : ScanStatusText.Text,
 				L("DScanMsgTitle"), MessageBoxButton.OK,
-				result.ExitCode == 0 ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
+				(verdict == 0 || verdict == 2) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
 		}
 		catch (Exception ex)
 		{
@@ -2133,7 +2452,13 @@ public partial class MainWindow : Window, IComponentConnector
 			"'Physical disk match'\n" +
 			"$physical = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.DeviceId -eq [string]$disk.Number } | Select-Object -First 1\n" +
 			"if (-not $physical) { $physical = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $disk.FriendlyName } | Select-Object -First 1 }\n" +
-			"if ($physical) { $physical | Format-List FriendlyName,MediaType,BusType,HealthStatus,OperationalStatus,Usage,Size,SpindleSpeed,CanPool | Out-String } else { 'No matching PhysicalDisk entry found.' }";
+			"if ($physical) { $physical | Format-List FriendlyName,MediaType,BusType,HealthStatus,OperationalStatus,Usage,Size,SpindleSpeed,CanPool | Out-String } else { 'No matching PhysicalDisk entry found.' }\n" +
+			// The predictive verdict (FailurePrediction) is computed from THIS text. Without the reliability counters every
+			// one of its failure rules silently evaluates against -1 and can never fire, so a worn-out or error-throwing
+			// drive came back as a confident green "No failure signs". Emit the same counters the SMART view collects.
+			"''\n" +
+			"'Reliability counters'\n" +
+			"if ($physical) { try { $physical | Get-StorageReliabilityCounter | Format-List * | Out-String } catch { 'Reliability counters are not available for this drive/controller: ' + $_.Exception.Message } } else { 'Reliability counters are not available (no matching PhysicalDisk).' }";
 		return await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(script));
 	}
 
@@ -2231,8 +2556,6 @@ public partial class MainWindow : Window, IComponentConnector
 	{
 		_lastDriversAdded = -2; _lastDebloatApplied = false; // reset per-run so the completion summary is accurate
 		string mountedIso = null;
-		char bootLetter = GetFreeDriveLetter();
-		char windowsLetter = GetFreeDriveLetter(bootLetter);
 		string diskpartPath = null;
 		try
 		{
@@ -2249,6 +2572,11 @@ public partial class MainWindow : Window, IComponentConnector
 				mountedIso = path;
 				imageFile = FindInstallImage(await MountIsoAsync(path));
 			}
+			// Choose the boot/Windows drive letters AFTER mounting the ISO: Mount-DiskImage auto-assigns the first free
+			// letter, so picking these before the mount could hand back the letter the ISO then takes, breaking the
+			// diskpart 'assign letter=' step. Choosing them post-mount guarantees GetFreeDriveLetter skips the ISO letter.
+			char bootLetter = GetFreeDriveLetter();
+			char windowsLetter = GetFreeDriveLetter(bootLetter);
 			int index = ((!(EditionBox.SelectedItem is EditionItem editionItem)) ? 1 : editionItem.Index);
 
 			// Capacity gate before the destructive format.
@@ -2265,9 +2593,15 @@ public partial class MainWindow : Window, IComponentConnector
 			if (!await ConfirmTargetHealthAsync(disk))
 			{
 				Log("Windows To Go creation cancelled by user after target health warning.");
+				operationAbortedBeforeWrite = true;
 				SetStage(L("StgCancelHealth"), 0.0);
 				return;
 			}
+
+			// A Windows-To-Go layout uses MBR (for BIOS+UEFI boot compatibility), which addresses at most ~2 TB; warn
+			// when the target is larger so the user understands the space beyond ~2 TB is left unpartitioned.
+			if (disk.Size > 2199023255040L)
+				Log("Note: the target is larger than ~2 TB; a Windows-To-Go MBR layout can use only the first ~2 TB — the remainder is left unallocated.");
 
 			// Optional data partition: cap Windows and give the rest to an NTFS "Data" partition.
 			int windowsSizeMb = 0;
@@ -2280,7 +2614,11 @@ public partial class MainWindow : Window, IComponentConnector
 				long est = imgLen > 0 ? imgLen * 3 + 8L * 1024 * 1024 * 1024
 					: (requiredBytes > 0 ? requiredBytes + 8L * 1024 * 1024 * 1024 : 40L * 1024 * 1024 * 1024);
 				long winBytes = Math.Max(40L * 1024 * 1024 * 1024, est);
-				long leftover = disk.Size - winBytes - 300L * 1024 * 1024 - 200L * 1024 * 1024;
+				// Size the data partition from the MBR-usable span (~2 TiB max, 2^32 sectors × 512 B), not the full disk:
+				// diskpart silently caps the trailing 'create partition primary' at the MBR limit, so basing the reported
+				// size on disk.Size would over-promise (log a size that is never created) on a >2 TB target.
+				long mbrUsable = Math.Min(disk.Size, 2199023255040L);
+				long leftover = mbrUsable - winBytes - 300L * 1024 * 1024 - 200L * 1024 * 1024;
 				if (leftover >= 8L * 1024 * 1024 * 1024)
 				{
 					windowsSizeMb = (int)(winBytes / (1024 * 1024));
@@ -2333,7 +2671,14 @@ public partial class MainWindow : Window, IComponentConnector
 			EnsureUefiRemovableFallback(bootLetter);
 			if (BitLockerCheck.IsChecked == true)
 			{
-				await EnableBitLockerAsync(windowsLetter);
+				// A BitLocker start-failure must NOT abort an already-complete, bootable Windows To Go as a total failure
+				// (which would also skip the volume flush below). Mirror the clone path: keep the drive, flush, and warn.
+				try { await EnableBitLockerAsync(windowsLetter); }
+				catch (Exception blEx)
+				{
+					bitLockerFailedThisRun = true;
+					Log("WARNING: BitLocker did not encrypt the Windows To Go drive: " + blEx.Message + " (the drive is bootable but NOT encrypted).");
+				}
 			}
 			await FlushVolumesAsync(bootLetter, windowsLetter);
 			Log($"Windows To Go created on Disk {disk.Number}. Boot partition: {bootLetter}:, Windows partition: {windowsLetter}:."
@@ -2492,9 +2837,8 @@ public partial class MainWindow : Window, IComponentConnector
 		if (File.Exists(outPath) && new FileInfo(outPath).Length > 0)
 		{
 			MessageBoxResult choice = MessageBox.Show(
-				"This image already exists.\n\nAppend an INCREMENTAL backup (adds a new restore point, storing only what changed — fast and small)?\n\n" +
-				"Yes = append incremental\nNo = overwrite with a fresh full backup\nCancel = stop",
-				"DriveForge backup", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+				L("MbBackupOverwritePrompt"),
+				"DriveForge", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
 			if (choice == MessageBoxResult.Cancel) return;
 			incremental = choice == MessageBoxResult.Yes;
 		}
@@ -2507,10 +2851,10 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			var destDrive = new DriveInfo(Path.GetPathRoot(outPath) ?? "C:\\");
 			long need = (long)(usedBytes * (incremental ? 0.15 : 0.6));
-			// Overwriting an existing full image frees that image's space first, so count it as available — otherwise a
-			// dedicated backup drive that's nearly full precisely BECAUSE it holds the previous full backup wrongly fails.
-			long reclaimable = (!incremental && File.Exists(outPath)) ? new FileInfo(outPath).Length : 0;
-			if (destDrive.AvailableFreeSpace + reclaimable < need)
+			// A full overwrite now captures to a temp file (.dfnew) and swaps it in only AFTER it verifies, so the old
+			// backup stays on disk for the whole capture — its space is NOT reclaimable up-front. Require the full need of
+			// real free space (both files coexist during capture). Incremental appends in place, so no coexistence there.
+			if (destDrive.AvailableFreeSpace < need)
 			{
 				MessageBox.Show(string.Format(L("MbBackupNoSpace"), FormatBytes(need), FormatBytes(destDrive.AvailableFreeSpace)), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation);
 				return;
@@ -2522,6 +2866,10 @@ public partial class MainWindow : Window, IComponentConnector
 		string? shadowDosTarget = null;
 		char shadowLetter = GetFreeDriveLetter();
 		bool failed = false;
+		bool usedDismFallback = false;
+		// A full capture is written to a TEMP file and swapped in only after it VERIFIES — so a failed/interrupted/corrupt
+		// overwrite can never destroy the existing backup. An incremental "append" must modify the existing .wim in place.
+		string capturePath = incremental ? outPath : outPath + ".dfnew";
 		try
 		{
 			stopRequested = false;
@@ -2551,17 +2899,17 @@ public partial class MainWindow : Window, IComponentConnector
 			string wimlibPath = await EnsureWimlibAsync();
 			string captureConfigPath = Path.Combine(Path.GetTempPath(), $"driveforge-backup-config-{Guid.NewGuid():N}.ini");
 			await File.WriteAllTextAsync(captureConfigPath, BuildCaptureConfig(), Encoding.ASCII);
-			if (!incremental) TryDeleteFile(outPath);
+			if (!incremental) TryDeleteFile(capturePath);   // clear a stale temp from a prior interrupted run — the real backup is left untouched
 			int threads = Math.Max(2, Math.Min(Environment.ProcessorCount, 8));
-			string imageName = (incremental ? "Backup " : "DriveForge backup ") + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+			string imageName = (incremental ? "Backup " : "DriveForge backup ") + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 			// "append" deduplicates against the existing images (true incremental); "capture" makes a fresh file.
 			string verb = incremental ? "append" : "capture";
-			string args = verb + " " + QuoteArgument(sourceRoot.TrimEnd('\\') + "\\.") + " " + QuoteArgument(outPath) +
+			string args = verb + " " + QuoteArgument(sourceRoot.TrimEnd('\\') + "\\.") + " " + QuoteArgument(capturePath) +
 				" " + QuoteArgument(imageName) + " " + QuoteArgument("Created by DriveForge") +
 				(incremental ? "" : " --compress=LZX") + " --threads=" + threads + " --config=" + QuoteArgument(captureConfigPath) + " --check";
 			using (var pollCts = new CancellationTokenSource())
 			{
-				Task poll = PollFileSizeProgressAsync(outPath, pollCts.Token);
+				Task poll = PollFileSizeProgressAsync(capturePath, pollCts.Token);
 				try { await RunProcessAsync(wimlibPath, args); }
 				catch (Exception wex) when (!incremental && !stopRequested && IsWimlibReadFailure(wex))
 				{
@@ -2571,17 +2919,29 @@ public partial class MainWindow : Window, IComponentConnector
 					// matches the wimlib backup's compression). Same rationale as the clone's Microsoft engine.
 					Log("wimlib capture failed to read a file (exit 47 — usually real-time antivirus blocking its reads). Retrying with the Microsoft engine (DISM), which antivirus trusts and which skips unreadable files.");
 					SetStage(L("StgRetryBackupMs"), 12.0);
-					TryDeleteFile(outPath);   // drop wimlib's incomplete partial before DISM writes a fresh one
+					TryDeleteFile(capturePath);   // drop wimlib's incomplete partial before DISM writes a fresh one
+					usedDismFallback = true;
 					await RunProcessAsync("dism.exe",
-						"/Capture-Image /ImageFile:" + QuoteArgument(outPath) +
+						"/Capture-Image /ImageFile:" + QuoteArgument(capturePath) +
 						" /CaptureDir:" + sourceRoot.TrimEnd('\\') + "\\" +
 						" /Name:" + QuoteArgument(imageName) +
-						" /ConfigFile:" + QuoteArgument(captureConfigPath) + " /Compress:max");
+						" /ConfigFile:" + QuoteArgument(captureConfigPath) + " /Compress:max /CheckIntegrity");
 					Log("DISM backup capture completed.");
 				}
 				finally { pollCts.Cancel(); try { await poll; } catch { } TryDeleteFile(captureConfigPath); }
 			}
 
+			// Read-back verify BEFORE trusting the image. A full capture is verified in its temp file and only then
+			// atomically swapped over the old backup; an incremental append is verified in place.
+			SetStage(L("StgVerifyBackup"), 92.0);
+			if (!await WimIsValidAsync(wimlibPath, capturePath))
+			{
+				if (!incremental) TryDeleteFile(capturePath);   // discard the bad new image; the existing backup is left untouched
+				throw new InvalidOperationException(incremental
+					? "The incremental backup did not pass verification — your existing image may be damaged; make a fresh full backup."
+					: "The captured backup failed verification (it may be truncated or corrupt) and was discarded.");
+			}
+			if (!incremental) File.Move(capturePath, outPath, overwrite: true);   // replace the old backup only now that the new one verified
 			bool ok = File.Exists(outPath) && new FileInfo(outPath).Length > 0;
 			progressDoneGiB = progressTotalGiB;
 			operationTimer.Stop();
@@ -2597,6 +2957,7 @@ public partial class MainWindow : Window, IComponentConnector
 			if (ok)
 			{
 				SetLastReport(outPath);
+				if (usedDismFallback) MessageBox.Show(L("MbBackupDismSkipped"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);   // AV blocked wimlib -> DISM skipped unreadable files -> image may be missing files
 				MessageBox.Show(string.Format(L("MbBackupCreated"), outPath, FormatBytes(new FileInfo(outPath).Length)),
 					"DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
 				MaybeOfferDonation();
@@ -2609,17 +2970,21 @@ public partial class MainWindow : Window, IComponentConnector
 		catch (Exception ex)
 		{
 			failed = true;
-			// A wimlib abort (e.g. exit 47 — it couldn't read a file) leaves a large, INVALID partial .wim that looks
-			// like a real backup but can't be restored. Delete it on a fresh capture. (Incremental/append keeps the
-			// existing valid restore points, so don't touch it.)
-			if (!incremental) TryDeleteFile(outPath);
+			// Full capture writes to a TEMP file, so on any failure just drop the temp — the existing backup is untouched.
+			// Incremental append modifies the existing .wim in place, so it is kept (it may still hold prior restore points).
+			if (!incremental) TryDeleteFile(capturePath);
 			StatusText.Text = L("SxBackupFailed");
 			NotifyOperationDone(false);
 			SaveLogToDesktop();
-			// If even the DISM fallback couldn't read the file (or this was an incremental run, which doesn't fall back),
-			// turn the cryptic "exited with code 47" into an actionable explanation instead of a raw stack trace.
-			if (IsWimlibReadFailure(ex))
+			if (incremental)
 			{
+				// The append rewrites the existing image in place; an interrupted/failed append can leave it damaged, and
+				// it was NOT discarded. Be honest so the user re-verifies it / makes a fresh full backup.
+				MessageBox.Show(L("MbBackupIncFailed"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);
+			}
+			else if (IsWimlibReadFailure(ex))
+			{
+				// Turn the cryptic "exited with code 47" (AV blocked wimlib AND the DISM fallback) into an actionable note.
 				string blocked = TryGetDismBlockedPath(shadowLetter);
 				string msg = L("MbBackupReadFail") + (blocked.Length > 0 ? "\n\n→  " + blocked : "");
 				MessageBox.Show(msg, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation);
@@ -2647,6 +3012,15 @@ public partial class MainWindow : Window, IComponentConnector
 			try { await Task.Delay(1500, token); }
 			catch (TaskCanceledException) { break; }
 		}
+	}
+
+	// Read-back integrity check of a produced .wim: `wimlib verify` re-reads every stream and validates the --check
+	// integrity table, catching a truncated / corrupt / interrupted capture (or a half-committed in-place append) that
+	// `File.Exists && Length>0` would miss. Returns false on any failure (RunProcessCaptureAsync throws on non-zero exit).
+	private async Task<bool> WimIsValidAsync(string wimlibPath, string wimPath)
+	{
+		try { await RunProcessCaptureAsync(wimlibPath, "verify " + QuoteArgument(wimPath)); return true; }
+		catch (Exception ex) { Log("Backup verify failed: " + ex.Message); return false; }
 	}
 
 	// Returns the display name of the antivirus actively protecting in REAL TIME (any vendor, via the Windows
@@ -2681,8 +3055,11 @@ public partial class MainWindow : Window, IComponentConnector
 		char shadowLetter = GetFreeDriveLetter(currentTargetLetter, bootLetter, windowsLetter);
 		string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
 		string runId = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+		// Report folder + diskpart-script artifact are only written to disk when the clone needs review (see the
+		// end of this method) — a clean success no longer litters the Desktop. The script itself is staged in TEMP
+		// (it must exist as a real file for diskpart.exe /s to read) and copied into reportRoot only on failure.
 		string reportRoot = Path.Combine(desktop, "DriveForge-NTFS-FullRootClone-" + runId);
-		string diskpartPath = Path.Combine(reportRoot, "01-real-usb-layout-diskpart-ran.txt");
+		string diskpartPath = Path.Combine(Path.GetTempPath(), $"driveforge-fullroot-diskpart-{Guid.NewGuid():N}.txt");
 		string realRoot = windowsLetter + ":\\";
 		string realWindowsFolder = Path.Combine(realRoot, "Windows");
 		string bcdStore = bootLetter + ":\\EFI\\Microsoft\\Boot\\BCD";
@@ -2711,7 +3088,6 @@ public partial class MainWindow : Window, IComponentConnector
 		bool unattendWritten = false;
 		string sourceRoot = "";
 		bool forceDism = false; // set true if the user opts into the DISM engine at the antivirus prompt
-		Directory.CreateDirectory(reportRoot);
 
 		try
 		{
@@ -2775,20 +3151,12 @@ public partial class MainWindow : Window, IComponentConnector
 
 			// Raw NTFS engine (experimental): reads the snapshot MFT directly (antivirus-transparent, no scratch WIM,
 			// fits a smaller target) and writes files onto the freshly-formatted target. It takes priority over DISM.
-			// Because it is unproven and destructive, confirm explicitly and steer the user to a spare test disk.
+			// The disk-erase warning was already shown and confirmed ONCE, up front, by ConfirmOperationSummary before
+			// this method was even called — no second confirmation here, just an informational log line.
 			bool useRawEngine = UseNtfsRawEngineCheck?.IsChecked == true;
 			if (useRawEngine && !headlessRun)
 			{
-				MessageBoxResult rawChoice = MessageBox.Show(
-					"Fast Clone engine selected — this is the newest engine.\n\nIt will FORMAT the selected disk and clone Windows with the direct-copy engine.\n\nIt copies files, timestamps, hardlinks, permissions (ACLs/owners), junctions/reparse points, alternate data streams, EFS-encrypted files (raw, via the backup API — decryptable on the clone), and decompresses NTFS-compressed and WOF/CompactOS files — so treat the result as a TEST. Use only a spare disk.\n\nFor a reliable clone, cancel and uncheck Fast Clone (the standard/DISM engine is used instead).\n\nContinue with Fast Clone?",
-					"DriveForge — Fast Clone", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel);
-				if (rawChoice != MessageBoxResult.OK)
-				{
-					Log("Fast Clone cancelled by user at the confirmation prompt.");
-					SetStage(L("StgCloneCancelled"), 0.0);
-					return;
-				}
-				Log("Fast Clone (raw NTFS) engine selected — direct copy, not slowed by antivirus, no scratch WIM.");
+				Log("Fast Clone (raw NTFS) engine selected — direct copy, not slowed by antivirus, no scratch WIM. Copies files, timestamps, hardlinks, permissions (ACLs/owners), junctions/reparse points, alternate data streams, EFS-encrypted files (raw, via the backup API), and decompresses NTFS-compressed and WOF/CompactOS files.");
 			}
 
 			// Microsoft-engine (DISM) path: capture the snapshot to a scratch WIM BEFORE we format the target, so a
@@ -2820,6 +3188,12 @@ public partial class MainWindow : Window, IComponentConnector
 			var dataCloneJobs = new List<(char Source, char Target, string Label)>();
 			long winBytesPlan = Math.Max(64L * 1024 * 1024 * 1024, (long)(GetCurrentWindowsUsedBytes() * 1.4) + 12L * 1024 * 1024 * 1024);
 			long bootSlack = 350L * 1024 * 1024 + 200L * 1024 * 1024;
+			// A faithful clone builds an MBR target (BuildRealNtfsUsbLayoutDiskpartScript uses no `convert gpt`), which
+			// addresses at most ~2 TiB; diskpart silently caps the trailing partition there. Size the data partitions from
+			// the MBR-usable span, not the raw disk size, and warn when the target is larger so space isn't over-promised.
+			long mbrUsable = Math.Min(targetDisk.Size, 2199023255040L);
+			if (targetDisk.Size > 2199023255040L)
+				Log("Note: the target is larger than ~2 TB; an MBR clone layout can use only the first ~2 TB — the remainder is left unallocated.");
 			var reservedLetters = new List<char> { currentTargetLetter, bootLetter, windowsLetter, shadowLetter };
 
 			// Internal-disk mode clones the WHOLE disk (all data partitions) automatically; portable mode
@@ -2834,15 +3208,25 @@ public partial class MainWindow : Window, IComponentConnector
 				}
 				else
 				{
-					long need = winBytesPlan + bootSlack;
 					var sized = new List<(SourceDataPartition Src, long Bytes)>();
 					foreach (SourceDataPartition sp in srcParts)
 					{
 						long b = Math.Max(1L * 1024 * 1024 * 1024, (long)(sp.UsedBytes * 1.3) + 2L * 1024 * 1024 * 1024);
 						sized.Add((sp, b));
-						need += b;
 					}
-					if (need > targetDisk.Size)
+					// MBR (BuildRealNtfsUsbLayoutDiskpartScript uses no `convert gpt`) holds at most 4 PRIMARY partitions;
+					// the layout already uses 2 (boot + Windows), so only 2 data partitions can be created. A 5th
+					// `create partition` fails mid-script and leaves diskpart focused on the previous partition, so the
+					// following `format`/`assign` would hit the WRONG volume. Cap the extras and warn about the rest.
+					const int MaxExtraDataPartitions = 2;
+					if (sized.Count > MaxExtraDataPartitions)
+					{
+						Log($"NOTE: this disk has {sized.Count} data partitions but an MBR clone can hold only {MaxExtraDataPartitions} extra (plus boot + Windows). Cloning the first {MaxExtraDataPartitions}; clone the rest separately.");
+						sized = sized.GetRange(0, MaxExtraDataPartitions);
+					}
+					long need = winBytesPlan + bootSlack;
+					foreach (var s in sized) need += s.Bytes;
+					if (need > mbrUsable)
 					{
 						throw new InvalidOperationException(
 							"The target is too small to also clone the other data partitions.\n\nRequired: " + FormatBytes(need) +
@@ -2865,7 +3249,7 @@ public partial class MainWindow : Window, IComponentConnector
 			else if (DataPartitionCheck.IsChecked == true)
 			{
 				// Empty data partition from leftover space.
-				long leftover = targetDisk.Size - winBytesPlan - bootSlack;
+				long leftover = mbrUsable - winBytesPlan - bootSlack;
 				if (leftover >= 8L * 1024 * 1024 * 1024)
 				{
 					windowsSizeMb = (int)(winBytesPlan / (1024 * 1024));
@@ -2877,6 +3261,16 @@ public partial class MainWindow : Window, IComponentConnector
 				{
 					Log("Data partition requested but skipped: not enough leftover space after Windows. Windows will use the whole disk.");
 				}
+			}
+			// TOCTOU guard: the health/identity gate ran before the (possibly multi-minute) DISM capture + the raw-engine
+			// confirm modal above, and the diskpart script selects the target purely by disk NUMBER. Re-verify the
+			// target's identity ONE more time immediately before the destructive clean, so a disk that was unplugged and
+			// renumbered during the capture is never the one we wipe. FailTargetDiskChanged already shows the dialog.
+			if (!await VerifyTargetDiskUnchangedAsync(targetDisk))
+			{
+				Log("Faithful clone aborted: the target disk's identity changed since the confirmation.");
+				SetStage(L("StgCloneCancelHealth"), 0.0);
+				return;
 			}
 			await File.WriteAllTextAsync(diskpartPath, BuildRealNtfsUsbLayoutDiskpartScript(targetDisk.Number, bootLetter, windowsLetter, windowsSizeMb, extraPartitions), Encoding.ASCII);
 			diskpartOutput = await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(diskpartPath));
@@ -3030,7 +3424,7 @@ public partial class MainWindow : Window, IComponentConnector
 				progressDoneGiB = 0.0;
 				progressTotalGiB = Math.Max(0.5, verifyTotalBytes / 1073741824.0);
 				_speedWindow.Clear();
-				await Task.Run(() => VerifyCloneContent(realRoot, sourceRoot, IsNtfsCloneExcluded, out verifyVerifiedFiles, out verifyVerifiedBytes, out verifyMismatches, out verifyUnverifiable, verifySamples, verifyUnverifiableSamples));
+				await Task.Run(() => VerifyCloneContent(realRoot, sourceRoot, IsNtfsCloneExcluded, out verifyVerifiedFiles, out verifyVerifiedBytes, out verifyMismatches, out verifyUnverifiable, verifySamples, verifyUnverifiableSamples, useRawEngine));
 				verifyRan = !stopRequested && !internalOperationStopped;
 				Log(verifyRan
 					? $"Content verification finished: {verifyVerifiedFiles:N0} files OK ({FormatBytes(verifyVerifiedBytes)}), {verifyMismatches:N0} mismatches, {verifyUnverifiable:N0} unverifiable (protected source files)."
@@ -3065,7 +3459,9 @@ public partial class MainWindow : Window, IComponentConnector
 			bcdbootOk = true;
 			bcdStoreOk = File.Exists(bcdStore);
 			EnsureUefiRemovableFallback(bootLetter);
-			bootx64Ok = File.Exists(bootLetter + ":\\EFI\\Boot\\bootx64.efi");
+			// Check the arch-correct UEFI fallback name (EnsureUefiRemovableFallback writes bootia32/aa64/x64 per the
+			// image's architecture) instead of a hardcoded bootx64.efi — else a valid ARM64/x86 clone is flagged failed.
+			bootx64Ok = File.Exists(bootLetter + ":\\EFI\\Boot\\" + UefiFallbackNameFor(bootLetter + ":\\EFI\\Microsoft\\Boot\\bootmgfw.efi"));
 			if (bcdStoreOk)
 			{
 				bcdEnumOutput = await RunProcessCaptureAsync("bcdedit.exe", "/store " + QuoteArgument(bcdStore) + " /enum all");
@@ -3084,6 +3480,7 @@ public partial class MainWindow : Window, IComponentConnector
 				catch (Exception secEx) { Log("WARNING: raw-engine permission pass failed: " + secEx.Message + " (clone is usable; permissions may be default)."); }
 			}
 
+			bool bitLockerRequestedButFailed = false;
 			if (BitLockerCheck.IsChecked == true)
 			{
 				try
@@ -3092,20 +3489,46 @@ public partial class MainWindow : Window, IComponentConnector
 				}
 				catch (Exception blEx)
 				{
-					Log("WARNING: BitLocker step failed on the clone: " + blEx.Message + " (the clone is still usable; encryption was not applied).");
+					// A clone without encryption is still bootable, so this is not fatal — but the user asked for BitLocker
+					// and a recovery-key file was already written, so flag it into `ok` and warn in the dialog instead of
+					// reporting a plain success + safe-to-remove on an unencrypted stick.
+					bitLockerRequestedButFailed = true;
+					Log("WARNING: BitLocker step failed on the clone: " + blEx.Message + " (the clone is still usable; encryption was NOT applied).");
 				}
 			}
 
 			SetStage(L("StgWriteReport"), 96.0);
-			string reportPath = WriteFullRootUsbCloneReport(targetDisk, reportRoot, diskpartPath, shadowLetter, sourceRoot, realRoot, realWindowsFolder, bootLetter, windowsLetter, diskpartOk, copyOk, registryOk, bcdbootOk, bcdStoreOk, bootx64Ok, loaderPathOk, copyResult, diskpartOutput, registryOutput, bcdbootOutput, bcdEnumOutput, verifyRan, verifyVerifiedFiles, verifyVerifiedBytes, verifyMismatches, verifyUnverifiable, verifySamples, verifyUnverifiableSamples, unattendWritten);
-			string reportText = File.ReadAllText(reportPath, Encoding.UTF8);
-			bool ok = diskpartOk && copyOk && registryOk && bcdbootOk && bcdStoreOk && bootx64Ok && loaderPathOk && (!verifyRan || verifyMismatches == 0);
+			// A raw-engine clone that skipped files (unreadable/torn source records or target write errors) is INCOMPLETE
+			// even though the few boot files copyOk checks exist. And a Stop during verify/registry/bcdboot leaves
+			// verifyRan=false, which would otherwise NOT block ok. Treat both as review-needed, never a clean success.
+			bool rawIncomplete = rawStats != null && rawStats.Errors > 0;
+			// Regions of real file data that could NOT be read from the source (bad sectors / a truncated run-list) and
+			// were filled with zeros to keep the file length correct. The clone is complete in size but those bytes are
+			// LOST — that is not a byte-faithful clone, so treat it as review-needed like a dropped-file error.
+			long rawZeroFilled = rawStats != null ? rawStats.RunShortfalls + rawStats.ReadShortfalls : 0;
+			bool ok = diskpartOk && copyOk && registryOk && bcdbootOk && bcdStoreOk && bootx64Ok && loaderPathOk && !bitLockerRequestedButFailed && !rawIncomplete && rawZeroFilled == 0 && !stopRequested && !internalOperationStopped && (!verifyRan || verifyMismatches == 0);
+			// A report is only SAVED TO DISK (Desktop folder + .txt) when the clone needs review — a clean success is
+			// shown in-app below and leaves nothing behind on the Desktop.
+			string? reportPath = null;
+			string reportText;
+			if (ok)
+			{
+				reportText = BuildFullRootUsbCloneReportText(targetDisk, persisted: false, null, null, shadowLetter, sourceRoot, realRoot, realWindowsFolder, bootLetter, windowsLetter, diskpartOk, copyOk, registryOk, bcdbootOk, bcdStoreOk, bootx64Ok, loaderPathOk, copyResult, diskpartOutput, registryOutput, bcdbootOutput, bcdEnumOutput, verifyRan, verifyVerifiedFiles, verifyVerifiedBytes, verifyMismatches, verifyUnverifiable, verifySamples, verifyUnverifiableSamples, unattendWritten);
+			}
+			else
+			{
+				reportPath = WriteFullRootUsbCloneReport(targetDisk, reportRoot, diskpartPath, shadowLetter, sourceRoot, realRoot, realWindowsFolder, bootLetter, windowsLetter, diskpartOk, copyOk, registryOk, bcdbootOk, bcdStoreOk, bootx64Ok, loaderPathOk, copyResult, diskpartOutput, registryOutput, bcdbootOutput, bcdEnumOutput, verifyRan, verifyVerifiedFiles, verifyVerifiedBytes, verifyMismatches, verifyUnverifiable, verifySamples, verifyUnverifiableSamples, unattendWritten);
+				reportText = File.ReadAllText(reportPath, Encoding.UTF8);
+			}
 			progressDoneGiB = ok ? progressTotalGiB : Math.Max(progressTotalGiB * 0.85, 0.85);
 			SetStage(ok ? L("StgCloneDone") : L("StgCloneDoneReview"), 100.0);
 			SetToolOutput(reportText);
-			SelectDriveTool(ToolSmart, 5, "Faithful clone complete. Open the report for details.");
+			SelectDriveTool(ToolSmart, 5, ok ? "Faithful clone complete." : "Faithful clone complete. Open the report for details.");
 			Log(reportText);
-			SetLastReport(reportPath);
+			// A clean success has no report on disk this run — clear any stale pointer from an earlier failed run so
+			// "Open Report" never opens an unrelated old report.
+			if (reportPath != null) SetLastReport(reportPath);
+			else { lastReportPath = ""; OpenReportButton.IsEnabled = false; }
 			// Flush the target volumes so it is safe to unplug as soon as the dialog is dismissed.
 			await FlushVolumesAsync(bootLetter, windowsLetter);
 			// Freeze the timer and clear the busy state BEFORE the modal dialog so the elapsed time stops
@@ -3119,13 +3542,18 @@ public partial class MainWindow : Window, IComponentConnector
 			bool cloneDialogOk = ok;
 			// Surface data-partition clone failures in the completion dialog — the Windows checks alone can't reflect them.
 			string dataCloneNote = dataCloneFailures > 0 ? "\n\n" + string.Format(L("MbCloneDataFail"), dataCloneFailures, dataCloneJobs.Count) : "";
-			MessageBox.Show((ok ? L("MbCloneDoneOk") : L("MbCloneDoneReview")) + dataCloneNote + "\n\n" + L("MbCloneBody") + "\n\n" +(bitLockerEncrypting ? L("MbCloneBitlockerBusy") : L("MbCloneSafeRemove")) + "\n\n" + L("MbCloneBootHelp") + "\n\n" + L("MbCloneReportLabel") + "\n" + reportPath + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, (ok && dataCloneFailures == 0) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
+			string bitLockerFailNote = bitLockerRequestedButFailed ? "\n\n" + L("MbCloneBitlockerFailed") : "";
+			string rawErrorsNote = rawIncomplete ? "\n\n" + string.Format(L("MbCloneFilesSkipped"), rawStats!.Errors) : "";
+			string rawZeroNote = rawZeroFilled > 0 ? "\n\n" + string.Format(L("MbRawZeroFilled"), rawZeroFilled) : "";
+			string reportNote = reportPath != null ? "\n\n" + L("MbCloneReportLabel") + "\n" + reportPath : "";
+			MessageBox.Show((ok ? L("MbCloneDoneOk") : L("MbCloneDoneReview")) + dataCloneNote + bitLockerFailNote + rawErrorsNote + rawZeroNote + "\n\n" + L("MbCloneBody") + "\n\n" +(bitLockerEncrypting ? L("MbCloneBitlockerBusy") : L("MbCloneSafeRemove")) + "\n\n" + L("MbCloneBootHelp") + reportNote + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, (ok && dataCloneFailures == 0) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
 			if (cloneDialogOk) MaybeOfferDonation();
 			if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(targetDisk.Number);
 		}
 		finally
 		{
 			if (dismWimPath != null) TryDeleteFile(dismWimPath); // drop the scratch capture WIM on any exit (success, cancel, or a failure between capture and apply)
+			TryDeleteFile(diskpartPath); // drop the TEMP diskpart script — it was already copied into the report folder if a report was persisted (failure/review path)
 			if (!string.IsNullOrWhiteSpace(shadowDosTarget))
 			{
 				UnmapSnapshotDrive(shadowLetter, shadowDosTarget);
@@ -3620,9 +4048,10 @@ exit 0
 		return Task.FromResult("USER APPX REPAIR: handled by Active Setup (covers all existing and future user profiles automatically).");
 	}
 
-	private string WriteFullRootUsbCloneReport(DiskItem targetDisk, string reportRoot, string diskpartPath, char shadowLetter, string sourceRoot, string realRoot, string realWindowsFolder, char bootLetter, char windowsLetter, bool diskpartOk, bool copyOk, bool registryOk, bool bcdbootOk, bool bcdStoreOk, bool bootx64Ok, bool loaderPathOk, NtfsCopyTestResult? copyResult, string diskpartOutput, string registryOutput, string bcdbootOutput, string bcdEnumOutput, bool verifyRan, long verifyVerifiedFiles, long verifyVerifiedBytes, long verifyMismatches, long verifyUnverifiable, List<string> verifySamples, List<string> verifyUnverifiableSamples, bool unattendWritten)
+	// Builds the full report TEXT with no disk I/O (used for the in-app view on every run). Pass persisted=false and
+	// null report-folder/script-path when nothing has been (or will be) written to disk, e.g. a clean success.
+	private string BuildFullRootUsbCloneReportText(DiskItem targetDisk, bool persisted, string? reportRoot, string? diskpartScriptPath, char shadowLetter, string sourceRoot, string realRoot, string realWindowsFolder, char bootLetter, char windowsLetter, bool diskpartOk, bool copyOk, bool registryOk, bool bcdbootOk, bool bcdStoreOk, bool bootx64Ok, bool loaderPathOk, NtfsCopyTestResult? copyResult, string diskpartOutput, string registryOutput, string bcdbootOutput, string bcdEnumOutput, bool verifyRan, long verifyVerifiedFiles, long verifyVerifiedBytes, long verifyMismatches, long verifyUnverifiable, List<string> verifySamples, List<string> verifyUnverifiableSamples, bool unattendWritten)
 	{
-		string reportPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "DriveForge-NTFS-FullRootClone-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".txt");
 		bool verifyOk = !verifyRan || verifyMismatches == 0;
 		bool ok = diskpartOk && copyOk && registryOk && bcdbootOk && bcdStoreOk && bootx64Ok && loaderPathOk && verifyOk;
 		bool windowsOk = File.Exists(Path.Combine(realWindowsFolder, "System32", "winload.efi")) && File.Exists(Path.Combine(realWindowsFolder, "System32", "config", "SYSTEM"));
@@ -3635,8 +4064,8 @@ exit 0
 		report.AppendLine();
 		report.AppendLine("Mode: faithful full clone of the current Windows. The selected target disk was formatted. The entire Windows root is cloned from a VSS snapshot with a WIM image apply, which preserves apps, ACLs, hardlinks and the AppX state (so no first-boot app repair is needed), excluding volatile cache/temp/pagefile data.");
 		report.AppendLine("Target disk: Disk " + targetDisk.Number + " - " + targetDisk.FriendlyName + " - " + FormatBytes(targetDisk.Size));
-		report.AppendLine("Report folder: " + reportRoot);
-		report.AppendLine("DiskPart script that was executed: " + diskpartPath);
+		report.AppendLine("Report folder: " + (persisted ? reportRoot : "(not saved — this clone completed successfully; a report is only saved to disk when something needs review)"));
+		report.AppendLine("DiskPart script that was executed: " + (persisted ? diskpartScriptPath : "(not saved — see the DiskPart output below)"));
 		report.AppendLine("VSS snapshot mapped as: " + shadowLetter + ":");
 		report.AppendLine("Source root: " + sourceRoot);
 		report.AppendLine("EFI partition letter: " + bootLetter + ":");
@@ -3794,7 +4223,20 @@ exit 0
 		report.AppendLine("1. If this report says pass, the clone is ready - boot the selected drive.");
 		report.AppendLine("2. On a different PC, set the BIOS/UEFI to boot from the USB/SSD.");
 		report.AppendLine("3. The first boot may take a few minutes while Windows settles drivers for the new hardware.");
-		File.WriteAllText(reportPath, report.ToString(), Encoding.UTF8);
+		return report.ToString();
+	}
+
+	// Persists the report to disk — ONLY called when the clone needs review (failed/incomplete), so a clean success
+	// never creates a Desktop folder or report file. Copies the diskpart script (staged in TEMP) into the report
+	// folder for the same audit trail the report used to keep inline.
+	private string WriteFullRootUsbCloneReport(DiskItem targetDisk, string reportRoot, string diskpartPath, char shadowLetter, string sourceRoot, string realRoot, string realWindowsFolder, char bootLetter, char windowsLetter, bool diskpartOk, bool copyOk, bool registryOk, bool bcdbootOk, bool bcdStoreOk, bool bootx64Ok, bool loaderPathOk, NtfsCopyTestResult? copyResult, string diskpartOutput, string registryOutput, string bcdbootOutput, string bcdEnumOutput, bool verifyRan, long verifyVerifiedFiles, long verifyVerifiedBytes, long verifyMismatches, long verifyUnverifiable, List<string> verifySamples, List<string> verifyUnverifiableSamples, bool unattendWritten)
+	{
+		Directory.CreateDirectory(reportRoot);
+		string persistedScriptPath = Path.Combine(reportRoot, "01-real-usb-layout-diskpart-ran.txt");
+		try { File.Copy(diskpartPath, persistedScriptPath, true); } catch { }
+		string text = BuildFullRootUsbCloneReportText(targetDisk, persisted: true, reportRoot, persistedScriptPath, shadowLetter, sourceRoot, realRoot, realWindowsFolder, bootLetter, windowsLetter, diskpartOk, copyOk, registryOk, bcdbootOk, bcdStoreOk, bootx64Ok, loaderPathOk, copyResult, diskpartOutput, registryOutput, bcdbootOutput, bcdEnumOutput, verifyRan, verifyVerifiedFiles, verifyVerifiedBytes, verifyMismatches, verifyUnverifiable, verifySamples, verifyUnverifiableSamples, unattendWritten);
+		string reportPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "DriveForge-NTFS-FullRootClone-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".txt");
+		File.WriteAllText(reportPath, text, Encoding.UTF8);
 		return reportPath;
 	}
 
@@ -3965,7 +4407,7 @@ exit 0
 	private const int ContentVerifySampleEvery = 8;
 
 	private void VerifyCloneContent(string targetRoot, string sourceRoot, Func<string, bool, bool>? shouldExclude,
-		out long verifiedFiles, out long verifiedBytes, out long mismatches, out long unverifiable, List<string> sampleMismatches, List<string> sampleUnverifiable)
+		out long verifiedFiles, out long verifiedBytes, out long mismatches, out long unverifiable, List<string> sampleMismatches, List<string> sampleUnverifiable, bool detectMissing)
 	{
 		verifiedFiles = 0;
 		verifiedBytes = 0;
@@ -4049,8 +4491,36 @@ exit 0
 			}
 			catch (Exception ex)
 			{
+				// A subtree that fails to enumerate (bad sector on the target, dir removed mid-run) is NOT verified —
+				// count it so the clone is not falsely reported as fully verified.
+				mismatches++;
 				AddSampleError(sampleMismatches, currentTarget + " verify-enumerate -> " + ex.Message);
 			}
+			// Detect entries MISSING from the target: the walk above is target-driven, so anything the copy engine
+			// dropped (present on the source snapshot, absent on the target) would be invisible. Enumerate the SOURCE
+			// side of this directory and flag every non-excluded entry that has no counterpart on the target. ONLY for
+			// the RAW engine: its copy-exclusion set is exactly this verify's `shouldExclude` (IsNtfsCloneExcluded). The
+			// wimlib engine excludes a SUPERSET (BuildCaptureConfig: .nuget/npm/pip/cargo caches + AV dirs), so a
+			// source-driven check there would false-flag correctly-excluded files as MISSING.
+			if (detectMissing)
+			try
+			{
+				foreach (FileSystemInfo sEntry in new DirectoryInfo(currentSource).EnumerateFileSystemInfos("*", options))
+				{
+					if (stopRequested || internalOperationStopped) break;
+					if ((sEntry.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+					bool sIsDir = (sEntry.Attributes & FileAttributes.Directory) != 0;
+					string sRel = GetRelativeNtfsPath(sourceRoot, sEntry.FullName);
+					if (shouldExclude != null && shouldExclude(sRel, sIsDir)) continue;
+					string tPath = Path.Combine(currentTarget, sEntry.Name);
+					if (sIsDir ? !Directory.Exists(tPath) : !File.Exists(tPath))
+					{
+						mismatches++;
+						AddSampleError(sampleMismatches, sEntry.FullName + " -> MISSING from the clone");
+					}
+				}
+			}
+			catch (Exception ex) { mismatches++; AddSampleError(sampleMismatches, currentSource + " verify-source-enumerate -> " + ex.Message); }
 		}
 	}
 
@@ -4286,10 +4756,19 @@ exit 0
 				"\n\nNo changes were made — the drive was not formatted.");
 		}
 
+		// The restore builds an MBR layout (BuildRealNtfsUsbLayoutDiskpartScript), whose single Windows partition tops out
+		// near 2 TiB ((2^32-1)*512, minus the boot partition) no matter how big the target disk is. Compare the image's
+		// LOGICAL content — the bytes actually written — against that partition ceiling, NOT the capacity gate's 1.25x
+		// disk-headroom margin (which would wrongly reject a ~1.8 TiB image that fits fine). Content past the ceiling would
+		// pass the disk.Size gate and then ENOSPC AFTER the wipe, so reject it here, before anything destructive.
+		if (imageBytes > 0 && imageBytes > 2199023255040L - 512L * 1024 * 1024)
+			throw new InvalidOperationException("This image's content is larger than the ~2 TB an MBR restore layout supports, so it cannot be restored to this drive. No changes were made — the drive was not formatted.");
+
 		// Target health gate before the destructive format.
 		if (!await ConfirmTargetHealthAsync(disk))
 		{
 			Log("WIM restore cancelled by user after target health warning.");
+			operationAbortedBeforeWrite = true;
 			SetStage(L("StgCancelHealth"), 0.0);
 			return;
 		}
@@ -4431,17 +4910,15 @@ exit 0
 		TryEnablePrivilege("SeTakeOwnershipPrivilege");
 		TryEnablePrivilege("SeCreateSymbolicLinkPrivilege");
 
-		// Capacity gate. An expandable VHDX file size ~= its used data; the 64K-cluster target footprint runs higher, so
-		// keep the same generous margin as the WIM restore (25% + 512 MB boot partition).
+		// The real capacity + MBR-ceiling gate runs AFTER the read-only attach below, where the VHDX's ACTUAL used data can
+		// be measured. The .vhdx file size is wrong for a FIXED VHDX (its file is the full provisioned size), so gating on
+		// it here would refuse a large-but-nearly-empty image that easily fits. imageBytes is kept only for the progress total.
 		long imageBytes = 0; try { imageBytes = new FileInfo(vhdPath).Length; } catch { }
-		if (imageBytes > 0 && disk.Size < (long)(imageBytes * 1.25) + 512L * 1024 * 1024)
-			throw new InvalidOperationException(
-				"The selected drive is too small for this image.\n\nImage: " + FormatBytes(imageBytes) +
-				"\nSelected drive: " + FormatBytes(disk.Size) + "\n\nNo changes were made — the drive was not formatted.");
 
 		if (!await ConfirmTargetHealthAsync(disk))
 		{
 			Log("VHDX restore cancelled by user after target health warning.");
+			operationAbortedBeforeWrite = true;
 			SetStage(L("StgCancelHealth"), 0.0);
 			return;
 		}
@@ -4460,6 +4937,26 @@ exit 0
 			if (!File.Exists(Path.Combine(vhdxWinRoot, "Windows", "System32", "config", "SYSTEM")))
 				throw new InvalidOperationException("The VHDX does not contain a Windows installation (no SYSTEM hive on its Windows partition). Nothing was written to the target.");
 
+			// Capacity + MBR-ceiling gate, now that the image is mounted so we can measure its ACTUAL used data (not the
+			// .vhdx file size — a fixed VHDX's file is its full provisioned size, far bigger than the data the raw engine
+			// actually copies). Reject a too-small target OR content past the ~2 TiB single-partition MBR ceiling BEFORE the
+			// destructive format, so the copy can't ENOSPC after the wipe. If used space can't be read, fall through — the
+			// post-copy DiskFull check still guards it.
+			long vhdxUsedBytes = 0;
+			try
+			{
+				var vhdxWinDrive = new DriveInfo(vhdxWinLetter + ":\\");
+				vhdxUsedBytes = vhdxWinDrive.TotalSize - vhdxWinDrive.TotalFreeSpace;
+				if (vhdxUsedBytes > 0 && disk.Size < (long)(vhdxUsedBytes * 1.25) + 512L * 1024 * 1024)
+					throw new InvalidOperationException(
+						"The selected drive is too small for this image.\n\nImage content: " + FormatBytes(vhdxUsedBytes) +
+						"\nSelected drive: " + FormatBytes(disk.Size) + "\n\nNo changes were made — the drive was not formatted.");
+				if (vhdxUsedBytes > 2199023255040L - 512L * 1024 * 1024)
+					throw new InvalidOperationException("This image's content (" + FormatBytes(vhdxUsedBytes) + ") is larger than the ~2 TB an MBR restore layout supports, so it cannot be restored to this drive. No changes were made — the drive was not formatted.");
+			}
+			catch (InvalidOperationException) { throw; }
+			catch { }
+
 			// 2. Format the target with the same GPT layout the WIM restore / clone use.
 			SetStage(L("StgFormatTarget"), 12.0);
 			await File.WriteAllTextAsync(diskpartPath, BuildRealNtfsUsbLayoutDiskpartScript(disk.Number, bootLetter, windowsLetter), Encoding.ASCII);
@@ -4471,7 +4968,9 @@ exit 0
 			// 3. FAITHFUL raw copy from the VHDX's Windows volume to the target's Windows partition.
 			SetStage(L("StgRestoreRaw"), 20.0);
 			progressDoneGiB = 0.0; progressPrevGiB = 0.0;
-			progressTotalGiB = Math.Max(1.0, imageBytes / 1073741824.0);
+			// Prefer the VHDX's real used data for the progress total; imageBytes (the .vhdx file size) over-states a fixed
+			// VHDX, leaving the bar stuck low. Fall back to imageBytes if the used space couldn't be read above.
+			progressTotalGiB = Math.Max(1.0, (vhdxUsedBytes > 0 ? vhdxUsedBytes : imageBytes) / 1073741824.0);
 			ProgressBar.Value = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			RawCloneStats? rawStats = null;
@@ -4513,7 +5012,13 @@ exit 0
 			progressDoneGiB = progressTotalGiB;
 			ProgressBar.Value = 100.0;
 			if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
-			Log("VHDX image restored to Disk " + disk.Number + " (faithful raw copy) and made bootable (BIOS + UEFI).");
+			// Regions the raw engine couldn't read from the VHDX source and zero-filled — the restore is complete in size
+			// but those bytes are lost, so don't claim a "faithful" copy, and warn the user (restore has no dialog of its
+			// own; the shared success tail would otherwise report a plain success).
+			long restoreZeroFilled = rawStats != null ? rawStats.RunShortfalls + rawStats.ReadShortfalls : 0;
+			Log("VHDX image restored to Disk " + disk.Number + (restoreZeroFilled > 0 ? $" (WITH {restoreZeroFilled} zero-filled unreadable region(s) — NOT byte-faithful)" : " (faithful raw copy)") + " and made bootable (BIOS + UEFI).");
+			if (restoreZeroFilled > 0)
+				MessageBox.Show(string.Format(L("MbRawZeroFilled"), restoreZeroFilled), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);
 		}
 		finally
 		{
@@ -4541,29 +5046,51 @@ exit 0
 			throw new InvalidOperationException("The clone image is stored ON the drive you're restoring to — restoring would erase the image itself. Move it to another drive first. No changes were made.");
 		}
 
-		// Capacity gate: an FFU is a fixed-size block image; the target must be at least as large.
-		long requiredBytes = EstimateRequiredBytes();
-		if (requiredBytes > 0 && disk.Size < requiredBytes)
+		// Validate the .ffu parses as a real FFU BEFORE the destructive apply. DISM /Apply-FFU cleans the whole
+		// PhysicalDrive first, so discovering an unreadable/incomplete image AFTER the wipe is the worst ordering. This
+		// reads only the FFU header/metadata — a lighter check than the WIM path's full-data wimlib-verify — but it still
+		// catches a truncated or non-FFU file before any damage. A non-zero exit throws, so we abort before the wipe.
+		SetStage(L("StgVerifyBeforeWrite"), 4.0);
+		// FFU (like VHDX) requires /Index:1 with /Get-ImageInfo — without it DISM errors on a valid single-image FFU.
+		try { await RunProcessCaptureAsync("dism.exe", "/Get-ImageInfo /ImageFile:" + QuoteArgument(path) + " /Index:1"); }
+		catch (Exception vex)
 		{
 			throw new InvalidOperationException(
-				"The selected drive is too small for this clone image.\n\nRequired: " + FormatBytes(requiredBytes) +
-				"\nSelected drive: " + FormatBytes(disk.Size) +
-				"\n\nNo changes were made — the drive was not written.");
+				"This .ffu could not be read as a valid FFU image — it may be corrupt or incomplete. No changes were made — the drive was not written.\n\n" + vex.Message);
+		}
+
+		// Capacity: an FFU is a whole-disk block image that DISM restores at the ORIGINAL captured disk's geometry, so the
+		// target must be at least as large as THAT disk — not the (far smaller) compressed .ffu file. DriveForge can't read
+		// the captured-disk size from an arbitrary .ffu, so a byte gate here would give false reassurance; make it the
+		// user's informed decision. If the target is too small, DISM fails AFTER the clean (target already wiped), so this
+		// confirmation is the only safeguard.
+		if (!headlessRun && MessageBox.Show(
+				string.Format(L("MbFfuSizeWarn"), FormatBytes(disk.Size)),
+				"DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
+		{
+			Log("FFU restore cancelled at the size confirmation.");
+			operationAbortedBeforeWrite = true;
+			SetStage(L("StgCancelHealth"), 0.0);
+			return;
 		}
 
 		// Target health gate before the destructive write.
 		if (!await ConfirmTargetHealthAsync(disk))
 		{
 			Log("FFU restore cancelled by user after target health warning.");
+			operationAbortedBeforeWrite = true;
 			SetStage(L("StgCancelHealth"), 0.0);
 			return;
 		}
 
 		SetStage(L("StgRestoreFullClone"), 8.0);
 		// DISM /Apply-FFU emits no line-based progress, so show an honest moving (indeterminate) bar with a ticking Elapsed during the write.
+		// try/finally: on a DISM failure (the documented common one — a target smaller than the captured disk — fails
+		// AFTER the clean) the bar used to stay indeterminate, and UpdateProgressStats blanks the percent label in that
+		// mode, so the error dialog appeared beside a completely empty label.
 		ProgressBar.IsIndeterminate = true;
-		await RunProcessAsync("dism.exe", $"/Apply-FFU /ImageFile:\"{path}\" /ApplyDrive:\\\\.\\PhysicalDrive{disk.Number}");
-		ProgressBar.IsIndeterminate = false;
+		try { await RunProcessAsync("dism.exe", $"/Apply-FFU /ImageFile:\"{path}\" /ApplyDrive:\\\\.\\PhysicalDrive{disk.Number}"); }
+		finally { ProgressBar.IsIndeterminate = false; }
 
 		// Post-restore check: rescan and confirm the image produced partitions on the target.
 		SetStage(L("StgVerifyRestoredClone"), 90.0);
@@ -4641,27 +5168,31 @@ exit 0
 	{
 		string source = sourceRoot.TrimEnd('\\') + "\\.";
 		string target = windowsLetter + ":\\.";
-		string scriptPath = Path.Combine(Path.GetTempPath(), $"driveforge-wimlib-stream-{Guid.NewGuid():N}.cmd");
 		int threadCount = Math.Max(2, Math.Min(Environment.ProcessorCount, 8));
-		string command = QuoteCmd(wimlibPath) +
-			" capture " + QuoteCmd(source) +
-			" - " + QuoteCmd("Current Windows") +
-			" " + QuoteCmd("Captured by DriveForge") +
-			" --pipable --compress=none --threads=" + threadCount + " --config=" + QuoteCmd(configPath) +
-			" | " + QuoteCmd(wimlibPath) +
-			" apply - 1 " + QuoteCmd(target) + " --recover-data";
-		try
-		{
-			await File.WriteAllTextAsync(scriptPath, "@echo off\r\n" + command + "\r\nexit /b %ERRORLEVEL%\r\n", Encoding.ASCII);
-			await RunProcessAsync("cmd.exe", "/d /c " + QuoteArgument(scriptPath));
-		}
-		finally
-		{
-			if (File.Exists(scriptPath))
-			{
-				TryDeleteFile(scriptPath);
-			}
-		}
+		// Run capture and apply as two processes joined by an IN-PROCESS pipe (capture stdout -> apply stdin) so we can
+		// check BOTH exit codes. A cmd `A | B` only exposes B's (apply's) code, and apply's --recover-data downgrades a
+		// truncated stream to a non-fatal success — so a wimlib CAPTURE failure would otherwise finalize an INCOMPLETE
+		// clone as a success. Here a nonzero CAPTURE code fails the whole clone. ProcessStartInfo.ArgumentList quotes
+		// each argument for CreateProcess, so paths with spaces need no manual quoting.
+		var capPsi = new ProcessStartInfo { FileName = wimlibPath, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+		foreach (var a in new[] { "capture", source, "-", "Current Windows", "Captured by DriveForge", "--pipable", "--compress=none", "--threads=" + threadCount, "--config=" + configPath }) capPsi.ArgumentList.Add(a);
+		var appPsi = new ProcessStartInfo { FileName = wimlibPath, UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardError = true };
+		foreach (var a in new[] { "apply", "-", "1", target, "--recover-data" }) appPsi.ArgumentList.Add(a);
+		using var cap = Process.Start(capPsi) ?? throw new InvalidOperationException("Could not start wimlib capture.");
+		using var app = Process.Start(appPsi) ?? throw new InvalidOperationException("Could not start wimlib apply.");
+		// Drain both stderr streams concurrently so neither process blocks on a full pipe, and pump capture -> apply.
+		Task<string> capErr = cap.StandardError.ReadToEndAsync();
+		Task<string> appErr = app.StandardError.ReadToEndAsync();
+		try { await cap.StandardOutput.BaseStream.CopyToAsync(app.StandardInput.BaseStream); }
+		catch (IOException) { /* apply may have exited early (broken pipe) — its exit code below tells the real story */ }
+		finally { try { app.StandardInput.Close(); } catch { } }
+		await cap.WaitForExitAsync();
+		await app.WaitForExitAsync();
+		string capStdErr = await capErr, appStdErr = await appErr;
+		if (cap.ExitCode != 0)
+			throw new InvalidOperationException($"wimlib capture failed (exit {cap.ExitCode}) — the clone would be incomplete, so it was aborted. {capStdErr.Trim()}");
+		if (app.ExitCode != 0)
+			throw new InvalidOperationException($"wimlib apply failed (exit {app.ExitCode}). {appStdErr.Trim()}");
 	}
 
 	// Microsoft-engine (DISM/WIMGAPI) CAPTURE — the classic image-capture approach. Reads the VSS snapshot into a temporary WIM on
@@ -4850,8 +5381,10 @@ exit 0
 			"$class = Get-WmiObject -List Win32_ShadowCopy\n" +
 			"$result = $class.Create($volume, 'ClientAccessible')\n" +
 			"if ($result.ReturnValue -ne 0) { throw ('VSS snapshot failed with code ' + $result.ReturnValue) }\n" +
-			"$shadow = Get-WmiObject Win32_ShadowCopy | Where-Object { $_.ID -eq $result.ShadowID } | Select-Object -First 1\n" +
-			"if ($null -eq $shadow) { throw 'VSS snapshot was created but could not be found.' }\n" +
+			"$sid = $result.ShadowID\n" +
+			"$shadow = Get-WmiObject Win32_ShadowCopy | Where-Object { $_.ID -eq $sid } | Select-Object -First 1\n" +
+			"if ($null -eq $shadow) { $shadow = Get-WmiObject Win32_ShadowCopy | Where-Object { $_.ID.Trim('{','}') -ieq $sid.Trim('{','}') } | Select-Object -First 1 }\n" +
+			"if ($null -eq $shadow) { try { & vssadmin delete shadows /shadow=$sid /quiet | Out-Null } catch {}; throw 'VSS snapshot was created but could not be found (deleted it to avoid an orphan).' }\n" +
 			"[pscustomobject]@{ Id = $shadow.ID; DeviceObject = $shadow.DeviceObject } | ConvertTo-Json -Compress";
 		string json = ExtractJsonPayload(await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(script)));
 		using JsonDocument jsonDocument = JsonDocument.Parse(json);
@@ -5065,14 +5598,23 @@ exit 0
 		}
 		catch
 		{
-			return true; // cannot read SMART — do not block the clone
+			// Cannot read SMART — do not block, but STILL re-verify the target's identity right before the wipe.
+			return await VerifyTargetDiskUnchangedAsync(disk);
 		}
 
 		var warnings = new List<string>();
 		string health = ExtractReportValue(report, "HealthStatus");
+		// Test the BAD values FIRST. "Unhealthy" CONTAINS "Healthy", so the old `!health.Contains("Healthy")` test was
+		// false for it and this gate — the last thing standing in front of a destructive wipe — was structurally blind to
+		// the one status that means the storage stack has already declared the media failed. MSFT_PhysicalDisk.HealthStatus
+		// is Healthy / Warning / Unhealthy, so only "Warning" was ever caught. IsHealthy() already orders it this way.
 		if (!string.IsNullOrWhiteSpace(health)
-			&& !health.Contains("Healthy", StringComparison.OrdinalIgnoreCase)
-			&& !health.Contains("Unknown", StringComparison.OrdinalIgnoreCase))
+			&& (health.Contains("Unhealthy", StringComparison.OrdinalIgnoreCase)
+				|| health.Contains("Degraded", StringComparison.OrdinalIgnoreCase)
+				|| health.Contains("Warning", StringComparison.OrdinalIgnoreCase)
+				|| health.Contains("Fail", StringComparison.OrdinalIgnoreCase)
+				|| (!health.Contains("Healthy", StringComparison.OrdinalIgnoreCase)
+					&& !health.Contains("Unknown", StringComparison.OrdinalIgnoreCase))))
 		{
 			warnings.Add("Reported health: " + health);
 		}
@@ -5100,7 +5642,9 @@ exit 0
 			if (warnings.Count == 0)
 		{
 			Log("Target health gate: SMART/reliability counters look OK.");
-			return true;
+			// Re-verify the target's size+serial immediately before the caller's diskpart wipe: this is the LAST gate,
+			// and the target could have been renumbered since the primary confirm (ISO mount / disk hot-plug in between).
+			return await VerifyTargetDiskUnchangedAsync(disk);
 		}
 
 		string details = string.Join("\n- ", warnings);
@@ -5113,8 +5657,12 @@ exit 0
 			"or that loses data over time.\n\nContinue anyway?",
 			"DriveForge - target drive health warning",
 			MessageBoxButton.YesNo,
-			MessageBoxImage.Warning);
-		return choice == MessageBoxResult.Yes;
+			MessageBoxImage.Warning,
+			MessageBoxResult.No); // default to the SAFE button (safety contract) — Enter/Space must NOT erase the drive
+		if (choice != MessageBoxResult.Yes) return false;
+		// This modal can sit open a while, and a failing USB (the very reason it's shown) can drop off the bus and let
+		// Windows hand its disk number to another drive. Re-verify size+serial right before the caller's diskpart wipe.
+		return await VerifyTargetDiskUnchangedAsync(disk);
 	}
 
 	private bool HasEnoughSpace(DiskItem disk, out string message)
@@ -5163,25 +5711,25 @@ exit 0
 		var panel = new StackPanel { Margin = new Thickness(16) };
 		panel.Children.Add(new TextBlock
 		{
-			Text = "Create a local account for the new Windows so first boot never asks for a Microsoft account.\nLeave the password empty for a no-password account.",
+			Text = L("LocAcctIntro"),
 			TextWrapping = TextWrapping.Wrap,
 			Foreground = (Brush)FindResource("TextBrush"),
 			Margin = new Thickness(0, 0, 0, 10)
 		});
-		panel.Children.Add(new TextBlock { Text = "Account name:", Foreground = (Brush)FindResource("TextBrush") });
+		panel.Children.Add(new TextBlock { Text = L("LocAcctName"), Foreground = (Brush)FindResource("TextBrush") });
 		var nameBox = new TextBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26 };
 		panel.Children.Add(nameBox);
-		panel.Children.Add(new TextBlock { Text = "Password (optional):", Foreground = (Brush)FindResource("TextBrush") });
+		panel.Children.Add(new TextBlock { Text = L("LocAcctPwOpt"), Foreground = (Brush)FindResource("TextBrush") });
 		var pw1 = new PasswordBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26 };
 		var pw1Plain = new TextBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26, Visibility = Visibility.Collapsed };
 		panel.Children.Add(pw1);
 		panel.Children.Add(pw1Plain);
-		panel.Children.Add(new TextBlock { Text = "Confirm password:", Foreground = (Brush)FindResource("TextBrush") });
+		panel.Children.Add(new TextBlock { Text = L("PwConfirmLabel"), Foreground = (Brush)FindResource("TextBrush") });
 		var pw2 = new PasswordBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26 };
 		var pw2Plain = new TextBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26, Visibility = Visibility.Collapsed };
 		panel.Children.Add(pw2);
 		panel.Children.Add(pw2Plain);
-		var showCheck = new CheckBox { Content = "Show password", Foreground = (Brush)FindResource("TextBrush"), Margin = new Thickness(0, 0, 0, 4) };
+		var showCheck = new CheckBox { Content = L("ShowPwLabel"), Foreground = (Brush)FindResource("TextBrush"), Margin = new Thickness(0, 0, 0, 4) };
 		panel.Children.Add(showCheck);
 		showCheck.Checked += delegate
 		{
@@ -5196,7 +5744,7 @@ exit 0
 			pw1.Visibility = Visibility.Visible; pw2.Visibility = Visibility.Visible;
 		};
 		var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
-		var okButton = new Button { Content = "OK", Width = 110 };
+		var okButton = new Button { Content = L("BtnOk"), Width = 110 };
 		buttons.Children.Add(okButton);
 		panel.Children.Add(buttons);
 		dialog.Content = panel;
@@ -5245,24 +5793,24 @@ exit 0
 		var panel = new StackPanel { Margin = new Thickness(16) };
 		panel.Children.Add(new TextBlock
 		{
-			Text = "Enter a BitLocker unlock password for the clone.\nLeave both fields empty to protect it with only the recovery key.",
+			Text = L("BlkPwdIntro"),
 			TextWrapping = TextWrapping.Wrap,
 			Foreground = (Brush)FindResource("TextBrush"),
 			Margin = new Thickness(0, 0, 0, 10)
 		});
 		// Each field has a masked PasswordBox + a plain TextBox stacked; "Show password" toggles which one
 		// is visible, on BOTH fields, keeping their values in sync.
-		panel.Children.Add(new TextBlock { Text = "Password:", Foreground = (Brush)FindResource("TextBrush") });
+		panel.Children.Add(new TextBlock { Text = L("BlkPwdLabel"), Foreground = (Brush)FindResource("TextBrush") });
 		var pw1 = new PasswordBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26 };
 		var pw1Plain = new TextBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26, Visibility = Visibility.Collapsed };
 		panel.Children.Add(pw1);
 		panel.Children.Add(pw1Plain);
-		panel.Children.Add(new TextBlock { Text = "Confirm password:", Foreground = (Brush)FindResource("TextBrush") });
+		panel.Children.Add(new TextBlock { Text = L("PwConfirmLabel"), Foreground = (Brush)FindResource("TextBrush") });
 		var pw2 = new PasswordBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26 };
 		var pw2Plain = new TextBox { Margin = new Thickness(0, 2, 0, 8), MinHeight = 26, Visibility = Visibility.Collapsed };
 		panel.Children.Add(pw2);
 		panel.Children.Add(pw2Plain);
-		var showCheck = new CheckBox { Content = "Show password", Foreground = (Brush)FindResource("TextBrush"), Margin = new Thickness(0, 0, 0, 4) };
+		var showCheck = new CheckBox { Content = L("ShowPwLabel"), Foreground = (Brush)FindResource("TextBrush"), Margin = new Thickness(0, 0, 0, 4) };
 		panel.Children.Add(showCheck);
 		showCheck.Checked += delegate
 		{
@@ -5277,7 +5825,7 @@ exit 0
 			pw1.Visibility = Visibility.Visible; pw2.Visibility = Visibility.Visible;
 		};
 		var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
-		var okButton = new Button { Content = "OK", Width = 110 };
+		var okButton = new Button { Content = L("BtnOk"), Width = 110 };
 		buttons.Children.Add(okButton);
 		panel.Children.Add(buttons);
 		dialog.Content = panel;
@@ -5632,6 +6180,10 @@ exit 0
 		{
 			bitLockerEncrypting = false;
 			Log("WARNING: BitLocker encryption did NOT start on " + windowsLetter + ": — see the status above. The drive is NOT encrypted.");
+			// The user asked for BitLocker and a recovery-key file was already written (implying the drive is
+			// encrypted). If it is NOT actually being encrypted, surface it loudly instead of letting the caller
+			// report success and auto-eject a stick the user believes is protected.
+			throw new InvalidOperationException("BitLocker encryption did not start on " + windowsLetter + ": — the drive was created but is NOT encrypted, even though a recovery-key file was saved (" + keyPath + "). " + (onOutput.Trim().Length > 0 ? "manage-bde: " + onOutput.Trim() : "See the log for details."));
 		}
 	}
 
@@ -6133,7 +6685,7 @@ exit 0
 		Directory.CreateDirectory(text);
 		File.WriteAllText(Path.Combine(text, "README.txt"), "DriveForge Current Computer Clone Helper\n\nWhy this exists:\nThe safest complete copy of the current computer must be captured outside the Windows that is currently running.\nThese helper files create a full clone file (.ffu) from Windows PE.\n\nRecommended workflow:\n1. Boot into Windows PE.\n2. Run 01-create-full-clone-file.cmd.\n3. Save the full clone file to a separate external drive with enough free space.\n4. Boot back into Windows.\n5. Open DriveForge, choose \"Restore a full computer clone\", select the .ffu file, and restore it to the target USB/SSD.\n\nWarning:\nThe restore script and DriveForge restore mode format the selected destination disk.", Encoding.UTF8);
 		File.WriteAllText(Path.Combine(text, "01-create-full-clone-file.cmd"), "@echo off\nsetlocal\ntitle DriveForge - Create full clone file\necho.\necho This script must be run from Windows PE as administrator.\necho It creates a complete clone file. Do not save it to the same disk you are cloning.\necho.\necho Available disks:\nwmic diskdrive get index,model,size\necho.\nset /p SRC=Enter source disk number to capture:\nset /p OUT=Enter full clone file path, for example E:\\CurrentWindows.ffu:\necho.\necho Capturing PhysicalDrive%SRC% to %OUT%\ndism /Capture-FFU /ImageFile:\"%OUT%\" /CaptureDrive:\\\\.\\PhysicalDrive%SRC% /Name:\"DriveForge Full Disk Clone\" /Description:\"Captured by DriveForge from WinPE\"\nif errorlevel 1 goto failed\necho.\necho Optimizing full clone file...\ndism /Optimize-FFU /ImageFile:\"%OUT%\"\nif errorlevel 1 goto failed\necho.\necho Capture completed.\npause\nexit /b 0\n:failed\necho.\necho Capture failed.\npause\nexit /b 1", Encoding.ASCII);
-		File.WriteAllText(Path.Combine(text, "02-restore-full-clone-to-disk.cmd"), "@echo off\nsetlocal\ntitle DriveForge - Restore full clone to disk\necho.\necho WARNING: This will format the destination disk.\necho.\nwmic diskdrive get index,model,size\necho.\nset /p FFU=Enter full clone file path:\nset /p DST=Enter destination disk number:\necho.\necho You are about to restore %FFU% to PhysicalDrive%DST%.\nchoice /m \"Format destination disk and continue\"\nif errorlevel 2 exit /b 1\ndism /Apply-FFU /ImageFile:\"%FFU%\" /ApplyDrive:\\\\.\\PhysicalDrive%DST%\nif errorlevel 1 goto failed\necho.\necho Apply completed.\npause\nexit /b 0\n:failed\necho.\necho Apply failed.\npause\nexit /b 1", Encoding.ASCII);
+		File.WriteAllText(Path.Combine(text, "02-restore-full-clone-to-disk.cmd"), "@echo off\nsetlocal\ntitle DriveForge - Restore full clone to disk\necho.\necho WARNING: This will format the destination disk.\necho.\nwmic diskdrive get index,model,size\necho.\nset /p FFU=Enter full clone file path:\nif \"%FFU%\"==\"\" (echo No clone file path entered. & pause & exit /b 1)\nset /p DST=Enter destination disk number:\nif \"%DST%\"==\"\" (echo No destination disk number entered. & pause & exit /b 1)\necho.\necho You are about to restore %FFU% to PhysicalDrive%DST%.\nchoice /m \"Format destination disk and continue\"\nif errorlevel 2 exit /b 1\ndism /Apply-FFU /ImageFile:\"%FFU%\" /ApplyDrive:\\\\.\\PhysicalDrive%DST%\nif errorlevel 1 goto failed\necho.\necho Apply completed.\npause\nexit /b 0\n:failed\necho.\necho Apply failed.\npause\nexit /b 1", Encoding.ASCII);
 		return text;
 	}
 
@@ -6151,9 +6703,9 @@ exit 0
 			Directory.CreateDirectory(Path.Combine(root, folder));
 		}
 		File.WriteAllText(Path.Combine(root, "README.txt"), BuildDiagnosticKitReadme(), Encoding.UTF8);
-		File.WriteAllText(Path.Combine(root, "Benchmark", "run-basic-write-test.cmd"), "@echo off\r\necho This is a simple Windows write test. For a professional benchmark, use a dedicated third-party benchmark tool.\r\nset /p DRIVE=Enter drive letter to test, for example E:\r\npowershell -NoProfile -Command \"$p='%DRIVE%\\driveforge-test.bin'; $b=New-Object byte[] (1MB); (New-Object Random).NextBytes($b); $sw=[Diagnostics.Stopwatch]::StartNew(); $fs=[IO.File]::Open($p,[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); for($i=0;$i -lt 512;$i++){ $fs.Write($b,0,$b.Length) }; $fs.Flush($true); $fs.Close(); $sw.Stop(); Remove-Item $p -Force; '{0:N1} MB/s' -f (512/$sw.Elapsed.TotalSeconds)\"\r\npause\r\n", Encoding.ASCII);
-		File.WriteAllText(Path.Combine(root, "Surface Scan", "run-chkdsk-scan.cmd"), "@echo off\r\nset /p DRIVE=Enter drive letter to scan, for example E:\r\nchkdsk %DRIVE% /scan\r\npause\r\n", Encoding.ASCII);
-		File.WriteAllText(Path.Combine(root, "Repair Recovery", "run-chkdsk-repair.cmd"), "@echo off\r\necho WARNING: This can take a long time and may lock the drive.\r\nset /p DRIVE=Enter drive letter to repair, for example E:\r\nchoice /m \"Run CHKDSK repair on %DRIVE%\"\r\nif errorlevel 2 exit /b 1\r\nchkdsk %DRIVE% /r /x\r\npause\r\n", Encoding.ASCII);
+		File.WriteAllText(Path.Combine(root, "Benchmark", "run-basic-write-test.cmd"), "@echo off\r\necho This is a simple Windows write test. For a professional benchmark, use a dedicated third-party benchmark tool.\r\necho.\r\necho WARNING: this WRITES about 512 MB to the drive's free space. Do NOT run it on a drive you are trying to\r\necho recover deleted files from - the writes can overwrite the very data you want back.\r\necho.\r\nset /p DRIVE=Enter drive letter to test, for example E:\r\nif \"%DRIVE%\"==\"\" (echo No drive entered. & pause & exit /b 1)\r\nchoice /m \"Write about 512 MB of test data to %DRIVE%\"\r\nif errorlevel 2 exit /b 1\r\npowershell -NoProfile -Command \"$p='%DRIVE%\\driveforge-test.bin'; $b=New-Object byte[] (1MB); (New-Object Random).NextBytes($b); $sw=[Diagnostics.Stopwatch]::StartNew(); $fs=[IO.File]::Open($p,[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); try { for($i=0;$i -lt 512;$i++){ $fs.Write($b,0,$b.Length) }; $fs.Flush($true) } finally { $fs.Close(); Remove-Item $p -Force -ErrorAction SilentlyContinue }; $sw.Stop(); '{0:N1} MB/s' -f (512/$sw.Elapsed.TotalSeconds)\"\r\npause\r\n", Encoding.ASCII);
+		File.WriteAllText(Path.Combine(root, "Surface Scan", "run-chkdsk-scan.cmd"), "@echo off\r\nset /p DRIVE=Enter drive letter to scan, for example E:\r\nif \"%DRIVE%\"==\"\" (echo No drive entered. & pause & exit /b 1)\r\nchkdsk %DRIVE% /scan\r\npause\r\n", Encoding.ASCII);
+		File.WriteAllText(Path.Combine(root, "Repair Recovery", "run-chkdsk-repair.cmd"), "@echo off\r\necho WARNING: This can take a long time and may lock the drive.\r\nset /p DRIVE=Enter drive letter to repair, for example E:\r\nif \"%DRIVE%\"==\"\" (echo No drive entered. & pause & exit /b 1)\r\nchoice /m \"Run CHKDSK repair on %DRIVE%\"\r\nif errorlevel 2 exit /b 1\r\nchkdsk %DRIVE% /r /x\r\npause\r\n", Encoding.ASCII);
 		return root;
 	}
 
@@ -6216,8 +6768,35 @@ exit 0
 		}
 	}
 
+	// Colour for the big Health Status card, from the OS health label alone: green = good, amber = caution, grey =
+	// unknown, red = bad. Shared so every path that renders the card (full report, placeholder, no-selection) agrees —
+	// the card is INSIDE the same border as ToolHealthText, so leaving a stale colour there produces a self-contradicting
+	// card such as a green box labelled "Unhealthy".
+	private System.Windows.Media.Color HealthCardColor(string healthText)
+	{
+		string h = (healthText ?? "").ToLowerInvariant();
+		// Test the BAD words FIRST. A status like "Health: Unhealthy/Unknown" also contains "unknown", so checking that
+		// earlier would paint the card GREY while the label inside the very same card reads "Unhealthy" — the same
+		// substring trap that made the destructive-op health gate blind ("Unhealthy" contains "Healthy").
+		if (h.Contains("unhealthy") || h.Contains("degraded") || h.Contains("fail")) return System.Windows.Media.Color.FromRgb(180, 40, 40);
+		if (h.Contains("warn") || h.Contains("caution")) return System.Windows.Media.Color.FromRgb(180, 120, 10);
+		if (IsHealthy(healthText)) return System.Windows.Media.Color.FromRgb(22, 163, 74);
+		if (string.IsNullOrWhiteSpace(h) || h.Contains("unknown")) return System.Windows.Media.Color.FromRgb(71, 85, 105);
+		return System.Windows.Media.Color.FromRgb(180, 40, 40);
+	}
+
+	// The physical disk (identity, not object reference) the "Drive tools" overview card currently reflects. A
+	// background/post-operation disk-list refresh re-selects the SAME physical disk under a NEW DiskItem instance
+	// (e.g. right after Wipe's diskpart clean fires a device-change refresh) — without this guard that re-render
+	// the card even though the user never touched a diagnostic tool, which reads as an unrequested "Health" popping
+	// up mid-Erase. Only a genuine switch to a DIFFERENT disk (or none) updates the card.
+	private string _lastOverviewDiskKey = "\0uninitialized";
+
 	private void UpdateDriveToolOverview()
 	{
+		string overviewKey = DiskBox.SelectedItem is DiskItem selDisk ? DiskIdentityKey(selDisk) : "";
+		if (overviewKey == _lastOverviewDiskKey) return;
+		_lastOverviewDiskKey = overviewKey;
 		if (!(DiskBox.SelectedItem is DiskItem disk))
 		{
 			ToolDriveTitleText.Text = L("DToolNoDrive");
@@ -6229,12 +6808,20 @@ exit 0
 			ToolSizeText.Text = L("DToolSizeUnknown");
 			ToolRecommendationDetailText.Text = L("DToolSelectBegin");
 			SmartGrid.ItemsSource = Array.Empty<SmartRow>();
+			HealthStatusCard.Background = new System.Windows.Media.SolidColorBrush(HealthCardColor(""));   // grey, matches "Unknown"
+			if (HealthTrendText != null) HealthTrendText.Text = "";
+			if (HealthTrendBox != null) HealthTrendBox.Visibility = Visibility.Collapsed;
 			return;
 		}
 		// If we already hold a health/SMART report for this disk (e.g. a Refresh or re-selection rebuilt the
 		// combo), re-render the full detailed view instead of the placeholder — otherwise the SMART table
 		// gets wiped every time the disk list refreshes.
-		if (_diagDisk != null && _diagReport != null && _diagDisk.Number == disk.Number)
+		// Match on IDENTITY, not just the number: disk numbers are recycled when removable drives are swapped, and this
+		// cached report now carries the previous drive's reliability counters — which drive the failure verdict directly.
+		// Re-rendering it for a different physical drive would show that drive's counters (red "replace" on a healthy
+		// stick, or a green "no failure signs" on a dying one) plus its trend note, under the new drive's name.
+		if (_diagDisk != null && _diagReport != null && _diagDisk.Number == disk.Number
+			&& string.Equals(DiskIdentityKey(_diagDisk), DiskIdentityKey(disk), StringComparison.OrdinalIgnoreCase))
 		{
 			UpdateHealthVisuals(disk, _diagReport, recordTrend: false);
 			if (speedResults.TryGetValue(disk.Number, out SpeedResult cachedSpeed)) UpdateSpeedVisuals(cachedSpeed);
@@ -6242,8 +6829,17 @@ exit 0
 		}
 		// No report yet for this disk — clear any stale SMART rows left over from a previously selected disk.
 		SmartGrid.ItemsSource = Array.Empty<SmartRow>();
+		// The trend note and temperature sparkline sit directly under the drive title, so leaving the PREVIOUS drive's
+		// text there reads as a verdict about THIS one — e.g. a dying drive's "back up your data" warning under a healthy
+		// SSD's name, or worse, a reassuring "status stable" line under the dying drive. Clear both with the SMART rows.
+		if (HealthTrendText != null) HealthTrendText.Text = "";
+		if (HealthTrendBox != null) HealthTrendBox.Visibility = Visibility.Collapsed;
+		_trendSerial = "";
 		ToolDriveTitleText.Text = $"Disk {disk.Number} - {disk.FriendlyName}";
 		ToolHealthText.Text = LHealth(disk.HealthText);
+		// Recolour the card for THIS drive from its OS health label (no report yet, so no predictive escalation). Without
+		// this the previous drive's red/green verdict colour stays behind the freshly-updated label inside the same card.
+		HealthStatusCard.Background = new System.Windows.Media.SolidColorBrush(HealthCardColor(disk.HealthText));
 		ToolTemperatureText.Text = "-- °C";
 		ToolFirmwareText.Text = L("DToolFwNotExposed");
 		ToolSerialText.Text = L("DToolSerByHealth");
@@ -6277,12 +6873,7 @@ exit 0
 		ToolRecommendationDetailText.Text = pred.Text + "\n" + BuildHealthRecommendation(disk);
 		SmartGrid.ItemsSource = BuildSmartRows(disk, report);
 		// Colour the Health Status card: green = good, amber = caution, red = bad, grey = unknown.
-		string h = (disk.HealthText ?? "").ToLowerInvariant();
-		System.Windows.Media.Color card =
-			IsHealthy(disk.HealthText) ? System.Windows.Media.Color.FromRgb(22, 163, 74)
-			: (h.Contains("warn") || h.Contains("caution")) ? System.Windows.Media.Color.FromRgb(180, 120, 10)
-			: (string.IsNullOrWhiteSpace(h) || h.Contains("unknown")) ? System.Windows.Media.Color.FromRgb(71, 85, 105)
-			: System.Windows.Media.Color.FromRgb(180, 40, 40);
+		System.Windows.Media.Color card = HealthCardColor(disk.HealthText);
 		// Escalate the card if the predictive verdict is worse than the OS health label (uncorrectable errors / high wear).
 		if (pred.Level == 2) card = System.Windows.Media.Color.FromRgb(180, 40, 40);
 		else if (pred.Level == 1 && IsHealthy(disk.HealthText)) card = System.Windows.Media.Color.FromRgb(180, 120, 10);
@@ -6303,17 +6894,26 @@ exit 0
 		long Get(string k) => long.TryParse(ExtractReportValue(report, k)?.Trim(), out long n) ? n : -1;
 		long ruc = Get("ReadErrorsUncorrected"), wuc = Get("WriteErrorsUncorrected");
 		long rtot = Get("ReadErrorsTotal"), wtot = Get("WriteErrorsTotal");
-		long realloc = Get("ReallocatedSectors"), pending = Get("PendingSectors");
+		// NOTE: classic ATA SMART "Reallocated Sector Count" / "Current Pending Sector Count" (attrs 5/197) are NOT
+		// exposed by MSFT_StorageReliabilityCounter (confirmed against real Get-StorageReliabilityCounter output —
+		// it has no ReallocatedSectors/PendingSectors property on any bus), so a lookup for them here would always
+		// return the "not present" sentinel and never actually escalate anything. Not attempted; the app already
+		// points users at a dedicated third-party SMART tool for attribute-level detail it doesn't have access to.
 		int wear = (int)Get("Wear"), temp = (int)Get("Temperature");
 		string h = (disk.HealthText ?? "").ToLowerInvariant();
-		bool anyData = ruc >= 0 || wuc >= 0 || rtot >= 0 || wtot >= 0 || wear >= 0 || temp >= 0 || !string.IsNullOrWhiteSpace(h);
+		// Require REAL reliability data before returning a confident verdict. DiskItem.HealthText is a computed property
+		// that is NEVER empty (it always starts with "Health: "), so including it here made anyData unconditionally true,
+		// turned the "not enough data" branch below into dead code, and let a drive that exposes NO counters at all — a
+		// USB bridge that hides SMART, say — be painted green with "No failure signs". A bad OS health label still counts
+		// as data (it alone is enough to say "replace"), but a good one no longer substitutes for counters we never read.
+		bool badHealthLabel = h.Contains("unhealthy") || h.Contains("warn") || h.Contains("caution") || h.Contains("fail");
+		bool anyData = ruc >= 0 || wuc >= 0 || rtot >= 0 || wtot >= 0 || wear >= 0 || temp >= 0 || badHealthLabel;
 		var reasons = new List<string>();
 		bool replace = false, watch = false;
 
 		if (h.Contains("unhealthy") || h.Contains("warn") || h.Contains("caution") || h.Contains("fail"))
 		{ replace = true; reasons.Add(string.Format(L("PredReasonHealth"), disk.HealthText)); }
 		if (ruc > 0 || wuc > 0) { replace = true; reasons.Add(string.Format(L("PredReasonUncorrected"), Math.Max(ruc, 0), Math.Max(wuc, 0))); }
-		if (realloc > 0 || pending > 0) { replace = true; reasons.Add(string.Format(L("PredReasonSectors"), Math.Max(realloc, 0), Math.Max(pending, 0))); }
 		if (wear >= 90) { replace = true; reasons.Add(string.Format(L("PredReasonWear"), wear)); }
 		else if (wear >= 70) { watch = true; reasons.Add(string.Format(L("PredReasonWear"), wear)); }
 		if (!replace && (rtot > 100 || wtot > 100)) { watch = true; reasons.Add(string.Format(L("PredReasonErrors"), Math.Max(rtot, 0) + Math.Max(wtot, 0))); }
@@ -6453,7 +7053,9 @@ exit 0
 		// only the visible label (3rd arg) is.
 		AddReliabilityRow(rows, report, "Temperature", L("SmTemp"));
 		AddReliabilityRow(rows, report, "PowerOnHours", L("SmPowerOn"));
-		AddReliabilityRow(rows, report, "PowerCycleCount", L("SmPowerCycles"));
+		// MSFT_StorageReliabilityCounter's real property is StartStopCycleCount — "PowerCycleCount" is not a field
+		// this class exposes, so the lookup below always failed silently and this row never appeared.
+		AddReliabilityRow(rows, report, "StartStopCycleCount", L("SmPowerCycles"));
 		AddReliabilityRow(rows, report, "ReadErrorsTotal", L("SmReadTotal"));
 		AddReliabilityRow(rows, report, "ReadErrorsUncorrected", L("SmReadUnc"));
 		AddReliabilityRow(rows, report, "WriteErrorsTotal", L("SmWriteTotal"));
@@ -6580,8 +7182,23 @@ exit 0
 
 	private async Task<List<DiskItem>> GetDisksAsync()
 	{
-		string value = "$disks = Get-Disk | Sort-Object Number | ForEach-Object {\n  $parts = @(Get-Partition -DiskNumber $_.Number -ErrorAction SilentlyContinue)\n  [pscustomobject]@{\n    Number = $_.Number\n    FriendlyName = if ($null -ne $_.FriendlyName) { $_.FriendlyName.ToString() } else { ('Disk ' + $_.Number) }\n    SerialNumber = $_.SerialNumber\n    BusType = if ($null -ne $_.BusType) { $_.BusType.ToString() } else { 'Unknown' }\n    MediaType = if ($null -ne $_.MediaType) { $_.MediaType.ToString() } else { 'Unknown' }\n    HealthStatus = if ($null -ne $_.HealthStatus) { $_.HealthStatus.ToString() } else { 'Unknown' }\n    OperationalStatus = ($_.OperationalStatus | ForEach-Object { if ($null -ne $_) { $_.ToString() } }) -join ', '\n    Size = [int64]$_.Size\n    IsBoot = [bool]$_.IsBoot\n    IsSystem = [bool]$_.IsSystem\n    PartitionStyle = if ($null -ne $_.PartitionStyle) { $_.PartitionStyle.ToString() } else { 'Unknown' }\n    DriveLetters = @($parts | Where-Object DriveLetter | ForEach-Object { $_.DriveLetter.ToString() })\n  }\n}\n$disks | ConvertTo-Json -Depth 4";
-		string text = ExtractJsonPayload(await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(value)));
+		// MediaType MUST come from Get-PhysicalDisk, not Get-Disk: MSFT_Disk reports "Unknown"/"Unspecified" for
+		// virtually every real drive (verified on this machine: an Intel NVMe SSD and USB SSDs ALL reported
+		// MediaType=Unknown via Get-Disk, while Get-PhysicalDisk correctly said SSD). Reading the Get-Disk value
+		// meant DetectWipeMedia could never return Hdd, so secure-delete's overwrite pass was unreachable on every
+		// spinning disk, and the free-space wipe showed the "flash is unreliable" banner even on a real HDD.
+		string value = "$phys = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)\n$disks = Get-Disk | Sort-Object Number | ForEach-Object {\n  $d = $_\n  $parts = @(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue)\n  $p = $phys | Where-Object { $_.DeviceId -eq [string]$d.Number } | Select-Object -First 1\n  if (-not $p) { $p = $phys | Where-Object { $_.FriendlyName -eq $d.FriendlyName } | Select-Object -First 1 }\n  $mt = 'Unknown'\n  if ($p -and $null -ne $p.MediaType) { $mt = $p.MediaType.ToString() }\n  if ($mt -eq 'Unspecified' -or $mt -eq '0') { $mt = 'Unknown' }\n  if ($mt -eq 'Unknown' -and $null -ne $d.MediaType) { $mt = $d.MediaType.ToString() }\n  [pscustomobject]@{\n    Number = $d.Number\n    FriendlyName = if ($null -ne $d.FriendlyName) { $d.FriendlyName.ToString() } else { ('Disk ' + $d.Number) }\n    SerialNumber = $d.SerialNumber\n    BusType = if ($null -ne $d.BusType) { $d.BusType.ToString() } else { 'Unknown' }\n    MediaType = $mt\n    HealthStatus = if ($null -ne $d.HealthStatus) { $d.HealthStatus.ToString() } else { 'Unknown' }\n    OperationalStatus = ($d.OperationalStatus | ForEach-Object { if ($null -ne $_) { $_.ToString() } }) -join ', '\n    Size = [int64]$d.Size\n    IsBoot = [bool]$d.IsBoot\n    IsSystem = [bool]$d.IsSystem\n    PartitionStyle = if ($null -ne $d.PartitionStyle) { $d.PartitionStyle.ToString() } else { 'Unknown' }\n    DriveLetters = @($parts | Where-Object DriveLetter | ForEach-Object { $_.DriveLetter.ToString() })\n  }\n}\n$disks | ConvertTo-Json -Depth 4";
+		string raw = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(value));
+		string text = ExtractJsonPayload(raw);
+		// Distinguish "enumerated zero disks" from "no JSON ever came back". PowerShell exits 0 when a cmdlet in a
+		// non-final statement does not exist, so on a WinPE image with WinPE-PowerShell but WITHOUT WinPE-StorageWMI
+		// — or a box whose Virtual Disk service is broken — `Get-Disk` errors non-terminatingly, nothing is written to
+		// stdout, RunProcessCaptureAsync does not throw, and ExtractJsonPayload falls back to "[]". That was then
+		// treated as a perfectly successful scan of a machine with no disks: empty picker, "Ready" in the status bar,
+		// no error, no retry, and the only clue buried in the log. Throw instead, so the caller's honest failure path
+		// (error status + bounded auto-retry) runs. A real machine running Windows always has at least one disk.
+		if (text == "[]" && !raw.TrimStart().StartsWith("[") && !raw.TrimStart().StartsWith("{"))
+			throw new InvalidOperationException("Windows returned no disk information. Get-Disk may be unavailable (WinPE without the StorageWMI component) or the Virtual Disk service may not be running.\r\n" + raw.Trim());
 		List<DiskItem> list = new List<DiskItem>();
 		using JsonDocument jsonDocument = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "[]" : text);
 		JsonElement rootElement = jsonDocument.RootElement;
@@ -6830,14 +7447,21 @@ exit 0
 		long reserve = disk.IsSystem ? (1L << 30) : (64L << 20);
 		long cap = Math.Max(0, free - reserve);
 		if (cap <= 0) { MessageBox.Show(string.Format(L("MbNoFreeWipe"), letter), L("MbWipeFreeTitle"), MessageBoxButton.OK, MessageBoxImage.Information); return; } // too little free to wipe while keeping a reserve
-		string confirmBody = string.Format(L("MbWipeFreeConfirm"), letter, FormatBytes(free), fills.Length) + (disk.IsSystem ? "\n\n" + L("WipeVssWarn") : "");
+		// Filling free space purges shadow copies on ANY volume that has them — System Protection and File History can
+		// both be enabled on a DATA drive. Gating this warning on IsSystem made it unreachable exactly where the user
+		// is least likely to expect losing their Previous Versions. Warn always, with wording true for each case.
+		string confirmBody = string.Format(L("MbWipeFreeConfirm"), letter, FormatBytes(free), fills.Length)
+			+ "\n\n" + L(disk.IsSystem ? "WipeVssWarn" : "WipeVssWarnAny");
 		if (MessageBox.Show(confirmBody, L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK)
 			return;
 
 		bool failed = false;
 		try
 		{
-			stopRequested = false; isPaused = false; _progressFullRange = true; PauseButton.Content = L("BtnPause");
+			// _progressFixedTotal tells UpdateProgressStats the total is REAL and must not be inflated by the clone-only
+			// "we're at 97% but not done" heuristic — without it the wipe's bar froze at ~97% for the last stretch and
+			// the ETA counted upward instead of down.
+			stopRequested = false; isPaused = false; _progressFullRange = true; _progressFixedTotal = true; PauseButton.Content = L("BtnPause");
 			progressTotalGiB = Math.Max(1.0, cap / 1073741824.0 * Math.Max(1, fills.Length));
 			progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
@@ -6848,18 +7472,78 @@ exit 0
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false); NotifyOperationDone(true);
 			await RefreshDisksAsync();
+			// Honesty: on flash the app already warned that overwriting free space does NOT reliably erase old data
+			// (wear-levelling keeps copies the OS can't reach). Claiming "can no longer be recovered" here retracted
+			// that warning — and the last message is the one the user remembers. Also these were the only strings in
+			// the flow that bypassed L(), so it ended in English for everyone.
 			MessageBox.Show(stopRequested
-				? $"Stopped. Free space on {letter}: was only partially wiped."
-				: $"Done. Free space on {letter}: was wiped — files previously deleted from it can no longer be recovered.",
-				"DriveForge — wipe free space", MessageBoxButton.OK, MessageBoxImage.Information);
+				? string.Format(L("MbWipeFreeStopped"), letter)
+				: string.Format(L(DetectWipeMedia(disk) == WipeMedia.Hdd ? "MbWipeFreeDoneHdd" : "MbWipeFreeDoneFlash"), letter),
+				L("MbWipeFreeTitle"), MessageBoxButton.OK, MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrFreeWipe"), ex); }
-		finally { _progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); SetBusy(busy: false); }
+		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
+	}
+
+	[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint ctl, ref ushort inB, uint inS, IntPtr outB, uint outS, out uint ret, IntPtr ovl);
+
+	// The name of the temporary fill directory a free-space wipe creates at a volume root. Kept in one place so the
+	// startup sweep can find and remove one that a crash / kill / power loss left behind.
+	private const string WipeFillDirName = "__driveforge_freespace__";
+
+	// NTFS propagates the "compressed" attribute from a directory onto every file created inside it. On a volume with
+	// compression enabled (the "Compress this drive to save disk space" checkbox), our all-zero fill files would be
+	// stored compressed — and NTFS keeps an all-zero compression unit as a sparse hole, allocating ZERO clusters. The
+	// wipe would then "write" its whole cap at memory speed, free space would never drop, not one deleted file would
+	// be overwritten, and we would still tell the user the data is gone. Clear compression on the fill directory so
+	// the fills are written for real.
+	private static void TryDisableCompression(string dir)
+	{
+		try
+		{
+			const uint FSCTL_SET_COMPRESSION = 0x9C040;
+			const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000; // required to open a DIRECTORY handle
+			using var h = CreateFile(dir, 0xC0000000u /* GENERIC_READ | GENERIC_WRITE */, 0x3u, IntPtr.Zero, 3u /* OPEN_EXISTING */, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+			if (h.IsInvalid) return;
+			ushort fmt = 0; // COMPRESSION_FORMAT_NONE
+			DeviceIoControl(h, FSCTL_SET_COMPRESSION, ref fmt, sizeof(ushort), IntPtr.Zero, 0, out _, IntPtr.Zero);
+		}
+		catch { }
+	}
+
+	// Removes a fill directory stranded by a crash / kill / power loss during a previous wipe. The cleanup in
+	// WipeFreeSpaceCore runs on a thread-pool thread, so process death skips it and can leave hundreds of GB behind
+	// with nothing to ever reclaim them. Best-effort, fire-and-forget at startup; the folder name is ours alone.
+	// Set while a free-space wipe is filling a drive, so the startup sweep of a SECOND instance can tell a stranded
+	// folder from one that is being written right now. Cross-process: the app is NOT single-instance (no mutex), and
+	// a second instance's sweep would otherwise delete a live wipe's fill files — silently gutting the wipe while it
+	// still reported "free space overwritten".
+	private static readonly string WipeActiveMarker = Path.Combine(Path.GetTempPath(), "driveforge-wipe-active.lock");
+
+	private static void SweepStrandedWipeFiles()
+	{
+		try
+		{
+			// A wipe is running (this or another instance) — its fill files are NOT strays. Leave them alone.
+			try { if (File.Exists(WipeActiveMarker) && (DateTime.UtcNow - File.GetLastWriteTimeUtc(WipeActiveMarker)).TotalMinutes < 10) return; } catch { return; }
+			foreach (var d in DriveInfo.GetDrives())
+			{
+				try
+				{
+					if (!d.IsReady || (d.DriveType != DriveType.Fixed && d.DriveType != DriveType.Removable)) continue;
+					string dir = Path.Combine(d.RootDirectory.FullName, WipeFillDirName);
+					if (Directory.Exists(dir)) Directory.Delete(dir, true);
+				}
+				catch { }
+			}
+		}
+		catch { }
 	}
 
 	private void WipeFreeSpaceCore(char letter, int[] fills, long capBytes)
 	{
-		string dir = letter + ":\\__driveforge_freespace__";
+		string dir = letter + ":\\" + WipeFillDirName;
 		int bufSize = 4 * 1024 * 1024;
 		byte[] b = new byte[bufSize];
 		using var rng = System.Security.Cryptography.RandomNumberGenerator.Create();
@@ -6870,6 +7554,10 @@ exit 0
 			{
 				if (stopRequested) break;
 				Directory.CreateDirectory(dir);
+				TryDisableCompression(dir); // else zeros compress to nothing and the "wipe" allocates no clusters at all
+				// Tell any other instance's startup sweep that these fill files are LIVE, not strays. Timestamped and
+				// refreshed below, so a crashed run's marker goes stale (10 min) instead of blocking the sweep forever.
+				try { File.WriteAllText(WipeActiveMarker, letter.ToString()); } catch { }
 				if (fill == 0) Array.Clear(b, 0, b.Length);
 				int idx = 0;
 				long passWritten = 0; // stop this pass at capBytes so we never fill the volume to 0 free
@@ -6885,6 +7573,8 @@ exit 0
 							if (fill == 2) rng.GetBytes(b);
 							fs.Write(b, 0, b.Length);
 							fw += b.Length; acc += b.Length; passWritten += b.Length; Volatile.Write(ref _progressDoneBytes, acc);
+							// Keep the live-wipe marker fresh (cheap: once per 1 GiB file boundary is enough).
+							if (fw >= fileMax) { try { File.SetLastWriteTimeUtc(WipeActiveMarker, DateTime.UtcNow); } catch { } }
 						}
 						fs.Flush(flushToDisk: true);
 						idx++;
@@ -6899,7 +7589,11 @@ exit 0
 				try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
 			}
 		}
-		finally { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
+		finally
+		{
+			try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+			try { if (File.Exists(WipeActiveMarker)) File.Delete(WipeActiveMarker); } catch { }
+		}
 	}
 
 	// Flush + eject the selected drive so the user can unplug it safely (USB / external).
@@ -7172,11 +7866,16 @@ exit 0
 	// Securely erase the selected drive by overwriting every sector so data cannot be recovered.
 	private async void WipeDrive_Click(object sender, RoutedEventArgs e)
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!(DiskBox.SelectedItem is DiskItem disk)) { MessageBox.Show(L("Mb020"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (disk.IsSystem) { MessageBox.Show(L("Mb021"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Hand); return; }
 		if (!IsAdministrator()) { MessageBox.Show(L("Mb022"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-
+		// Hold the reentrancy guard across the whole flow (the mode / confirm / method-menu / GetDiskContents / verify
+		// awaits all run before SetBusy sets isBusy) so a second destructive tool can't start on this disk while a wipe
+		// is being set up. Cleared in the outer finally on every path (returns, cancels, exceptions).
+		_toolOpStarting = true;
+		try
+		{
 		int? wmode = ShowActionMenu(L("AmWipeTitle"), string.Format(L("AmWipePrompt"), disk.Number),
 			new[]
 			{
@@ -7225,18 +7924,20 @@ exit 0
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
-			_progressFullRange = true;
+			// _progressFixedTotal: a wipe writes EXACTLY disk.Size x passCount bytes — the total is real, not a
+			// projection, so the clone-only "actuals exceeded the estimate" inflation must not apply. Without it the
+			// ceiling jumped 12% ahead the moment we reached 97%, so the completion update below could never reach
+			// 100%: it stopped at ~89% and the stats line claimed a total bigger than the drive itself.
+			_progressFullRange = true; _progressFixedTotal = true;
 			PauseButton.Content = L("BtnPause");
 			int passCount = Math.Max(1, fills.Length);
 			progressTotalGiB = Math.Max(1.0, disk.Size / 1073741824.0 * passCount);
 			progressDoneGiB = 0.0; progressPrevGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
-			DateTime wipeStarted = DateTime.Now;
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, string.Format(L("BzWiping"), disk.Number, label));
 			ProgressBar.Value = 0.0;
 			await RawWipeDiskAsync(disk, fills);
 			operationTimer.Stop(); operationStopwatch.Stop();
-			TimeSpan wipeDuration = operationStopwatch.Elapsed;
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false);
 			NotifyOperationDone(true);
@@ -7245,20 +7946,6 @@ exit 0
 				? $"Wipe stopped. Disk {disk.Number} was partially overwritten."
 				: $"Done. Disk {disk.Number} was wiped ({label}).\n\nUse Format to make it usable again.",
 				"DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
-
-			// Offer a tamper-evident wipe certificate after a real overwrite (not after a Quick clear).
-			// Optional + on-demand: a single "Save certificate" button — not everyone wants one, and the
-			// user picks where it goes (Save As dialog). Cancel = no certificate.
-			if (!stopRequested && fills.Length > 0)
-			{
-				int? certChoice = ShowActionMenu(L("WipeCertTitle"), L("WipeCertPrompt"),
-					new[] { L("WipeCertSaveBtn") }, new[] { 0xE74E }, new[] { false }, 0);
-				if (certChoice == 0)
-				{
-					try { await GenerateWipeCertificateAsync(disk, label, fills, wipeStarted, wipeDuration); }
-					catch (Exception cex) { ShowError(L("ErrCert"), cex); }
-				}
-			}
 		}
 		catch (Exception ex)
 		{
@@ -7266,17 +7953,23 @@ exit 0
 		}
 		finally
 		{
-			_progressFullRange = false;
 			operationTimer.Stop(); operationStopwatch.Stop();
+			// Refresh BEFORE clearing the flags: UpdateProgressStats reads them, and with _progressFullRange already
+			// false it switches to the 40..82 banded formula — which, since the bar only ever advances, JUMPS a run
+			// that failed at 50% up to 61% at the exact moment the error is reported.
 			if (failed) UpdateProgressStats();
+			// Clear BOTH — leaking _progressFixedTotal=true into a later clone/install would disable the inflation
+			// heuristic that flow genuinely relies on.
+			_progressFullRange = false; _progressFixedTotal = false;
 			SetBusy(busy: false);
 		}
+		}
+		finally { _toolOpStarting = false; }
 	}
 
 	// Overwrites the whole physical disk N times. Removes partitions first (diskpart clean) so the raw sectors
 	// are writable, then writes directly to \\.\PhysicalDriveN. Honours Stop/Pause and reports live progress.
 	// fills: list of passes — 0 = zeros, 1 = ones (0xFF), 2 = random. Empty = Quick (clean only).
-	private long _lastWipeCoveredBytes; // bytes overwritten in the final pass — surfaced on the erasure certificate
 	private async Task RawWipeDiskAsync(DiskItem disk, int[] fills)
 	{
 		// Remove partitions/volumes so the physical sectors are free to overwrite (and = Quick wipe).
@@ -7318,14 +8011,14 @@ exit 0
 					try { fs.Write(buffer, 0, toWrite); }
 					catch (IOException) when (size - written <= chunk)
 					{
-						// The reported capacity often exceeds the addressable byte count; hitting the device end on
-						// the final chunk means the drive is fully overwritten, not a failure.
-						written = size; break;
+						// Hitting the device end on the final chunk is USUALLY benign — the reported capacity often
+						// exceeds the addressable byte count. But an IOException here can ALSO be a genuine bad-sector /
+						// hardware write failure at the tail, and we cannot tell the two apart, so just stop this pass.
+						break;
 					}
 					written += toWrite; doneTotal += toWrite;
 					Volatile.Write(ref _progressDoneBytes, doneTotal);
 				}
-				_lastWipeCoveredBytes = written;
 				fs.Flush();
 			}
 		});
@@ -7337,9 +8030,9 @@ exit 0
 		if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
 		{ MessageBox.Show(L("Mb024"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		long isoSize = new FileInfo(sourcePath).Length;
-		// The raw writer sector-pads the final chunk (up to +511 bytes), so reject anything whose padded size
-		// would run past the device end — otherwise the last write throws after diskpart already wiped the drive.
-		if ((isoSize + 511) / 512 * 512 > disk.Size)
+		// The raw writer sector-pads the final chunk (up to +4095 bytes; 4096 covers 4Kn disks too), so reject
+		// anything whose padded size would run past the device end — else the last write throws after diskpart wiped it.
+		if ((isoSize + 4095) / 4096 * 4096 > disk.Size)
 		{ MessageBox.Show(string.Format(L("MbIsoTooBig"), FormatBytes(isoSize), FormatBytes(disk.Size)), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		// The source ISO must not live on the disk we're about to wipe, or we'd destroy the very file we're writing.
@@ -7361,10 +8054,15 @@ exit 0
 			return;
 
 		bool failed = false;
+		bool ejected = false; // set when we deliberately eject on the success path, so the finally net does not re-online (undo) the eject
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
-			_progressFullRange = true; PauseButton.Content = L("BtnPause");
+			// _progressFixedTotal: we write EXACTLY isoSize bytes, so the total is real, not a projection. Without it the
+			// clone-only "actuals exceeded the estimate" heuristic inflates the ceiling by 12% the moment we reach 97%,
+			// so the completion update (progressDoneGiB = progressTotalGiB) could never reach 100% — it landed at ~89%
+			// and the stats line advertised a total 12% larger than the image.
+			_progressFullRange = true; _progressFixedTotal = true; PauseButton.Content = L("BtnPause");
 			progressTotalGiB = Math.Max(1.0, isoSize / 1073741824.0);
 			progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
@@ -7372,6 +8070,7 @@ exit 0
 			ProgressBar.Value = 0.0;
 			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 				await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
+			bool writeCompleted = !stopRequested; // capture BEFORE the optional verify below reuses stopRequested
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false);
@@ -7381,7 +8080,7 @@ exit 0
 					MessageBox.Show(L("Mb026"),
 						"DriveForge — verify write", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
 				{
-					stopRequested = false; _progressFullRange = true;
+					stopRequested = false; _progressFullRange = true; _progressFixedTotal = true; // read back exactly isoSize bytes — real total
 					progressTotalGiB = Math.Max(1.0, isoSize / 1073741824.0);
 					progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 					operationStopwatch.Restart(); operationTimer.Start();
@@ -7391,24 +8090,37 @@ exit 0
 					operationTimer.Stop(); operationStopwatch.Stop();
 					progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 					SetBusy(busy: false);
-					verifyNote = vok ? "\n\n✓ Verified — the data on the drive matches the ISO exactly."
-						: stopRequested ? "\n\n(Verification was stopped.)"
-						: $"\n\n⚠ Verification FAILED at {FormatBytes(mismatchAt)} — the drive did not write correctly. Try writing again, or use a different USB stick / port.";
+					verifyNote = vok ? "\n\n" + L("IsoVerifyOk")
+						: stopRequested ? "\n\n" + L("IsoVerifyStopped")
+						: "\n\n" + string.Format(L("IsoVerifyFailed"), FormatBytes(mismatchAt));
 				}
 
-				if (EjectWhenDoneCheck.IsChecked == true && !stopRequested) await EjectDiskAsync(disk.Number);
+				// RawWriteImageToDiskAsync took the disk OFFLINE so Windows would not auto-mount the ISO's own ESP mid-
+				// write/verify (corrupts the image + false-fails the read-back). Bring it back online (best-effort: a
+				// diskpart hiccup here must not turn a good, flushed write into a failure dialog — the finally net retries).
+				bool onlined = false;
+				try { await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n"); onlined = true; } catch { }
+				// Eject only once it is online; mark it so the finally net does NOT re-online (silently undo) the eject.
+				if (onlined && EjectWhenDoneCheck.IsChecked == true && !stopRequested) { await EjectDiskAsync(disk.Number); ejected = true; }
 			await RefreshDisksAsync();
-			MessageBox.Show(stopRequested
-				? $"Stopped. The ISO was only partially written to Disk {disk.Number}; it may not boot."
-				: $"Done. The ISO was written to Disk {disk.Number}. Plug it into the target PC and pick it from the boot menu (F12 / F9 / Esc / F2)." + verifyNote,
+			MessageBox.Show(writeCompleted
+				? string.Format(L("IsoWriteDone"), disk.Number) + verifyNote
+				: string.Format(L("IsoWriteStopped"), disk.Number),
 				"DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); SaveLogToDesktop(); ShowError(L("ErrWriteIso"), ex); }
 		finally
 		{
-			_progressFullRange = false;
 			operationTimer.Stop(); operationStopwatch.Stop();
+			// Refresh BEFORE clearing the flags (see the wipe flow): clearing first switches the bar to the banded
+			// formula and jumps a failed run forward instead of leaving it where it stopped.
 			if (failed) UpdateProgressStats();
+			// Clear BOTH: leaking _progressFixedTotal=true into a later clone/install would disable the inflation
+			// heuristic that flow genuinely relies on.
+			_progressFullRange = false; _progressFixedTotal = false;
+			// Safety net: if we bailed (exception/stop/online-hiccup) before onlining, never leave the disk offline — but
+			// do NOT re-online a disk we deliberately ejected on the success path (that would silently undo the eject).
+			if (!ejected) { try { await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n"); } catch { } }
 			SetBusy(busy: false);
 		}
 	}
@@ -7440,7 +8152,9 @@ exit 0
 		try
 		{
 			SetStage(L("StgPrepDisk"), 2.0);
-			await File.WriteAllTextAsync(dp, $"select disk {disk.Number}\r\nclean\r\nexit\r\n", Encoding.ASCII);
+			// offline disk: stop Windows auto-mounting the ISO's own ESP as the raw write lays it down (a mounted FAT
+			// driver would write dirty-bit/FSINFO back over our bytes -> corrupt image + false verify FAIL). Back online in the caller.
+			await File.WriteAllTextAsync(dp, $"select disk {disk.Number}\r\nclean\r\noffline disk\r\nexit\r\n", Encoding.ASCII);
 			await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(dp));
 		}
 		finally { TryDeleteFile(dp); }
@@ -7464,13 +8178,14 @@ exit 0
 				while (got < chunk) { int r = src.Read(buffer, got, chunk - got); if (r <= 0) break; got += r; }
 				if (got <= 0) break;
 				int toWrite = got;
-				if (toWrite % 512 != 0) { int pad = 512 - (toWrite % 512); Array.Clear(buffer, toWrite, pad); toWrite += pad; } // sector-align tail
+				if (toWrite % 4096 != 0) { int pad = 4096 - (toWrite % 4096); Array.Clear(buffer, toWrite, pad); toWrite += pad; } // sector-align tail (4096 covers 512e + 4Kn; buffer size is 4096-aligned so no overflow)
 				dst.Write(buffer, 0, toWrite);
 				done += got;
 				Volatile.Write(ref _progressDoneBytes, done);
 			}
 			dst.Flush();
-			FlushFileBuffers(h); // push the OS cache to the actual media, so write-verify reads real flash, not cache
+			// push the OS cache to the actual media; a failure here means the image may not be fully written to flash
+			if (!FlushFileBuffers(h)) throw new IOException("Flushing the write to the drive failed (error " + Marshal.GetLastWin32Error() + "). The image may not be fully on the media.");
 		});
 	}
 
@@ -7478,30 +8193,48 @@ exit 0
 	// Returns (ok, mismatchByteOffset). ok is false on the first differing byte (or a short read).
 	private (bool ok, long mismatchAt) VerifyRawWrite(DiskItem disk, string isoPath, long isoSize)
 	{
-		using SafeFileHandle h = CreateFile($"\\\\.\\PhysicalDrive{disk.Number}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
+		const int block = 8 * 1024 * 1024;   // multiple of 4096
+		const int align = 4096;
+		// Open the device with FILE_FLAG_NO_BUFFERING so the read-back comes from the ACTUAL flash, not the OS cache — a
+		// counterfeit/fake-capacity or failing drive whose just-written bytes are still cached would otherwise verify OK.
+		// The device offset (pos), read length (aligned) and buffer address are all kept 4096-aligned as NO_BUFFERING needs.
+		using SafeFileHandle h = CreateFile($"\\\\.\\PhysicalDrive{disk.Number}", GenericRead, 0x3u, IntPtr.Zero, 3u, FileFlagNoBuffering, IntPtr.Zero);
 		if (h.IsInvalid) throw new IOException("Could not open the disk for verification (error " + Marshal.GetLastWin32Error() + ").");
-		using var diskFs = new FileStream(h, FileAccess.Read);
-		using var src = new FileStream(isoPath, FileMode.Open, FileAccess.Read, FileShare.Read, 8 * 1024 * 1024);
-		int block = 8 * 1024 * 1024;
-		byte[] a = new byte[block];
-		byte[] b = new byte[block + 512];
-		long pos = 0;
-		while (pos < isoSize && !stopRequested)
+		using var src = new FileStream(isoPath, FileMode.Open, FileAccess.Read, FileShare.Read, block);
+		byte[] a = new byte[block];               // ISO bytes (a normal buffered file read of the source is fine)
+		byte[] rawDev = new byte[block + align];  // device bytes; the sector-aligned window inside this pinned array is used
+		var gc = System.Runtime.InteropServices.GCHandle.Alloc(rawDev, System.Runtime.InteropServices.GCHandleType.Pinned);
+		try
 		{
-			while (isPaused && !stopRequested) System.Threading.Thread.Sleep(150);
-			int want = (int)Math.Min(block, isoSize - pos);
-			int ar = 0; while (ar < want) { int r = src.Read(a, ar, want - ar); if (r <= 0) break; ar += r; }
-			if (ar <= 0) break;
-			int aligned = ((ar + 511) / 512) * 512;
-			diskFs.Seek(pos, SeekOrigin.Begin);
-			int br = 0; while (br < aligned) { int r = diskFs.Read(b, br, aligned - br); if (r <= 0) break; br += r; }
-			int cmp = Math.Min(ar, br);
-			for (int i = 0; i < cmp; i++) if (a[i] != b[i]) return (false, pos + i);
-			if (br < ar) return (false, pos + br);
-			pos += ar;
-			Volatile.Write(ref _progressDoneBytes, pos);
+			long baseAddr = gc.AddrOfPinnedObject().ToInt64();
+			long alignedAddr = (baseAddr + align - 1) & ~((long)align - 1);
+			int devOff = (int)(alignedAddr - baseAddr);   // 0..4095 offset of the aligned window inside rawDev
+			IntPtr devPtr = new IntPtr(alignedAddr);
+			long pos = 0;
+			while (pos < isoSize && !stopRequested)
+			{
+				while (isPaused && !stopRequested) System.Threading.Thread.Sleep(150);
+				int want = (int)Math.Min(block, isoSize - pos);
+				int ar = 0; while (ar < want) { int r = src.Read(a, ar, want - ar); if (r <= 0) break; ar += r; }
+				if (ar <= 0) break;
+				int aligned = ((ar + align - 1) / align) * align;   // read a whole number of sectors from the device
+				// pos is always a multiple of block (hence 4096) except it never advances past the final short read, so the
+				// seek is always sector-aligned; the padded ISO was checked to fit the device, so pos+aligned stays in range.
+				if (!SetFilePointerEx(h, pos, out _, 0 /*FILE_BEGIN*/))
+					throw new IOException("Seek failed during verification (error " + Marshal.GetLastWin32Error() + ").");
+				uint got;
+				if (!ReadFile(h, devPtr, (uint)aligned, out got, IntPtr.Zero))
+					got = 0;   // a NO_BUFFERING read that runs past a fake/short drive's real end fails -> 0, and the compare flags it
+				int br = (int)got;
+				int cmp = Math.Min(ar, br);
+				for (int i = 0; i < cmp; i++) if (a[i] != rawDev[devOff + i]) return (false, pos + i);
+				if (br < ar) return (false, pos + br);
+				pos += ar;
+				Volatile.Write(ref _progressDoneBytes, pos);
+			}
+			return (!stopRequested && pos >= isoSize, pos);
 		}
-		return (!stopRequested && pos >= isoSize, pos);
+		finally { gc.Free(); }
 	}
 
 	// Verify a drive's REAL capacity by writing self-identifying test data across the free space and reading
@@ -7528,7 +8261,10 @@ exit 0
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
-			_progressFullRange = true; PauseButton.Content = L("BtnPause");
+			// _progressFixedTotal: the target is the measured free space (written once, read back once) — a real total,
+			// not a projection. Without it the clone-only inflation heuristic pushed the ceiling 12% ahead at 97%, so
+			// the completion update below stalled the bar at ~89% forever.
+			_progressFullRange = true; _progressFixedTotal = true; PauseButton.Content = L("BtnPause");
 			progressTotalGiB = Math.Max(1.0, free / 1073741824.0 * 2.0); // write + read
 			progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
@@ -7541,11 +8277,11 @@ exit 0
 			NotifyOperationDone(!fake);
 
 			string verdict;
-			if (stopRequested) verdict = "Test stopped before finishing.";
+			if (stopRequested) verdict = L("CapStopped");
 			else if (fake)
-				verdict = $"⚠ FAKE or FAULTY DRIVE.\n\nVerified only {FormatBytes(verifiedOk)} of the {FormatBytes(written)} written before the data became corrupted. The drive's real usable capacity is about {FormatBytes(verifiedOk)}, not {FormatBytes(disk.Size)}. Do not store important data on it.";
+				verdict = string.Format(L("CapFake"), FormatBytes(verifiedOk), FormatBytes(written), FormatBytes(disk.Size));
 			else
-				verdict = $"✓ Drive is genuine.\n\nWrote and verified {FormatBytes(verifiedOk)} of free space with no errors — the capacity is real.";
+				verdict = string.Format(L("CapGenuine"), FormatBytes(verifiedOk));
 			ToolRecommendationDetailText.Text = verdict.Replace("\n", " ");
 			SetToolOutput($"Capacity test on {letter}: — claimed {FormatBytes(disk.Size)}\r\nWritten: {FormatBytes(written)}\r\nVerified OK: {FormatBytes(verifiedOk)}\r\nResult: {(fake ? "FAKE/FAULTY" : "GENUINE")}");
 			MessageBox.Show(verdict, "DriveForge — capacity test", MessageBoxButton.OK, fake ? MessageBoxImage.Warning : MessageBoxImage.Information);
@@ -7553,9 +8289,9 @@ exit 0
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrCapacity"), ex); }
 		finally
 		{
-			_progressFullRange = false;
 			operationTimer.Stop(); operationStopwatch.Stop();
-			if (failed) UpdateProgressStats();
+			if (failed) UpdateProgressStats();                       // refresh BEFORE clearing the flags (see the wipe flow)
+			_progressFullRange = false; _progressFixedTotal = false; // clear BOTH — must not leak into a later clone/install
 			try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
 			SetBusy(busy: false);
 		}
@@ -7570,6 +8306,9 @@ exit 0
 		long fileSize = 1L * 1024 * 1024 * 1024; // 1 GiB per file
 		byte[] b = new byte[buf];
 		Directory.CreateDirectory(dir);
+		// Round the target DOWN to a whole page so every cap file (except one that a real disk-full truncates) is a whole
+		// number of sectors — the NO_BUFFERING read-back below reads whole pages only.
+		target = target / page * page;
 
 		void Stamp(long baseOff, int len) { for (int o = 0; o < len; o += page) BitConverter.GetBytes((baseOff + o) / page).CopyTo(b, o); }
 
@@ -7583,16 +8322,19 @@ exit 0
 				long thisFile = Math.Min(fileSize, remaining);
 				using var fs = new FileStream(Path.Combine(dir, $"cap{fileIdx:D5}.bin"), FileMode.Create, FileAccess.Write, FileShare.None, buf);
 				long fw = 0;
-				while (fw < thisFile && !stopRequested)
+				try
 				{
-					while (isPaused && !stopRequested) System.Threading.Thread.Sleep(200);
-					int toW = (int)Math.Min(buf, thisFile - fw);
-					Stamp(globalOffset, toW);
-					fs.Write(b, 0, toW);
-					fw += toW; globalOffset += toW; remaining -= toW;
-					Volatile.Write(ref _progressDoneBytes, globalOffset);
+					while (fw < thisFile && !stopRequested)
+					{
+						while (isPaused && !stopRequested) System.Threading.Thread.Sleep(200);
+						int toW = (int)Math.Min(buf, thisFile - fw);
+						Stamp(globalOffset, toW);
+						fs.Write(b, 0, toW);
+						fw += toW; globalOffset += toW; remaining -= toW;
+						Volatile.Write(ref _progressDoneBytes, globalOffset);
+					}
 				}
-				fs.Flush(true);
+				finally { try { fs.Flush(true); } catch { } }   // force to the DEVICE even if a write threw (disk full) — otherwise a genuine but truncated last file's tail stays dirty-in-cache and the NO_BUFFERING read-back below reads stale sectors and false-flags FAKE
 				fileIdx++;
 			}
 		}
@@ -7600,24 +8342,50 @@ exit 0
 
 		long written = globalOffset;
 		long verified = 0;
-		foreach (var f in Directory.GetFiles(dir, "cap*.bin").OrderBy(x => x))
+		// Read the cap files back with FILE_FLAG_NO_BUFFERING so the bytes come from the ACTUAL flash, not the FS cache —
+		// a counterfeit drive that reports more capacity than it has would otherwise serve the just-written data from RAM
+		// and pass. One sector-aligned buffer, reused across files; whole pages only.
+		byte[] rbRaw = new byte[buf + page];
+		var rbGc = System.Runtime.InteropServices.GCHandle.Alloc(rbRaw, System.Runtime.InteropServices.GCHandleType.Pinned);
+		try
 		{
-			if (stopRequested) break;
-			using var fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.None, buf);
-			while (!stopRequested)
+			long rbBase = rbGc.AddrOfPinnedObject().ToInt64();
+			long rbAligned = (rbBase + page - 1) & ~((long)page - 1);
+			int rbOff = (int)(rbAligned - rbBase);
+			IntPtr rbPtr = new IntPtr(rbAligned);
+			foreach (var f in Directory.GetFiles(dir, "cap*.bin").OrderBy(x => x))
 			{
-				while (isPaused && !stopRequested) System.Threading.Thread.Sleep(200);
-				// Fill the buffer fully; a short, non-page-aligned mid-file read would desync the page-stamp offsets
-				// below and be misread as corruption (a false FAKE verdict on a perfectly genuine drive).
-				int r = 0; while (r < buf) { int k = fs.Read(b, r, buf - r); if (k <= 0) break; r += k; }
-				if (r <= 0) break;
-				for (int o = 0; o + page <= r; o += page)
-					if (BitConverter.ToInt64(b, o) != (verified + o) / page)
-						return (written, verified + o, true); // mismatch → fake/faulty
-				verified += r;
-				Volatile.Write(ref _progressDoneBytes, written + verified);
+				if (stopRequested) break;
+				// The global offset where THIS file's data begins — derived from its index in the name (cap{N:D5}) times the
+				// fixed 1 GiB file size, NOT a running counter. So a file we can't open/read (an AV/indexer lock, a transient
+				// error) can't shift the expected stamps of the FOLLOWING files and cause a FALSE "fake" verdict on a genuine
+				// drive. (Every full file is exactly fileSize; only the last can be shorter, and it starts at N*fileSize too.)
+				string nm = Path.GetFileNameWithoutExtension(f);
+				long fileStart = (nm.Length > 3 && long.TryParse(nm.Substring(3), out long fileNo) ? fileNo : 0) * fileSize;
+				long len; try { len = new FileInfo(f).Length; } catch { continue; }
+				using SafeFileHandle fh = CreateFile(f, GenericRead, 0x1u /*FILE_SHARE_READ*/, IntPtr.Zero, 3u /*OPEN_EXISTING*/, FileFlagNoBuffering, IntPtr.Zero);
+				if (fh.IsInvalid) continue;
+				long fpos = 0;
+				while (fpos < len && !stopRequested)
+				{
+					while (isPaused && !stopRequested) System.Threading.Thread.Sleep(200);
+					int readLen = (int)Math.Min((long)buf, len - fpos) / page * page;   // whole pages only (a sub-page tail from a truncated file has no complete stamp)
+					if (readLen <= 0) break;
+					if (!SetFilePointerEx(fh, fpos, out _, 0 /*FILE_BEGIN*/)) break;
+					uint got;
+					if (!ReadFile(fh, rbPtr, (uint)readLen, out got, IntPtr.Zero)) got = 0;
+					int usable = (int)Math.Min((long)got, (long)readLen);
+					for (int o = 0; o + page <= usable; o += page)
+						if (BitConverter.ToInt64(rbRaw, rbOff + o) != (fileStart + fpos + o) / page)
+							return (written, fileStart + fpos + o, true); // stamp mismatch → fake/faulty
+					if (usable < readLen)   // the device could not read complete pages the file holds -> past a counterfeit's real capacity / faulty
+						return (written, fileStart + fpos + (usable / page) * page, true);
+					verified += usable; fpos += usable;
+					Volatile.Write(ref _progressDoneBytes, written + verified);
+				}
 			}
 		}
+		finally { rbGc.Free(); }
 		return (written, verified, false);
 	}
 
@@ -7629,107 +8397,184 @@ exit 0
 
 	private async void TestBoot_Click(object sender, RoutedEventArgs e)
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!(DiskBox.SelectedItem is DiskItem disk)) { MessageBox.Show(L("Mb027"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (disk.IsSystem) { MessageBox.Show(L("Mb031"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Hand); return; }
 		if (!IsAdministrator()) { MessageBox.Show(L("Mb032"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-
-		// Hyper-V must be installed (cmdlets present).
-		bool hyperV = false;
+		// Hold the reentrancy guard across the WHOLE flow: SetBusy(true) is not reached until after the Hyper-V probe
+		// await + firmware menu + confirm, and this op takes the disk OFFLINE and boots an OS from it, so a concurrent
+		// destructive tool starting in that window must be blocked (mirrors _startInProgress for StartButton).
+		_toolOpStarting = true;
 		try
 		{
-			string probe = await RunProcessCaptureAsync("powershell.exe",
-				"-NoProfile -Command \"if (Get-Command New-VM -ErrorAction SilentlyContinue) { 'OK' }\"");
-			hyperV = probe.Contains("OK");
-		}
-		catch { hyperV = false; }
-		if (!hyperV)
-		{
-			if (MessageBox.Show(L("MbHyperV"),
-					L("MbHyperVTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
-			{
-				try { Process.Start(new ProcessStartInfo("optionalfeatures.exe") { UseShellExecute = true }); } catch { }
-			}
-			return;
-		}
-
-		int? fw = ShowActionMenu(L("MbTestBootTitle"),
-			string.Format(L("AmTestBootPrompt"), disk.Number, disk.FriendlyName),
-			new[]
-			{
-				L("AmFwUefi"),
-				L("AmFwBios")
-			},
-			new[] { 0xE768, 0xEC58 }, null, 0);
-		if (fw == null) return;
-		bool uefi = fw.Value == 0;
-
-		if (MessageBox.Show(string.Format(L("MbBootTestConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), (uefi ? "UEFI" : "Legacy BIOS")),
-				L("MbTestBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK)
-			return;
-
-		string startScript =
-			"$ErrorActionPreference='Stop'\r\n" +
-			"$vm='" + TestBootVmName + "'\r\n" +
-			"$n=" + disk.Number + "\r\n" +
-			"Get-VM -Name $vm -ErrorAction SilentlyContinue | ForEach-Object { Stop-VM -VM $_ -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -VM $_ -Force -ErrorAction SilentlyContinue }\r\n" +
-			"Set-Disk -Number $n -IsOffline $true\r\n" +
-			"New-VM -Name $vm -MemoryStartupBytes 2GB -Generation " + (uefi ? "2" : "1") + " | Out-Null\r\n" +
-			"Set-VM -Name $vm -AutomaticCheckpointsEnabled $false -ErrorAction SilentlyContinue\r\n" +
-			"Add-VMHardDiskDrive -VMName $vm -DiskNumber $n\r\n" +
-			(uefi
-				? "Set-VMFirmware -VMName $vm -EnableSecureBoot Off\r\n$hd = Get-VMHardDiskDrive -VMName $vm\r\nSet-VMFirmware -VMName $vm -FirstBootDevice $hd\r\n"
-				: "") +
-			"Start-VM -Name $vm\r\n";
-
-		bool started = false;
-		try
-		{
-			SetBusy(busy: true, string.Format(L("BzBootVm"), disk.Number));
-			Log($"Test boot: creating {(uefi ? "UEFI" : "BIOS")} VM for disk {disk.Number}");
-			var res = await RunPowerShellScriptAsync(startScript);
-			if (res.ExitCode != 0)
-				throw new InvalidOperationException(res.Output);
-			started = true;
-
-			// Open the VM console so the user can watch it boot.
+			// Hyper-V must be installed (cmdlets present).
+			bool hyperV = false;
 			try
 			{
-				Process.Start(new ProcessStartInfo("vmconnect.exe", "localhost \"" + TestBootVmName + "\"") { UseShellExecute = true });
+				string probe = await RunProcessCaptureAsync("powershell.exe",
+					"-NoProfile -Command \"if (Get-Command New-VM -ErrorAction SilentlyContinue) { 'OK' }\"");
+				hyperV = probe.Contains("OK");
 			}
-			catch { /* console is optional; the VM still runs */ }
-
-			SetBusy(busy: false);
-			MessageBox.Show(L("MbVmRunning"),
-				L("MbTestBootTitle"), MessageBoxButton.OK, MessageBoxImage.Information);
-		}
-		catch (Exception ex)
-		{
-			SetBusy(busy: false);
-			ShowError(L("ErrTestBoot"), ex);
-		}
-		finally
-		{
-			// Always tear down: stop + delete the VM and bring the disk back online, whether it started or not.
-			try
+			catch { hyperV = false; }
+			if (!hyperV)
 			{
-				SetBusy(busy: true, L("BzCleanVm"));
-				var cleanup = await RunPowerShellScriptAsync(
-					"$vm='" + TestBootVmName + "'\r\n" +
-					"Get-VM -Name $vm -ErrorAction SilentlyContinue | ForEach-Object { Stop-VM -VM $_ -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -VM $_ -Force -ErrorAction SilentlyContinue }\r\n" +
-					"Set-Disk -Number " + disk.Number + " -IsOffline $false\r\n");
-				// If bringing the disk back online failed, the user must know — otherwise it silently vanishes from Explorer.
-				if (cleanup.ExitCode != 0)
+				if (MessageBox.Show(L("MbHyperV"),
+						L("MbHyperVTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				{
-					Log("Test-boot cleanup returned " + cleanup.ExitCode + ": " + cleanup.Output);
+					try { Process.Start(new ProcessStartInfo("optionalfeatures.exe") { UseShellExecute = true }); } catch { }
+				}
+				return;
+			}
+
+			int? fw = ShowActionMenu(L("MbTestBootTitle"),
+				string.Format(L("AmTestBootPrompt"), disk.Number, disk.FriendlyName),
+				new[]
+				{
+					L("AmFwUefi"),
+					L("AmFwBios")
+				},
+				new[] { 0xE768, 0xEC58 }, null, 0);
+			if (fw == null) return;
+			bool uefi = fw.Value == 0;
+
+			if (MessageBox.Show(string.Format(L("MbBootTestConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), (uefi ? "UEFI" : "Legacy BIOS")),
+					L("MbTestBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK)
+				return;
+
+			// This offlines the disk on the host and boots an OS from it (the guest WRITES to it). Re-confirm the disk
+			// number still maps to the same physical disk before touching it — every other raw-disk op does this, and the
+			// disks can renumber during the probe/menu/confirm above (isBusy was false the whole time).
+			if (!await VerifyTargetDiskUnchangedAsync(disk)) return;
+			// Breadcrumb so a crash/kill/power-loss before the finally re-onlines the disk can be recovered at next launch.
+			WriteTestBootOfflineMarker(disk);
+
+			string startScript =
+				"$ErrorActionPreference='Stop'\r\n" +
+				"$vm='" + TestBootVmName + "'\r\n" +
+				"$n=" + disk.Number + "\r\n" +
+				"Get-VM -Name $vm -ErrorAction SilentlyContinue | ForEach-Object { Stop-VM -VM $_ -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -VM $_ -Force -ErrorAction SilentlyContinue }\r\n" +
+				"Set-Disk -Number $n -IsOffline $true\r\n" +
+				"New-VM -Name $vm -MemoryStartupBytes 2GB -Generation " + (uefi ? "2" : "1") + " | Out-Null\r\n" +
+				"Set-VM -Name $vm -AutomaticCheckpointsEnabled $false -ErrorAction SilentlyContinue\r\n" +
+				"Add-VMHardDiskDrive -VMName $vm -DiskNumber $n\r\n" +
+				(uefi
+					? "Set-VMFirmware -VMName $vm -EnableSecureBoot Off\r\n$hd = Get-VMHardDiskDrive -VMName $vm\r\nSet-VMFirmware -VMName $vm -FirstBootDevice $hd\r\n"
+					: "") +
+				"Start-VM -Name $vm\r\n";
+
+			bool started = false;
+			try
+			{
+				SetBusy(busy: true, string.Format(L("BzBootVm"), disk.Number));
+				Log($"Test boot: creating {(uefi ? "UEFI" : "BIOS")} VM for disk {disk.Number}");
+				var res = await RunPowerShellScriptAsync(startScript);
+				if (res.ExitCode != 0)
+					throw new InvalidOperationException(res.Output);
+				started = true;
+
+				// Open the VM console so the user can watch it boot. The whole feature is VISUAL, so if the console can't
+				// open (Hyper-V PowerShell present but the GUI tools / vmconnect.exe not installed) do NOT claim a window
+				// opened — tell the user to connect via Hyper-V Manager instead.
+				bool consoleOpened = false;
+				try
+				{
+					Process.Start(new ProcessStartInfo("vmconnect.exe", "localhost \"" + TestBootVmName + "\"") { UseShellExecute = true });
+					consoleOpened = true;
+				}
+				catch { /* console is optional; the VM still runs */ }
+
+				SetBusy(busy: false);
+				MessageBox.Show(L(consoleOpened ? "MbVmRunning" : "MbVmRunningNoConsole"),
+					L("MbTestBootTitle"), MessageBoxButton.OK, consoleOpened ? MessageBoxImage.Information : MessageBoxImage.Warning);
+			}
+			catch (Exception ex)
+			{
+				SetBusy(busy: false);
+				ShowError(L("ErrTestBoot"), ex);
+			}
+			finally
+			{
+				// Always tear down: stop + delete the VM and bring the disk back online, whether it started or not.
+				try
+				{
+					SetBusy(busy: true, L("BzCleanVm"));
+					var cleanup = await RunPowerShellScriptAsync(
+						// $ErrorActionPreference='Stop' so a FAILED Set-Disk -IsOffline $false (disk held by a stuck VM, a
+						// CIM error) is TERMINATING -> non-zero exit -> the warning below fires. Without it the re-online
+						// failure is non-terminating, powershell exits 0, and the disk is left silently offline.
+						"$ErrorActionPreference='Stop'\r\n" +
+						"$vm='" + TestBootVmName + "'\r\n" +
+						"Get-VM -Name $vm -ErrorAction SilentlyContinue | ForEach-Object { Stop-VM -VM $_ -TurnOff -Force -ErrorAction SilentlyContinue; Remove-VM -VM $_ -Force -ErrorAction SilentlyContinue }\r\n" +
+						"Set-Disk -Number " + disk.Number + " -IsOffline $false\r\n");
+					// If bringing the disk back online failed, the user must know — otherwise it silently vanishes from Explorer.
+					if (cleanup.ExitCode != 0)
+					{
+						Log("Test-boot cleanup returned " + cleanup.ExitCode + ": " + cleanup.Output);
+						MessageBox.Show(string.Format(L("MbBootTestOfflineWarn"), disk.Number),
+							L("MbTestBootTitle"), MessageBoxButton.OK, MessageBoxImage.Warning);
+					}
+					else
+					{
+						ClearTestBootOfflineMarker();   // re-online confirmed — the crash-recovery breadcrumb is no longer needed
+					}
+				}
+				catch (Exception cex)
+				{
+					// The cleanup script itself threw (powershell launch / temp write / await fault) — the disk is still
+					// offline. Try once more to re-online it, and warn the user so it doesn't silently vanish.
+					Log("Test-boot cleanup error: " + cex.Message);
+					try { await RunPowerShellScriptAsync("$ErrorActionPreference='SilentlyContinue'\r\nSet-Disk -Number " + disk.Number + " -IsOffline $false\r\n"); } catch { }
 					MessageBox.Show(string.Format(L("MbBootTestOfflineWarn"), disk.Number),
 						L("MbTestBootTitle"), MessageBoxButton.OK, MessageBoxImage.Warning);
 				}
+				SetBusy(busy: false);
+				if (started) { try { await RefreshDisksAsync(); } catch { } }
 			}
-			catch (Exception cex) { Log("Test-boot cleanup error: " + cex.Message); }
-			SetBusy(busy: false);
-			if (started) { try { await RefreshDisksAsync(); } catch { } }
 		}
+		finally { _toolOpStarting = false; }
+	}
+
+	private static string TestBootMarkerPath =>
+		Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge", "testboot-offline.txt");
+
+	// Records (disk number | serial) before Test-boot takes the disk offline, so a crash/kill before the re-online can
+	// be reconciled at the next launch. Best-effort.
+	private void WriteTestBootOfflineMarker(DiskItem disk)
+	{
+		try
+		{
+			string p = TestBootMarkerPath;
+			Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+			File.WriteAllText(p, disk.Number + "|" + (disk.Serial ?? "").Trim());
+		}
+		catch { }
+	}
+
+	private void ClearTestBootOfflineMarker() { try { File.Delete(TestBootMarkerPath); } catch { } }
+
+	// At startup: if a previous Test-boot was interrupted before it could re-online the disk, remove any stranded
+	// boot-test VM and bring that disk back online (prefer matching by serial — numbers can change). Best-effort.
+	private async Task RecoverStrandedTestBootDiskAsync()
+	{
+		try
+		{
+			string p = TestBootMarkerPath;
+			if (!File.Exists(p)) return;
+			string content = "";
+			try { content = File.ReadAllText(p).Trim(); } catch { }
+			var parts = content.Split('|');
+			string num = parts.Length > 0 ? parts[0].Trim() : "";
+			string serial = parts.Length > 1 ? parts[1].Trim() : "";
+			string script = "$ErrorActionPreference='SilentlyContinue'\r\n" +
+				"$vm='" + TestBootVmName + "'\r\n" +
+				"Get-VM -Name $vm | ForEach-Object { Stop-VM -VM $_ -TurnOff -Force; Remove-VM -VM $_ -Force }\r\n" +
+				(serial.Length > 0 ? "Get-Disk | Where-Object { $_.SerialNumber.Trim() -eq '" + serial.Replace("'", "''") + "' } | Set-Disk -IsOffline $false\r\n" : "") +
+				(int.TryParse(num, out _) ? "Set-Disk -Number " + num + " -IsOffline $false\r\n" : "");
+			await RunPowerShellScriptAsync(script);
+			Log("Recovered a disk left offline by a previous, interrupted Test-boot.");
+		}
+		catch (Exception ex) { Log("Test-boot startup recovery error: " + ex.Message); }
+		finally { ClearTestBootOfflineMarker(); }
 	}
 
 	// Runs a small PowerShell script (written to a temp .ps1) and returns its exit code + combined output.
@@ -7876,6 +8721,8 @@ exit 0
 		bool attached = false;
 		bool success = false;
 		long efsSkipped = 0;
+		long rawErrors = 0;
+		long rawZeroFilled = 0;
 		try
 		{
 			TryEnablePrivilege("SeBackupPrivilege");
@@ -7941,6 +8788,19 @@ exit 0
 			efsSkipped = rawStats?.EfsSkipped ?? 0;
 			if (efsSkipped > 0)
 				Log($"WARNING: {efsSkipped} EFS-encrypted file(s) were skipped by the Fast Clone engine — they are NOT in the VHDX.");
+			// A raw-engine copy that DROPPED files (unreadable/torn source records or target write errors -> stats.Errors)
+			// produced an INCOMPLETE VHDX that may be missing arbitrary system files and may not boot. The 3-anchor copyOk
+			// spot-check below cannot detect that. Mirror the portable USB-clone path (which folds rawStats.Errors into its
+			// "review, not clean success" gate at ~3213): keep the file but warn the user loudly in the completion dialog —
+			// and before the VM offer — instead of reporting a plain success and auto-booting an incomplete image.
+			rawErrors = rawStats?.Errors ?? 0;
+			if (rawErrors > 0)
+				Log($"WARNING: {rawErrors} file(s) could not be copied into the VHDX (torn source records / write errors) — the VHDX is INCOMPLETE and may not boot correctly.");
+			// Regions of real data that couldn't be read from the SOURCE (bad sectors / truncated run-list) and were
+			// zero-filled to keep file lengths correct — the VHDX is complete in size but those bytes are lost/corrupt.
+			rawZeroFilled = rawStats != null ? rawStats.RunShortfalls + rawStats.ReadShortfalls : 0;
+			if (rawZeroFilled > 0)
+				Log($"WARNING: {rawZeroFilled} region(s) could not be read from the source and were zero-filled — the source drive may have bad sectors; the VHDX is not byte-faithful.");
 			bool copyOk = File.Exists(Path.Combine(realWindowsFolder, "System32", "winload.efi"))
 				&& File.Exists(Path.Combine(realWindowsFolder, "System32", "config", "SYSTEM"))
 				&& Directory.Exists(Path.Combine(realRoot, "Users"));
@@ -8025,8 +8885,13 @@ exit 0
 				// No qemu-img: keep the .vhd, but deliver it at the user's chosen name/location — NOT the GUID work
 				// path at the volume root (which they'd never find). VMware can import a .vhd directly, or they can
 				// install qemu and re-run to get a true .vmdk.
+				// Never clobber a pre-existing unrelated .vhd here: the SaveFileDialog's OverwritePrompt only validated the
+				// .vmdk name the user typed, NOT this derived .vhd path. Pick a free name so an earlier export at the same
+				// base name is preserved, and move with overwrite:false as a belt-and-suspenders guard.
 				string keptVhd = Path.ChangeExtension(finalVhdPath, ".vhd");
-				try { File.Move(vhdPath, keptVhd, overwrite: true); readyPath = keptVhd; }
+				for (int n = 1; File.Exists(keptVhd); n++)
+					keptVhd = Path.Combine(Path.GetDirectoryName(finalVhdPath) ?? "", Path.GetFileNameWithoutExtension(finalVhdPath) + " (" + n + ").vhd");
+				try { File.Move(vhdPath, keptVhd, overwrite: false); readyPath = keptVhd; }
 				catch (Exception mvEx) { readyPath = vhdPath; Log("Could not move the .vhd to '" + keptVhd + "': " + mvEx.Message + " — it remains at " + vhdPath); }
 				Log("No VMDK converter (qemu-img) found — kept a .vhd instead: " + readyPath + " (VMware can import it, or install qemu and re-run).");
 			}
@@ -8039,22 +8904,28 @@ exit 0
 		Log("Bootable virtual disk ready: " + readyPath);
 		if (finalExt == ".vhdx")
 		{
-			await MaybeCreateHyperVGen2VmAsync(readyPath, efsSkipped);   // only VHDX gets the Hyper-V Gen 2 auto-VM offer
+			await MaybeCreateHyperVGen2VmAsync(readyPath, efsSkipped, rawErrors, rawZeroFilled);   // only VHDX gets the Hyper-V Gen 2 auto-VM offer
 		}
 		else
 		{
-			string efsNote = efsSkipped > 0 ? string.Format(L("MbExportVhdxEfsWarn"), efsSkipped) : "";
-			MessageBox.Show(string.Format(L("MbExportOtherDone"), readyPath) + efsNote, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			string efsNote = (rawErrors > 0 ? string.Format(L("MbExportFilesSkipped"), rawErrors) : "")
+				+ (rawZeroFilled > 0 ? string.Format(L("MbRawZeroFilled"), rawZeroFilled) : "")
+				+ (efsSkipped > 0 ? string.Format(L("MbExportVhdxEfsWarn"), efsSkipped) : "");
+			MessageBox.Show(string.Format(L("MbExportOtherDone"), readyPath) + efsNote, "DriveForge", MessageBoxButton.OK, (rawErrors > 0 || rawZeroFilled > 0 || efsSkipped > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 	}
 
 	// Offers to spin up a persistent Hyper-V Generation 2 VM from the freshly-built VHDX. If Hyper-V is not
 	// installed, just tells the user how to attach the VHDX themselves. The VHDX is already complete either way.
-	private async Task MaybeCreateHyperVGen2VmAsync(string vhdPath, long efsSkipped = 0)
+	private async Task MaybeCreateHyperVGen2VmAsync(string vhdPath, long efsSkipped = 0, long rawErrors = 0, long rawZeroFilled = 0)
 	{
-		// EFS-encrypted files can't be read by the Fast Clone engine and were skipped — warn the user so the
-		// missing files aren't a silent surprise.
-		string efsNote = efsSkipped > 0 ? string.Format(L("MbExportVhdxEfsWarn"), efsSkipped) : "";
+		// Warn the user so missing/corrupt data isn't a silent surprise: rawErrors = files the Fast Clone engine could NOT
+		// copy (torn source records / write errors -> INCOMPLETE); rawZeroFilled = regions unreadable from the source and
+		// zero-filled (bad sectors -> not byte-faithful); efsSkipped = EFS-encrypted files it can't read. Each note carries
+		// a leading blank line, so they stack cleanly after any message and show BEFORE the VM offer.
+		string efsNote = (rawErrors > 0 ? string.Format(L("MbExportFilesSkipped"), rawErrors) : "")
+			+ (rawZeroFilled > 0 ? string.Format(L("MbRawZeroFilled"), rawZeroFilled) : "")
+			+ (efsSkipped > 0 ? string.Format(L("MbExportVhdxEfsWarn"), efsSkipped) : "");
 		bool hyperV = false;
 		try
 		{
@@ -8064,10 +8935,10 @@ exit 0
 		}
 		catch { hyperV = false; }
 
-		if (!hyperV || MessageBox.Show(string.Format(L("MbExportVhdxVmOffer"), vhdPath), "DriveForge",
-				MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+		if (!hyperV || MessageBox.Show(string.Format(L("MbExportVhdxVmOffer"), vhdPath) + efsNote, "DriveForge",
+				MessageBoxButton.YesNo, (rawErrors > 0 || rawZeroFilled > 0 || efsSkipped > 0) ? MessageBoxImage.Warning : MessageBoxImage.Question) != MessageBoxResult.Yes)
 		{
-			MessageBox.Show(string.Format(L("MbExportVhdxDone"), vhdPath) + efsNote, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			MessageBox.Show(string.Format(L("MbExportVhdxDone"), vhdPath) + efsNote, "DriveForge", MessageBoxButton.OK, (rawErrors > 0 || rawZeroFilled > 0 || efsSkipped > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 			return;
 		}
 
@@ -8098,7 +8969,7 @@ exit 0
 				return;
 			}
 			try { Process.Start(new ProcessStartInfo("vmconnect.exe", "localhost \"" + vmName + "\"") { UseShellExecute = true }); } catch { }
-			MessageBox.Show(string.Format(L("MbExportVhdxVmDone"), vmName, vhdPath) + efsNote, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			MessageBox.Show(string.Format(L("MbExportVhdxVmDone"), vmName, vhdPath) + efsNote, "DriveForge", MessageBoxButton.OK, (rawErrors > 0 || rawZeroFilled > 0 || efsSkipped > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 		catch (Exception ex)
 		{
@@ -8166,7 +9037,9 @@ exit 0
 	{
 		return string.Join(Environment.NewLine, new string[]
 		{
-			"san policy=OnlineAll",
+			// NOTE: no "san policy=OnlineAll" here — that writes the PERSISTENT machine-wide VDS SAN policy and would
+			// outlive the export (auto-onlining deliberately-offline SAN/iSCSI LUNs on Server/offline-policy hosts). The
+			// explicit "online disk noerr" below already brings THIS freshly-attached vdisk online regardless of policy.
 			$"create vdisk file=\"{vhdPath}\" maximum={maximumMb} type=expandable",
 			$"select vdisk file=\"{vhdPath}\"",
 			"attach vdisk",
@@ -8376,10 +9249,47 @@ exit 0
 		foreach (var c in _cleanCats) if (_cleanAdvanced || c.Risk == 0) c.IsChecked = true; // only what's visible
 	}
 
+	// HARD SAFETY GUARD for every clean target. Refuses a path that IS a drive root, the user profile, the Windows
+	// directory, or a top-level user-data / AppData folder — never their children.
+	// Why this must exist: Path.GetTempPath() is documented to fall back TMP -> TEMP -> USERPROFILE -> Windows dir.
+	// If TMP and TEMP are both unset (a scrubbed/corrupt environment, or a user editing them by hand), it returns
+	// %USERPROFILE% — and the "Temp" category is green, "safe to delete", ticked by DEFAULT and part of Recommended.
+	// Without this guard, one ordinary click would recursively delete Documents, Desktop, Pictures and Downloads.
+	// Fail CLOSED: anything we cannot resolve is treated as unsafe.
+	private static bool IsUnsafeCleanRoot(string dir)
+	{
+		try
+		{
+			if (string.IsNullOrWhiteSpace(dir)) return true;
+			string full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+			if (full.Length <= 2) return true;                                             // "C:" and shorter
+			string root = (Path.GetPathRoot(full) ?? "").TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+			if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase)) return true; // a bare drive root
+			foreach (var sf in new[]
+			{
+				Environment.SpecialFolder.UserProfile, Environment.SpecialFolder.Windows, Environment.SpecialFolder.System,
+				Environment.SpecialFolder.MyDocuments, Environment.SpecialFolder.Desktop, Environment.SpecialFolder.DesktopDirectory,
+				Environment.SpecialFolder.MyPictures, Environment.SpecialFolder.MyMusic, Environment.SpecialFolder.MyVideos,
+				Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86,
+				Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData,
+				Environment.SpecialFolder.CommonApplicationData,
+			})
+			{
+				string p = Environment.GetFolderPath(sf);
+				if (string.IsNullOrEmpty(p)) continue;
+				string pf = Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+				if (string.Equals(full, pf, StringComparison.OrdinalIgnoreCase)) return true;
+			}
+			return false;
+		}
+		catch { return true; }
+	}
+
 	// Enumerates files safely (no throw) under a folder, optionally recursing, optionally by pattern.
 	private static IEnumerable<string> SafeFiles(string dir, string pattern = "*", bool recurse = true)
 	{
 		if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) yield break;
+		if (IsUnsafeCleanRoot(dir)) yield break;   // never enumerate a profile/root as a "temp" folder
 		var stack = new Stack<string>();
 		stack.Push(dir);
 		while (stack.Count > 0)
@@ -8461,8 +9371,16 @@ exit 0
 					foreach (var f in SafeFiles(d)) yield return f;
 				break;
 			case "Recent":
-				foreach (var f in SafeFiles(Path.Combine(roaming, @"Microsoft\Windows\Recent"))) yield return f;
+			{
+				// NON-recursive on purpose. Recent\ has two subfolders: AutomaticDestinations (the "recent" half of
+				// jump lists = history, fair game) and CustomDestinations (the user's PINNED jump-list items). A
+				// recursive sweep deleted the pinned ones too — contradicting this category's own description, which
+				// promises only to clear recent-documents HISTORY.
+				string recent = Path.Combine(roaming, @"Microsoft\Windows\Recent");
+				foreach (var f in SafeFiles(recent, "*", false)) yield return f;
+				foreach (var f in SafeFiles(Path.Combine(recent, "AutomaticDestinations"), "*", false)) yield return f;
 				break;
+			}
 			case "Thumbs":
 			{
 				string ex = Path.Combine(local, @"Microsoft\Windows\Explorer");
@@ -8499,7 +9417,12 @@ exit 0
 			}
 			case "FontCache":
 			{
-				foreach (var f in SafeFiles(Path.Combine(local, "FontCache"), "*", false)) yield return f;
+				// The Windows font cache lives in the FontCache SERVICE's own profile — NOT in the user's
+				// LocalAppData, where this used to look. That path does not exist on modern Windows, so the
+				// category was a permanent no-op that still advertised itself as needing administrator.
+				foreach (var f in SafeFiles(Path.Combine(win, @"ServiceProfiles\LocalService\AppData\Local\FontCache"), "*", false)) yield return f;
+				string fntCache = Path.Combine(win, @"System32\FNTCACHE.DAT");
+				if (File.Exists(fntCache)) yield return fntCache;
 				break;
 			}
 			case "DeliveryOpt":
@@ -8540,11 +9463,13 @@ exit 0
 		return cand.Where(Directory.Exists).ToList();
 	}
 
-	private static (long Bytes, int Count) DeleteTargets(string key, bool toRecycle)
+	// Instance (not static) so the loop can poll stopRequested — a clean must be abortable.
+	private (long Bytes, int Count) DeleteTargets(string key, bool toRecycle)
 	{
 		long bytes = 0; int count = 0;
 		foreach (var f in StaticCleanTargets(key))
 		{
+			if (stopRequested) break;   // a 40 GB %TEMP% clean was previously unstoppable once started
 			try
 			{
 				long len = 0; try { len = new FileInfo(f).Length; } catch { }
@@ -8580,6 +9505,7 @@ exit 0
 	private static void RemoveEmptyDirs(string root)
 	{
 		if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+		if (IsUnsafeCleanRoot(root)) return;   // same guard as SafeFiles: never strip the profile's folder skeleton
 		var all = new List<string>();
 		var stack = new Stack<string>(); stack.Push(root);
 		int guard = 0;
@@ -8613,7 +9539,7 @@ exit 0
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		EnsureCleanCategories();
 		if (_cleanCats == null) return;
-		_cleanBusy = true;
+		_cleanBusy = true; UpdateSleepBlock();   // sizing every category can take a while and never goes through SetBusy
 		if (CleanAnalyzeButton != null) CleanAnalyzeButton.IsEnabled = false;
 		if (CleanRunButton != null) CleanRunButton.IsEnabled = false;
 		try
@@ -8636,7 +9562,7 @@ exit 0
 		}
 		finally
 		{
-			_cleanBusy = false;
+			_cleanBusy = false; UpdateSleepBlock();
 			if (CleanAnalyzeButton != null) CleanAnalyzeButton.IsEnabled = true;
 			if (CleanRunButton != null) CleanRunButton.IsEnabled = true;
 		}
@@ -8656,22 +9582,41 @@ exit 0
 		string warn = cats.Any(c => c.Risk == 2) ? "\n\n⚠ " + L("CleanRedWarn") : "";
 		if (MessageBox.Show(this, L("CleanConfirmBody") + "\n\n" + sel + warn, L("CleanConfirmTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
 		bool toRecycle = CleanToRecycleCheck?.IsChecked == true;
-		_cleanBusy = true; isBusy = true;
+		// Go through SetBusy, not the raw field: setting isBusy directly left every other destructive tool (Start,
+		// drive tools, kit) still ENABLED during a multi-minute clean, and left Stop greyed out so the run could not
+		// be aborted. SetBusy disables those and enables Stop, which the delete loop now polls.
+		_cleanBusy = true; stopRequested = false;
+		SetBusy(busy: true, L("CleanRunButton"));
+		// SetBusy enables Pause for ops that support it — the clean loop does NOT honour isPaused, so leaving it
+		// enabled would let the user press Pause, see "Paused", and have files keep being deleted anyway. Also make
+		// Stop actually REACHABLE: ShowCleanView collapses the shared Start/Pause/Stop row, so SetBusy was only
+		// enabling an invisible button and the loop's stopRequested poll could never fire.
+		if (PauseButton != null) PauseButton.IsEnabled = false;
+		if (StopButton != null) { StopButton.Visibility = Visibility.Visible; StopButton.IsEnabled = true; }
 		if (CleanAnalyzeButton != null) CleanAnalyzeButton.IsEnabled = false;
 		if (CleanRunButton != null) CleanRunButton.IsEnabled = false;
 		try
 		{
 			long freed = 0; int filesDeleted = 0;
+			long binnedBytes = 0; int binnedFiles = 0;   // moved to the Recycle Bin: relocated, NOT freed
 			ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			int doneCats = 0;
 			if (cats.Any(c => c.Clipboard)) { try { Clipboard.Clear(); } catch { } }
 			foreach (var c in cats)
 			{
+				// Stop must abort the IRREVERSIBLE categories too, not just the file loop: emptying the Recycle Bin
+				// and clearing registry MRUs cannot be undone, so continuing them after Stop is the worst outcome.
+				if (stopRequested) break;
 				ProgressBar.Value = 100.0 * doneCats++ / cats.Count;
 				if (CleanStatusText != null) CleanStatusText.Text = string.Format(L("CleanCleaningX"), c.Label);
 				if (c.RecycleBin)
 				{
+					// "Send to Recycle Bin (so I can restore)" + the Recycle Bin category in the SAME run is a direct
+					// contradiction: we would move the user's files to the bin for safekeeping and then empty the bin
+					// (all drives, no confirmation) seconds later, destroying exactly what they asked to keep — while
+					// the summary still told them it was restorable. Honour the safety net: skip emptying the bin.
+					if (toRecycle) { if (CleanStatusText != null) CleanStatusText.Text = L("CleanBinKept"); continue; }
 					long before = RecycleBinSize();
 					int hr = await Task.Run(() => { try { return SHEmptyRecycleBin(IntPtr.Zero, null, 0x7u); } catch { return -1; } });
 					if (hr == 0) freed += before;
@@ -8683,31 +9628,108 @@ exit 0
 				if (c.RegKeys.Length > 0) { string[] rk = c.RegKeys; await Task.Run(() => ClearRegistryValues(rk)); continue; }
 				string key = c.Key; bool rec = toRecycle;
 				var res = await Task.Run(() => DeleteTargets(key, rec));
-				freed += res.Bytes; filesDeleted += res.Count;
-				c.Size = 0; c.SizeText = FormatBytes(0);
+				// Recycling MOVES bytes into $Recycle.Bin — it frees NOTHING. Counting them as "freed" both lied and
+				// double-counted them: the Recycle Bin category later empties the bin and counts the same bytes again.
+				if (rec) { binnedBytes += res.Bytes; binnedFiles += res.Count; }
+				else { freed += res.Bytes; filesDeleted += res.Count; }
+				// Show what is actually LEFT (locked/in-use files are skipped), instead of flatly claiming 0 B and
+				// contradicting the status line that just said some files could not be removed.
+				long leftover = Math.Max(0, c.Size - res.Bytes);
+				c.Size = leftover; c.SizeText = FormatBytes(leftover);
 			}
 			ProgressBar.Value = 100.0;
 			RecomputeCleanTotal();
-			if (CleanStatusText != null) CleanStatusText.Text = string.Format(L("CleanDone"), FormatBytes(freed), filesDeleted);
+			string doneMsg = string.Format(L("CleanDone"), FormatBytes(freed), filesDeleted);
+			if (binnedFiles > 0) doneMsg += " " + string.Format(L("CleanDoneRecycled"), FormatBytes(binnedBytes), binnedFiles);
+			if (CleanStatusText != null) CleanStatusText.Text = doneMsg;
 		}
 		finally
 		{
-			operationTimer.Stop(); operationStopwatch.Stop(); ProgressBar.Value = 0.0;
-			_cleanBusy = false; isBusy = false;
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();   // bar AND label AND stats line — zeroing only the bar left e.g. "86%" beside an empty one
+			_cleanBusy = false; SetBusy(busy: false);
+			if (StopButton != null) StopButton.Visibility = Visibility.Collapsed;  // the Clean view hides this row again
 			if (CleanAnalyzeButton != null) CleanAnalyzeButton.IsEnabled = true;
 			if (CleanRunButton != null) CleanRunButton.IsEnabled = true;
 		}
 	}
 
-	// Clears the values + subkeys under HKCU MRU keys (Run history, recent docs, typed paths, search terms). The
-	// shell rebuilds them; per-user so no elevation. Pinned items (CustomDestinations) are deliberately NOT touched.
+	[System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+	private static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+	[System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+	private static extern bool GetTokenInformation(IntPtr tokenHandle, int tokenInformationClass, IntPtr tokenInformation, int tokenInformationLength, out int returnLength);
+
+	[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool CloseHandle(IntPtr h);
+
+	// SID of the user actually sitting at the machine, taken from the owner of explorer.exe. Needed because this app
+	// is requireAdministrator: when a STANDARD user elevates it with a DIFFERENT admin account's credentials, the
+	// process token belongs to that ADMIN — so Registry.CurrentUser is the admin's hive, not the real user's.
+	[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+	private static extern uint WTSGetActiveConsoleSessionId();
+
+	private static string? TryGetInteractiveUserSid()
+	{
+		try
+		{
+			// Only the CONSOLE session's explorer.exe. Taking the first explorer found would, with fast user switching
+			// or RDP, resolve a DIFFERENT logged-on user — and we would then clear THAT person's history instead of
+			// the one sitting at the machine. If we can't identify the console session, resolve nothing and let the
+			// caller fall back to HKCU rather than guess at someone's hive.
+			uint consoleSession = WTSGetActiveConsoleSessionId();
+			if (consoleSession == 0xFFFFFFFF) return null;
+			foreach (var p in Process.GetProcessesByName("explorer"))
+			{
+				try
+				{
+					using (p)
+					{
+						if (p.SessionId != consoleSession) continue;
+						if (!OpenProcessToken(p.Handle, 0x0008 /* TOKEN_QUERY */, out IntPtr tok)) continue;
+						try
+						{
+							GetTokenInformation(tok, 1 /* TokenUser */, IntPtr.Zero, 0, out int len);
+							if (len <= 0) continue;
+							IntPtr buf = System.Runtime.InteropServices.Marshal.AllocHGlobal(len);
+							try
+							{
+								if (!GetTokenInformation(tok, 1, buf, len, out _)) continue;
+								IntPtr sidPtr = System.Runtime.InteropServices.Marshal.ReadIntPtr(buf); // TOKEN_USER.User.Sid
+								return new System.Security.Principal.SecurityIdentifier(sidPtr).Value;
+							}
+							finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buf); }
+						}
+						finally { CloseHandle(tok); }
+					}
+				}
+				catch { }
+			}
+		}
+		catch { }
+		return null;
+	}
+
+	// Clears the values + subkeys under the user's MRU keys (Run history, recent docs, typed paths, search terms). The
+	// shell rebuilds them. Pinned items (CustomDestinations) are deliberately NOT touched.
+	// The app always runs ELEVATED, so Registry.CurrentUser is the hive of whoever's credentials elevated it. On a
+	// shared PC (standard user + separate admin account) that is the ADMIN's hive: the real user's history would be
+	// left untouched while we reported success, and a stranger's history would be cleared instead. So target the
+	// interactive user's hive explicitly whenever it differs; fall back to HKCU when we can't tell (the common
+	// split-token case, where the SID is identical anyway).
 	private static void ClearRegistryValues(string[] subkeys)
 	{
+		string? interactiveSid = TryGetInteractiveUserSid();
+		string? mySid = null;
+		try { mySid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value; } catch { }
+		bool useHku = interactiveSid != null && mySid != null && !string.Equals(interactiveSid, mySid, StringComparison.OrdinalIgnoreCase);
 		foreach (var sk in subkeys)
 		{
 			try
 			{
-				using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(sk, writable: true);
+				using var k = useHku
+					? Microsoft.Win32.Registry.Users.OpenSubKey(interactiveSid + "\\" + sk, writable: true)
+					: Microsoft.Win32.Registry.CurrentUser.OpenSubKey(sk, writable: true);
 				if (k == null) continue;
 				foreach (var v in k.GetValueNames()) { try { if (!string.IsNullOrEmpty(v)) k.DeleteValue(v, false); } catch { } }
 				foreach (var sub in k.GetSubKeyNames()) { try { k.DeleteSubKeyTree(sub, false); } catch { } }
@@ -8721,6 +9743,13 @@ exit 0
 	{
 		try
 		{
+			// Resolve the path's REAL volume -> physical disk first. Keying off the drive LETTER alone reported the
+			// HOST drive's media for anything under a mounted folder (e.g. C:\Vault, an NVMe volume with no letter of
+			// its own, on a spinning C:) — which would claim a genuine in-place overwrite on flash.
+			int diskNo = PhysicalDiskOfPath(path);
+			if (diskNo >= 0)
+				foreach (var it in DiskBox.Items)
+					if (it is DiskItem dd && dd.Number == diskNo) return DetectWipeMedia(dd);
 			char letter = char.ToUpperInvariant(Path.GetPathRoot(path)?.FirstOrDefault() ?? '\0');
 			if (letter == '\0') return WipeMedia.Unknown;
 			foreach (var it in DiskBox.Items)
@@ -8728,6 +9757,19 @@ exit 0
 		}
 		catch { }
 		return WipeMedia.Unknown;
+	}
+
+	// True when an in-place overwrite CANNOT reach the file's original clusters. NTFS compressed, sparse and EFS-
+	// encrypted files are relocated/re-allocated on write, so the original data stays on disk untouched — writing
+	// zeros over them and reporting "securely erased" would be a lie.
+	private static bool OverwriteCannotReachClusters(string path)
+	{
+		try
+		{
+			var a = File.GetAttributes(path);
+			return (a & (FileAttributes.Compressed | FileAttributes.Encrypted | FileAttributes.SparseFile)) != 0;
+		}
+		catch { return false; }
 	}
 
 	// Securely erase a single file: overwrite-in-place then delete on HDD; on SSD/unknown just delete (overwrite
@@ -8740,18 +9782,23 @@ exit 0
 		if (dlg.ShowDialog(this) != true) return;
 		string path = dlg.FileName;
 		var media = MediaForPath(path);
-		string body = string.Format(L("SecureDelBody"), Path.GetFileName(path)) + (media != WipeMedia.Hdd ? "\n\n" + L("SecureDelSsdNote") : "");
+		// An in-place overwrite is only meaningful on a spinning disk AND on a file whose clusters it can actually
+		// reach — a compressed/sparse/EFS file gets re-allocated on write, leaving the original clusters intact.
+		bool noReach = OverwriteCannotReachClusters(path);
+		string body = string.Format(L("SecureDelBody"), Path.GetFileName(path))
+			+ (media != WipeMedia.Hdd ? "\n\n" + L("SecureDelSsdNote") : "")
+			+ (noReach ? "\n\n" + L("SecureDelNoReachNote") : "");
 		if (MessageBox.Show(this, body, L("SecureDelTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
-		_cleanBusy = true; isBusy = true;
+		_cleanBusy = true; SetBusy(busy: true, L("SecureDelWorking"));   // via SetBusy so other destructive tools are locked out
 		try
 		{
 			if (CleanStatusText != null) CleanStatusText.Text = L("SecureDelWorking");
-			bool overwrite = media == WipeMedia.Hdd;
+			bool overwrite = media == WipeMedia.Hdd && !noReach;
 			await Task.Run(() => SecureDeleteFile(path, overwrite));
 			if (CleanStatusText != null) CleanStatusText.Text = L("SecureDelDone");
 		}
 		catch (Exception ex) { ShowError(L("SecureDelTitle"), ex); }
-		finally { _cleanBusy = false; isBusy = false; }
+		finally { _cleanBusy = false; SetBusy(busy: false); }
 	}
 
 	private static void SecureDeleteFile(string path, bool overwrite)
@@ -8883,7 +9930,8 @@ exit 0
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		string root = AnalyzePathBox?.Text ?? "";
 		if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) { if (AnalyzeStatusText != null) AnalyzeStatusText.Text = L("AnalyzeNoFolder"); return; }
-		_analyzerBusy = true; isBusy = true; _analyzerStop = false;
+		_analyzerBusy = true; isBusy = true; _analyzerStop = false; _refreshOwnsBusy = false;
+		UpdateSleepBlock();   // this flow drives isBusy directly instead of through SetBusy, so hook the sleep block here too
 		if (AnalyzeScanButton != null) AnalyzeScanButton.IsEnabled = false;
 		if (AnalyzeStopButton != null) AnalyzeStopButton.IsEnabled = true;
 		if (AnalyzeBrowseButton != null) AnalyzeBrowseButton.IsEnabled = false;
@@ -8944,8 +9992,13 @@ exit 0
 		finally
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
-			ProgressBar.IsIndeterminate = false; ProgressBar.Value = 0.0;
-			_analyzerBusy = false; isBusy = false;
+			// Whole row, not just the bar: this flow clears isBusy directly instead of via SetBusy, so nothing else
+			// repaints the label/stats line — and a scan that ended while the bar was INDETERMINATE left the big
+			// label blank (UpdateProgressStats writes "" in that mode) until an unrelated operation was started.
+			ResetProgressWidgets();
+			_analyzerBusy = false; SetBusy(busy: false);   // via SetBusy, not a raw isBusy write: if a device-change refresh
+			// claimed busy behind this flow's confirm dialog it left Create-kit/Check-drive/Tool-start DISABLED and
+			// Pause/Stop enabled, and a raw clear never repaints them — the app looked idle with a frozen toolbar.
 			if (AnalyzeScanButton != null) AnalyzeScanButton.IsEnabled = true;
 			if (AnalyzeStopButton != null) AnalyzeStopButton.IsEnabled = false;
 			if (AnalyzeBrowseButton != null) AnalyzeBrowseButton.IsEnabled = true;
@@ -8979,15 +10032,38 @@ exit 0
 	private static string DateCol(DateTime d) => d == DateTime.MinValue || d == default ? "" : d.ToString("yyyy-MM-dd HH:mm");
 
 	// True when filePath is inside folderFull (or equal to it), case-insensitive.
+	// Both sides are expanded past any 8.3 short-name components (e.g. PROGRA~1) so a short-name path
+	// can't slip past the protected-folder guard by not textually matching the long-name master folder.
 	private static bool UnderFolder(string filePath, string folderFull)
 	{
 		try
 		{
-			string p = Path.GetFullPath(filePath).TrimEnd('\\');
-			return p.Equals(folderFull, StringComparison.OrdinalIgnoreCase)
-				|| p.StartsWith(folderFull + "\\", StringComparison.OrdinalIgnoreCase);
+			string p = LongPath(filePath);
+			string f = LongPath(folderFull);
+			return p.Equals(f, StringComparison.OrdinalIgnoreCase)
+				|| p.StartsWith(f + "\\", StringComparison.OrdinalIgnoreCase);
 		}
 		catch { return false; }
+	}
+
+	[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+	private static extern uint GetLongPathName(string lpszShortPath, System.Text.StringBuilder lpszLongPath, uint cchBuffer);
+
+	// Canonical full path with any 8.3 short components expanded (falls back to GetFullPath when the path
+	// doesn't exist or expansion fails). Used so a short-name path can't defeat a folder-prefix comparison.
+	private static string LongPath(string path)
+	{
+		string full;
+		try { full = Path.GetFullPath(path).TrimEnd('\\'); } catch { return path; }
+		if (full.IndexOf('~') < 0) return full; // no 8.3 component -> nothing to expand
+		try
+		{
+			var sb = new System.Text.StringBuilder(1024);
+			uint r = GetLongPathName(full, sb, (uint)sb.Capacity);
+			if (r > 0 && r < sb.Capacity) return sb.ToString().TrimEnd('\\');
+		}
+		catch { }
+		return full;
 	}
 
 	private AnalyzeResult AnalyzeScanCore(string root, IProgress<string> progress, IProgress<double> bar)
@@ -9245,7 +10321,8 @@ exit 0
 		if (pick == null) return;
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		int threshold = pick == 0 ? 5 : pick == 2 ? 14 : 10;
-		_analyzerBusy = true; isBusy = true; _analyzerStop = false;
+		_analyzerBusy = true; isBusy = true; _analyzerStop = false; _refreshOwnsBusy = false;
+		UpdateSleepBlock();   // this flow drives isBusy directly instead of through SetBusy, so hook the sleep block here too
 		if (AnalyzeScanButton != null) AnalyzeScanButton.IsEnabled = false;
 		if (AnalyzeStopButton != null) AnalyzeStopButton.IsEnabled = true;
 		if (AnalyzeSimilarButton != null) AnalyzeSimilarButton.IsEnabled = false;
@@ -9274,8 +10351,13 @@ exit 0
 		finally
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
-			ProgressBar.IsIndeterminate = false; ProgressBar.Value = 0.0;
-			_analyzerBusy = false; isBusy = false;
+			// Whole row, not just the bar: this flow clears isBusy directly instead of via SetBusy, so nothing else
+			// repaints the label/stats line — and a scan that ended while the bar was INDETERMINATE left the big
+			// label blank (UpdateProgressStats writes "" in that mode) until an unrelated operation was started.
+			ResetProgressWidgets();
+			_analyzerBusy = false; SetBusy(busy: false);   // via SetBusy, not a raw isBusy write: if a device-change refresh
+			// claimed busy behind this flow's confirm dialog it left Create-kit/Check-drive/Tool-start DISABLED and
+			// Pause/Stop enabled, and a raw clear never repaints them — the app looked idle with a frozen toolbar.
 			if (AnalyzeScanButton != null) AnalyzeScanButton.IsEnabled = true;
 			if (AnalyzeStopButton != null) AnalyzeStopButton.IsEnabled = false;
 			if (AnalyzeSimilarButton != null) AnalyzeSimilarButton.IsEnabled = true;
@@ -9455,6 +10537,28 @@ exit 0
 		[System.Runtime.InteropServices.PreserveSig] int GetImage(THUMBSIZE size, int flags, out IntPtr phbm);
 	}
 
+	// Recycle-Bin delete with an explicit "about to permanently delete" (nuke) warning. See AnalyzeDelete_Click.
+	[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+	private struct SHFILEOPSTRUCT
+	{
+		public IntPtr hwnd;
+		public uint wFunc;
+		public IntPtr pFrom;
+		public IntPtr pTo;
+		public ushort fFlags;
+		[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] public bool fAnyOperationsAborted;
+		public IntPtr hNameMappings;
+		public IntPtr lpszProgressTitle;
+	}
+
+	[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+	private static extern int SHFileOperation(ref SHFILEOPSTRUCT lpFileOp);
+
+	private const uint FO_DELETE = 0x0003;
+	private const ushort FOF_NOCONFIRMATION = 0x0010;
+	private const ushort FOF_ALLOWUNDO = 0x0040;
+	private const ushort FOF_WANTNUKEWARNING = 0x4000;
+
 	// ---------- Thumbnail gallery: see every duplicate photo/video at a glance before deleting ----------
 	private static readonly Dictionary<string, System.Windows.Media.ImageSource> _thumbCache = new(StringComparer.OrdinalIgnoreCase);
 	private System.Threading.CancellationTokenSource? _galleryCts;
@@ -9561,8 +10665,16 @@ exit 0
 	{
 		if (_analyzerBusy) return;
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		// Re-evaluate the master ("protected") folder from the LIVE box: the user may have set or changed it AFTER the
+		// scan (DupRow.IsReference was stamped once, at scan time). Match by path, not existence, so a momentarily
+		// unavailable master drive still protects (empty box = no protection).
+		string amMaster = AnalyzeMasterBox?.Text ?? "";
+		string amMasterFull = "";
+		if (!string.IsNullOrWhiteSpace(amMaster)) { try { amMasterFull = Path.GetFullPath(amMaster).TrimEnd('\\'); } catch { amMasterFull = ""; } }
+		if (DupesGrid?.ItemsSource is IEnumerable<DupRow> drStamp)
+			foreach (var d in drStamp) d.IsReference = amMasterFull.Length > 0 && UnderFolder(d.FullPath, amMasterFull);
 		// Safety: never tick away the last copy of a set — if a whole set is ticked, un-tick its newest (keeper).
-		int protectedSets = 0;
+		var protectedGroups = new HashSet<int>(); // distinct dup-groups where a last copy was kept (for the confirm count)
 		if (DupesGrid?.ItemsSource is IEnumerable<DupRow> drAll)
 		{
 			// Protected-folder files can never be deleted — force them un-ticked first.
@@ -9573,54 +10685,91 @@ exit 0
 				if (members.Count >= 2 && members.All(m => m.Selected))
 				{
 					var keeper = members.OrderByDescending(m => m.Modified).First();
-					keeper.Selected = false; keeper.Keep = true; protectedSets++;
+					keeper.Selected = false; keeper.Keep = true; protectedGroups.Add(grp.Key);
 				}
 			}
 			DupesGrid.Items.Refresh();
 		}
 		var paths = new List<(string Path, long Size)>();
-		// Honor the master ("protected") folder for the Largest-files grid too: a ticked big file inside it must NEVER
-		// be deleted. The Dupes grid already excludes IsReference rows below, but BigFileRow carries no such flag, so
-		// filter by path here against the master folder.
-		string amMaster = AnalyzeMasterBox?.Text ?? "";
-		string amMasterFull = (!string.IsNullOrWhiteSpace(amMaster) && Directory.Exists(amMaster)) ? Path.GetFullPath(amMaster).TrimEnd('\\') : "";
+		// Master-folder ("protected") filter for the Largest-files grid: a ticked big file inside the master folder must
+		// NEVER be deleted. BigFileRow has no IsReference flag, so filter by the LIVE master path computed above.
 		if (BigFilesGrid?.ItemsSource is IEnumerable<BigFileRow> bf) paths.AddRange(bf.Where(x => x.Selected && (amMasterFull.Length == 0 || !UnderFolder(x.FullPath, amMasterFull))).Select(x => (x.FullPath, x.Size)));
 		if (DupesGrid?.ItemsSource is IEnumerable<DupRow> dr) paths.AddRange(dr.Where(x => x.Selected && !x.IsReference).Select(x => (x.FullPath, x.Size)));
 		paths = paths.GroupBy(p => p.Path, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+		// Cross-grid last-copy safety: a file can be in BOTH the Largest-files grid and a duplicate set. If EVERY copy of
+		// a set is in the delete list (some via the dupes grid, some via the big-files grid), erasing all of them would
+		// destroy the set. Keep one survivor (a protected/keeper row, else the newest) by dropping it from the list.
+		if (DupesGrid?.ItemsSource is IEnumerable<DupRow> drKeep)
+		{
+			var deleteSet = new HashSet<string>(paths.Select(p => p.Path), StringComparer.OrdinalIgnoreCase);
+			var forceKeep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var grp in drKeep.GroupBy(x => x.Group))
+			{
+				var members = grp.ToList();
+				if (members.Count < 2) continue;
+				int going = members.Count(m => !string.IsNullOrEmpty(m.FullPath) && deleteSet.Contains(m.FullPath));
+				if (going < members.Count) continue; // at least one copy already survives
+				DupRow survivor = members.Where(m => m.IsReference).OrderByDescending(m => m.Modified).FirstOrDefault()
+					?? members.Where(m => m.Keep).OrderByDescending(m => m.Modified).FirstOrDefault()
+					?? members.OrderByDescending(m => m.Modified).First();
+				if (string.IsNullOrEmpty(survivor.FullPath)) continue;
+				forceKeep.Add(survivor.FullPath);
+				survivor.Selected = false; survivor.Keep = true; // un-tick so a later re-click can't delete the last copy
+				protectedGroups.Add(grp.Key); // count the set once (may already be counted by the dupes-only guard above)
+			}
+			if (forceKeep.Count > 0)
+			{
+				paths = paths.Where(p => !forceKeep.Contains(p.Path)).ToList();
+				// Un-tick the survivor's row in the Largest-files grid too (its Selected is independent of the DupRow),
+				// so a second Delete click cannot re-add and recycle the copy we just preserved.
+				if (BigFilesGrid?.ItemsSource is IEnumerable<BigFileRow> bfK) foreach (var b in bfK) if (forceKeep.Contains(b.FullPath)) b.Selected = false;
+			}
+		}
 		if (paths.Count == 0) { if (AnalyzeStatusText != null) AnalyzeStatusText.Text = L("CleanNothingSelected"); return; }
+		int protectedSets = protectedGroups.Count;
 		long totalSel = paths.Sum(p => p.Size);
 		string confirmMsg = string.Format(L("AnRecycleConfirm"), paths.Count, FormatBytes(totalSel)) + (protectedSets > 0 ? "\n\n" + string.Format(L("AnKeepProtected"), protectedSets) : "");
 		if (MessageBox.Show(this, confirmMsg, L("AnalyzeDeleteTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
-		_analyzerBusy = true; isBusy = true;
+		_analyzerBusy = true; isBusy = true; _refreshOwnsBusy = false; UpdateSleepBlock();
 		try
 		{
-			var res = await Task.Run(() =>
+			await Task.Yield(); // stay on the UI thread (so the nuke warning is parented) while keeping this method async
+			// Recycle via SHFileOperation with FOF_WANTNUKEWARNING. The old FileSystem.DeleteFile(OnlyErrorDialogs) set
+			// FOF_NOCONFIRMATION and SILENTLY permanently-deleted any file too big for the Recycle Bin (or on a volume
+			// with no bin) — the exact large files this tool surfaces — with no prompt and no way to undo. The nuke
+			// warning makes Windows ask before ANY permanent deletion, so the user can decline.
+			IntPtr hwnd = IntPtr.Zero;
+			try { hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle; } catch { }
+			string multi = string.Join("\0", paths.Select(p => p.Path)) + "\0";
+			IntPtr pFrom = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(multi);
+			try
 			{
-				long freed = 0; int n = 0;
-				var gone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-				foreach (var (p, s) in paths)
-				{
-					try
-					{
-						Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(p, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-						freed += s; n++; gone.Add(p);
-					}
-					catch { }
-				}
-				return (freed, n, gone);
-			});
-			if (AnalyzeStatusText != null) AnalyzeStatusText.Text = string.Format(L("AnalyzeDeleteDone"), res.n, FormatBytes(res.freed));
-			if (res.n > 0) { _lastDeletedBatch = res.gone.ToList(); ShowUndoToast(res.n, res.freed); }
+				var op = new SHFILEOPSTRUCT { hwnd = hwnd, wFunc = FO_DELETE, pFrom = pFrom, fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING) };
+				try { SHFileOperation(ref op); } catch { }
+			}
+			finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(pFrom); }
+			// Ground truth: a file the user KEPT (declined the nuke warning) still exists; only files that are actually
+			// gone count toward freed/undo. This also stops the undo toast from promising recovery for a file that was
+			// permanently deleted rather than recycled.
+			long freed = 0; int n = 0;
+			var gone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var (p, s) in paths)
+			{
+				bool exists; try { exists = File.Exists(p); } catch { exists = true; }
+				if (!exists) { freed += s; n++; gone.Add(p); }
+			}
+			if (AnalyzeStatusText != null) AnalyzeStatusText.Text = string.Format(L("AnalyzeDeleteDone"), n, FormatBytes(freed));
+			if (n > 0) { _lastDeletedBatch = gone.ToList(); ShowUndoToast(n, freed); }
 			// Filter against the deleted set (no per-row File.Exists stat on the UI thread).
-			if (BigFilesGrid?.ItemsSource is IEnumerable<BigFileRow> bf2) BigFilesGrid.ItemsSource = bf2.Where(x => !res.gone.Contains(x.FullPath)).ToList();
+			if (BigFilesGrid?.ItemsSource is IEnumerable<BigFileRow> bf2) BigFilesGrid.ItemsSource = bf2.Where(x => !gone.Contains(x.FullPath)).ToList();
 			if (DupesGrid?.ItemsSource is IEnumerable<DupRow> dr2)
 			{
 				// Drop deleted rows, then drop duplicate groups that no longer have 2+ members.
-				var kept = dr2.Where(x => !res.gone.Contains(x.FullPath)).ToList();
+				var kept = dr2.Where(x => !gone.Contains(x.FullPath)).ToList();
 				DupesGrid.ItemsSource = kept.GroupBy(x => x.Group).Where(g => g.Count() >= 2).SelectMany(g => g).ToList();
 			}
 		}
-		finally { _analyzerBusy = false; isBusy = false; }
+		finally { _analyzerBusy = false; SetBusy(busy: false); }   // SetBusy, not a raw clear — see the sibling analyzer flows
 	}
 
 	// ---------- Undo toast: restore the last deleted batch from the Recycle Bin ----------
@@ -9648,12 +10797,15 @@ exit 0
 	{
 		_undoTimer?.Stop();
 		if (AnalyzeUndoBar != null) AnalyzeUndoBar.Visibility = Visibility.Collapsed;
+		if (_analyzerBusy) return;
 		var batch = _lastDeletedBatch;
 		if (batch.Count == 0) return;
 		if (AnalyzeStatusText != null) AnalyzeStatusText.Text = L("AnUndoWorking");
 		int restored = await Task.Run(() => RestoreFromRecycleBin(batch));
 		if (AnalyzeStatusText != null)
-			AnalyzeStatusText.Text = restored > 0 ? string.Format(L("AnUndoDone"), restored) : L("AnUndoNone");
+			AnalyzeStatusText.Text = restored >= batch.Count ? string.Format(L("AnUndoDone"), restored)
+				: restored > 0 ? string.Format(L("AnUndoPartial"), restored, batch.Count)
+				: L("AnUndoNone");
 	}
 
 	// Best-effort restore-to-original-location via the Shell Recycle Bin. Matches recycled items to the
@@ -9682,23 +10834,49 @@ exit 0
 			dynamic shell = Activator.CreateInstance(shellType)!;
 			dynamic recycler = shell.NameSpace(10); // ssfBITBUCKET
 			if (recycler == null) return 0;
-			var want = new HashSet<string>(originalPaths, StringComparer.OrdinalIgnoreCase);
+			var want = new List<string>(originalPaths);
 			dynamic items = recycler.Items();
 			int cnt = (int)items.Count;
-			for (int i = cnt - 1; i >= 0 && want.Count > 0; i--)
+			// For each wanted original path pick the BEST (most-recently-deleted) matching bin item, so an older
+			// different-content copy already in the bin under the same path is not restored by mistake. Match on
+			// original folder + name, comparing the name WITH and WITHOUT its extension: Shell FolderItem.Name drops
+			// the extension when "hide extensions for known types" is on (the Windows default), so an exact full-path
+			// compare would match nothing for jpg/png/mp4/... and restore zero files.
+			var best = new Dictionary<string, (dynamic item, DateTime when)>(StringComparer.OrdinalIgnoreCase);
+			for (int i = 0; i < cnt; i++)
 			{
 				dynamic item = items.Item(i);
 				string name = (string)item.Name;
 				string origLoc = (string)recycler.GetDetailsOf(item, 1); // column 1 = "Original Location" (Vista+)
 				if (string.IsNullOrEmpty(origLoc)) continue;
-				string full = Path.Combine(origLoc, name);
-				if (!want.Contains(full)) continue;
+				string? match = null;
+				foreach (var w in want)
+				{
+					if (!string.Equals(Path.GetDirectoryName(w) ?? "", origLoc, StringComparison.OrdinalIgnoreCase)) continue;
+					if (string.Equals(Path.GetFileName(w), name, StringComparison.OrdinalIgnoreCase)
+						|| string.Equals(Path.GetFileNameWithoutExtension(w), name, StringComparison.OrdinalIgnoreCase))
+					{ match = w; break; }
+				}
+				if (match == null) continue;
+				DateTime when = DateTime.MinValue;
+				try { DateTime.TryParse((string)recycler.GetDetailsOf(item, 2), out when); } catch { } // col 2 = "Date deleted"
+				if (!best.TryGetValue(match, out var cur) || when > cur.when) best[match] = (item, when);
+			}
+			foreach (var kv in best)
+			{
+				dynamic item = kv.Value.item;
 				dynamic verbs = item.Verbs();
 				int vc = (int)verbs.Count;
 				for (int v = 0; v < vc; v++)
 				{
 					dynamic verb = verbs.Item(v);
-					if (IsRestoreVerb((string)verb.Name)) { verb.DoIt(); restored++; want.Remove(full); break; }
+					if (IsRestoreVerb((string)verb.Name))
+					{
+						verb.DoIt();
+						bool ok; try { ok = File.Exists(kv.Key); } catch { ok = true; }
+						if (ok) restored++;
+						break;
+					}
 				}
 			}
 		}
@@ -9987,6 +11165,7 @@ exit 0
 			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
 			ProgressBar.Value = 100.0;
 			if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+			UpdateProgressStats();   // the timer already stopped: without this the stats LINE keeps the last tick's percent next to a full bar
 			SetBusy(busy: false);
 		}
 		catch (Exception ex) { failed = true; ShowError(L("RfScanFailed"), ex); }
@@ -10092,9 +11271,20 @@ exit 0
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
 			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
-			progressDoneGiB = progressTotalGiB;
-			if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfDeepFound"), scan.Files.Count); if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
-			ProgressBar.Value = 100.0;
+			// A stopped scan only searched part of the drive — never claim 100% or a complete result for it, or the
+			// user reads "12 files found" as "that's all there is" and stops looking for the file that IS there.
+			if (scan.DeepPartial)
+			{
+				if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfDeepFoundPartial"), scan.Files.Count, FormatBytes(scan.ResumeOffset));
+			}
+			else
+			{
+				progressDoneGiB = progressTotalGiB;
+				if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfDeepFound"), scan.Files.Count);
+				if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+				ProgressBar.Value = 100.0;
+				UpdateProgressStats();   // refresh the stats LINE too — the timer has stopped, so nothing else will
+			}
 			SetBusy(busy: false);
 		}
 		catch (Exception ex) { failed = true; ShowError(L("RfDeepFailed"), ex); }
@@ -10190,9 +11380,14 @@ exit 0
 		int del = _lastScan.Files.Count(f => f.Deleted);
 		int onDrive = _lastScan.Files.Count - del;
 		RecoverButton.IsEnabled = sel.Count > 0 && !isBusy;
-		RecoverStatusText.Text = sel.Count > 0
+		string txt = sel.Count > 0
 			? string.Format(L("RfSelInfo"), sel.Count, FormatBytes(sel.Sum(f => f.Size)))
 			: onDrive > 0 ? string.Format(L("RfSelDelOnDrive"), del, onDrive) : string.Format(L("RfSelDel"), del);
+		// A stopped deep scan searched only part of the drive. This runs on every selection change AND in the scan's
+		// finally, so it is the one place that reliably keeps the "partial — rest not searched" warning visible;
+		// otherwise the one-shot message set right after the scan is instantly overwritten here.
+		if (_lastScan.DeepPartial) txt += " " + string.Format(L("RfDeepPartialSuffix"), FormatBytes(_lastScan.ResumeOffset));
+		RecoverStatusText.Text = txt;
 	}
 
 	private async void CreateImage_Click(object sender, RoutedEventArgs e)
@@ -10226,7 +11421,10 @@ exit 0
 		try
 		{
 			stopRequested = false; _progressFullRange = true;
-			progressTotalGiB = Math.Max(1.0, total / 1073741824.0); progressDoneGiB = 0.0; _speedWindow.Clear();
+			// progressSpeedMb must be cleared like every other flow does: this one drives the bar through its own
+			// callback and never feeds the byte counter, so the speed can never be recomputed here — the PREVIOUS
+			// operation's rate was used to invent a "Remaining" that then never moved for the whole imaging run.
+			progressTotalGiB = Math.Max(1.0, total / 1073741824.0); progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			RecoverStopButton.IsEnabled = true;
 			SetBusy(busy: true, string.Format(L("RfImgBusy"), letter, Path.GetFileName(dest)));
@@ -10234,6 +11432,7 @@ exit 0
 			await Task.Run(() => CreateDiskImage(letter, dest, total, p => Dispatcher.Invoke(() => ProgressBar.Value = p)));
 			operationTimer.Stop(); operationStopwatch.Stop();
 			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+			UpdateProgressStats();   // refresh the stats LINE too — the timer has stopped, so nothing else will
 			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
 			MessageBox.Show(stopRequested
 				? string.Format(L("RfImgStopped"), dest)
@@ -10264,6 +11463,10 @@ exit 0
 			RecoverGrid.ItemsSource = null;
 			if (RecoverPreviewImage != null) RecoverPreviewImage.Source = null;
 			stopRequested = false; _progressFullRange = true;
+			// Clear the byte counters: the scan drives the bar through its own callback, so the previous operation's
+			// leftover done/total would otherwise slam the bar to ~89% and fight that callback (and, on the deep path,
+			// compute the percentage against the WRONG denominator — the previous image's size).
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, string.Format(L("RfImgScanBusy"), Path.GetFileName(path)));
 			ProgressBar.Value = 0.0;
@@ -10276,7 +11479,10 @@ exit 0
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
 			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
-			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+			// Don't paint a full bar for a scan the user STOPPED — it only searched part of the image. The partial
+			// warning is appended by UpdateRecoverSelectionInfo (called in the finally), since scan.DeepPartial is set.
+			if (!scan.DeepPartial) { ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%"; }
+			UpdateProgressStats();   // refresh the stats LINE too — the timer has stopped, so nothing else will
 			SetBusy(busy: false);
 		}
 		catch (Exception ex) { failed = true; ShowError(L("RfImgScanFailed"), ex); }
@@ -10375,6 +11581,22 @@ exit 0
 	// Reads up to maxBytes of a recoverable file's content into memory (used for the preview thumbnail).
 	private byte[] ReadFileBytes(DeletedFile f, NtfsScanResult g, int maxBytes)
 	{
+		// Recycle Bin row: the payload is a real $R file on disk. The volume walk below has NO payload for these
+		// (no runs, not carved/resident), so without this branch every preview, hex dump and thumbnail came back
+		// empty — and said "Preview failed" — for files that are perfectly intact.
+		if (!string.IsNullOrEmpty(f.SourcePath))
+		{
+			try
+			{
+				if (Directory.Exists(f.SourcePath)) return Array.Empty<byte>();   // a folder has nothing to preview
+				using var src = new FileStream(f.SourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+				byte[] buf = new byte[(int)Math.Min(maxBytes, src.Length)];
+				int total = 0, r;
+				while (total < buf.Length && (r = src.Read(buf, total, buf.Length - total)) > 0) total += r;
+				return total == buf.Length ? buf : buf.AsSpan(0, total).ToArray();
+			}
+			catch { return Array.Empty<byte>(); }
+		}
 		if (f.Resident && f.ResidentData != null) return f.ResidentData;
 		using var vr = OpenSource(g);
 		using var ms = new MemoryStream();
@@ -10431,8 +11653,36 @@ exit 0
 		return -1;
 	}
 
+	[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+	private static extern bool GetVolumeNameForVolumeMountPoint(string lpszVolumeMountPoint, StringBuilder lpszVolumeName, uint cchBufferLength);
+
 	private static int PhysicalDiskOfPath(string path)
 	{
+		// Resolve the path's REAL volume, not just its drive letter: a destination under a mounted folder (e.g.
+		// C:\Mount\Data, where Data is a different volume) used to resolve to C:'s disk, so the same-disk check
+		// compared the wrong disks and stayed silent.
+		try
+		{
+			var root = new StringBuilder(320);
+			if (GetVolumePathName(path, root, (uint)root.Capacity) && root.Length > 0)
+			{
+				string mountRoot = root.ToString();
+				if (!mountRoot.EndsWith("\\")) mountRoot += "\\";
+				var guid = new StringBuilder(320);
+				if (GetVolumeNameForVolumeMountPoint(mountRoot, guid, (uint)guid.Capacity) && guid.Length > 0)
+				{
+					using var h = CreateFile(guid.ToString().TrimEnd('\\'), GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
+					if (!h.IsInvalid)
+					{
+						var sdn = new STORAGE_DEVICE_NUMBER();
+						const uint IOCTL_STORAGE_GET_DEVICE_NUMBER = 0x2D1080;
+						if (DeviceIoControl(h, IOCTL_STORAGE_GET_DEVICE_NUMBER, IntPtr.Zero, 0, ref sdn, (uint)System.Runtime.InteropServices.Marshal.SizeOf<STORAGE_DEVICE_NUMBER>(), out _, IntPtr.Zero))
+							return sdn.DeviceNumber;
+					}
+				}
+			}
+		}
+		catch { }
 		char letter = char.ToUpperInvariant(Path.GetPathRoot(path)?.FirstOrDefault() ?? '\0');
 		return letter == '\0' ? -1 : PhysicalDiskOfVolume(letter);
 	}
@@ -10444,8 +11694,15 @@ exit 0
 		if (_lastScan == null || !string.IsNullOrEmpty(_lastScan.ImagePath)) return false; // image source: nothing to overwrite
 		int src = PhysicalDiskOfVolume(_lastScan.Letter);
 		int dst = PhysicalDiskOfPath(destPath);
-		if (src >= 0 && src == dst)
-			return MessageBox.Show(L("RfSameDiskBlocked"), L("RfFilesTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK;
+		// Fail SAFE, not open. `src >= 0 && src == dst` skipped the warning entirely whenever a device number was
+		// unknown (-1) — e.g. a Storage Spaces / dynamic or spanned source — which is precisely the case where the
+		// recovery can overwrite the very data being recovered. Warn unless we can PROVE the disks are different;
+		// the dialog still has an override, so a single-disk user is never blocked.
+		bool provenSame = src >= 0 && src == dst;
+		if (provenSame || src < 0 || dst < 0)
+			// Use the softer "could not confirm" wording when a device number is UNKNOWN — the old text asserted as
+			// FACT that the destination is the same disk, which is a lie when we simply couldn't tell them apart.
+			return MessageBox.Show(L(provenSame ? "RfSameDiskBlocked" : "RfSameDiskUnsure"), L("RfFilesTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK;
 		return false;
 	}
 
@@ -10569,6 +11826,9 @@ exit 0
 		try
 		{
 			stopRequested = false; _progressFullRange = true;
+			// RecoverPickedToDir already honours stopRequested per file, but the Stop button stayed greyed out — so
+			// a long recovery off a failing drive (seconds of retries per unreadable run) could not be stopped at all.
+			RecoverStopButton.IsEnabled = true;
 			SetBusy(busy: true, string.Format(L("RfRecBusy"), picked.Count));
 			ProgressBar.Value = 0.0;
 			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
@@ -10578,22 +11838,25 @@ exit 0
 
 			var rr = await Task.Run(() => RecoverPickedToDir(picked, scan, outDir));
 			ok = rr.Ok; fail = rr.Fail;
+			int partialCount = rr.Partial;
 
 			ProgressBar.Value = 100.0;
 			SetBusy(busy: false);
 			NotifyOperationDone(ok > 0);
-			if (MessageBox.Show(string.Format(L("RfRecDoneHead"), ok, picked.Count, outDir) + (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfRecOpenFolder"),
+			if (MessageBox.Show(string.Format(L("RfRecDoneHead"), ok, picked.Count, outDir)
+					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
+					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfRecOpenFolder"),
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo(outDir) { UseShellExecute = true }); } catch { }
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("RfRecFailed"), ex); }
-		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; SetBusy(busy: false); }
+		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
 	}
 
 	// Recovers the picked files into outDir, rebuilding their original folder structure. Runs on a worker thread.
-	private (int Ok, int Fail) RecoverPickedToDir(List<DeletedFile> picked, NtfsScanResult scan, string outDir)
+	private (int Ok, int Partial, int Fail) RecoverPickedToDir(List<DeletedFile> picked, NtfsScanResult scan, string outDir)
 	{
-		int ok = 0, fail = 0;
+		int ok = 0, partial = 0, fail = 0;
 		using var vr = OpenSource(scan);
 		var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		for (int i = 0; i < picked.Count; i++)
@@ -10605,21 +11868,31 @@ exit 0
 			try { Directory.CreateDirectory(targetDir); } catch { targetDir = outDir; }
 			string safe = string.Concat((f.Name ?? "recovered").Split(Path.GetInvalidFileNameChars()));
 			if (string.IsNullOrWhiteSpace(safe)) safe = "recovered_" + i;
+			safe = MakeNonReservedFileName(safe);   // NUL/CON/AUX/PRN/COM1.../LPT1... open a DEVICE, not a file — prefix them
 			string outPath = Path.Combine(targetDir, safe);
 			int dup = 1;
-			while (used.Contains(outPath) || File.Exists(outPath))
+			// Directory.Exists too: a recovered Recycle Bin FOLDER would otherwise merge into an existing folder of
+			// the same name and overwrite its files instead of getting a " (1)" suffix like a colliding file does.
+			while (used.Contains(outPath) || File.Exists(outPath) || Directory.Exists(outPath))
 			{
 				string baseName = Path.GetFileNameWithoutExtension(safe);
 				string ext = Path.GetExtension(safe);
 				outPath = Path.Combine(targetDir, $"{baseName} ({dup++}){ext}");
 			}
 			used.Add(outPath);
-			try { RecoverOne(vr, f, scan, outPath); ok++; }
+			try
+			{
+				long written = RecoverOne(vr, f, scan, outPath);
+				// A short write means the data was unreadable or already overwritten. KEEP the partial file (half a
+				// photo still beats nothing) but never count it as a clean recovery — reporting truncated data as
+				// "recovered" is exactly what makes a user delete the only surviving copy.
+				if (f.Size > 0 && written < f.Size) partial++; else ok++;
+			}
 			catch { fail++; try { if (File.Exists(outPath)) File.Delete(outPath); } catch { } }
 			int pct = (int)((i + 1) * 100.0 / picked.Count);
 			Dispatcher.Invoke(() => ProgressBar.Value = pct);
 		}
-		return (ok, fail);
+		return (ok, partial, fail);
 	}
 
 	// Recover selected files straight into a single .zip archive (recovers to a temp folder, then compresses).
@@ -10656,10 +11929,12 @@ exit 0
 		catch { }
 
 		string temp = Path.Combine(Path.GetDirectoryName(zipPath) ?? Path.GetTempPath(), "DriveForge-zip-" + Guid.NewGuid().ToString("N"));
-		int ok = 0, fail = 0;
+		int ok = 0, fail = 0, partialCount = 0;   // partialCount lives OUT here so the catch can see it (temp holds the only copies)
+		bool keepTemp = false;   // set if the ZIP step fails — the recovered files live in temp and are the only copies
 		try
 		{
 			stopRequested = false; _progressFullRange = true;
+			RecoverStopButton.IsEnabled = true;   // the copy loop honours stopRequested — let the user actually reach it
 			SetBusy(busy: true, string.Format(L("RfZipBusy"), picked.Count));
 			ProgressBar.Value = 0.0;
 			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
@@ -10667,8 +11942,11 @@ exit 0
 			Directory.CreateDirectory(temp);
 			var scan = _lastScan;
 			var rr = await Task.Run(() => RecoverPickedToDir(picked, scan, temp));
-			ok = rr.Ok; fail = rr.Fail;
-			if (ok > 0 && !stopRequested)
+			ok = rr.Ok; fail = rr.Fail; partialCount = rr.Partial;
+			// Partial files are real files on disk — archive them too, and report them separately from clean ones.
+			// Zip whatever was recovered EVEN IF the user hit Stop: the temp folder holds the only copies, and the
+			// finally deletes it — skipping the zip on stop would silently destroy every file recovered so far.
+			if (ok + partialCount > 0)
 			{
 				SetBusy(busy: true, L("RfZipCompress"));
 				await Task.Run(() => { if (File.Exists(zipPath)) File.Delete(zipPath); System.IO.Compression.ZipFile.CreateFromDirectory(temp, zipPath, System.IO.Compression.CompressionLevel.Optimal, false); });
@@ -10676,17 +11954,32 @@ exit 0
 			ProgressBar.Value = 100.0;
 			SetBusy(busy: false);
 			NotifyOperationDone(ok > 0);
-			if (MessageBox.Show(string.Format(L("RfZipDoneHead"), ok, picked.Count, zipPath) + (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfZipShowExplorer"),
+			if (MessageBox.Show(string.Format(L("RfZipDoneHead"), ok, picked.Count, zipPath)
+					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
+					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfZipShowExplorer"),
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{zipPath}\"") { UseShellExecute = true }); } catch { }
 		}
-		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("RfZipFailed"), ex); }
-		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; SetBusy(busy: false); try { if (Directory.Exists(temp)) Directory.Delete(temp, true); } catch { } }
+		catch (Exception ex)
+			{
+				NotifyOperationDone(false);
+				// The files were already recovered into temp; only the ZIP step failed (usually a full disk). Deleting
+				// temp in the finally would destroy the ONLY recovered copies — keep it and open it for the user.
+				keepTemp = ok + partialCount > 0 && Directory.Exists(temp); // count PARTIALS (real files on disk); failed outputs are already deleted
+				ShowError(L("RfZipFailed"), ex);
+				if (keepTemp) { try { Process.Start(new ProcessStartInfo(temp) { UseShellExecute = true }); } catch { } }
+			}
+		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; RecoverStopButton.IsEnabled = false; SetBusy(busy: false); try { if (!keepTemp && Directory.Exists(temp)) Directory.Delete(temp, true); } catch { } }
 	}
 
 	// Save the current scan results to a .dfscan file so they can be reopened later without re-scanning.
 	private void RecoverSaveSession_Click(object sender, RoutedEventArgs e)
 	{
+		// A scan still in flight — even a PAUSED one — has not published its result to _lastScan yet (that happens
+		// only when the scan task returns). Saving here silently wrote the PREVIOUS scan and threw the running one
+		// away. Require Stop first: stopping publishes the partial scan together with its resume checkpoint, which
+		// is exactly what makes save-now / continue-later work.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (_lastScan == null || _lastScan.Files.Count == 0) { if (RecoverStatusText != null) RecoverStatusText.Text = L("SessionNothing"); return; }
 		var dlg = new Microsoft.Win32.SaveFileDialog { Filter = L("RfFltScan") + " (*.dfscan)|*.dfscan", FileName = "recovery-session.dfscan", Title = L("SessionSaveTitle") };
 		if (dlg.ShowDialog(this) != true) return;
@@ -10698,6 +11991,9 @@ exit 0
 	// If the saved scan was a deep scan that was paused/stopped partway, offer to CONTINUE it from the checkpoint.
 	private async void RecoverOpenSession_Click(object sender, RoutedEventArgs e)
 	{
+		// Without this guard a session load could replace _lastScan and the grid WHILE a scan was running, so the
+		// running scan's rows and the loaded ones mixed and a recovery could read from the wrong source.
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		var dlg = new Microsoft.Win32.OpenFileDialog { Filter = L("RfFltScan") + " (*.dfscan)|*.dfscan", Title = L("SessionOpenTitle") };
 		if (dlg.ShowDialog(this) != true) return;
 		NtfsScanResult scan;
@@ -10746,17 +12042,30 @@ exit 0
 			var token = _recoverCts.Token;
 			var more = isImage
 				? await Task.Run(() => DeepScanImage(loaded.ImagePath, token, _ => { }, startOffset, startCount))
-				: await Task.Run(() => DeepScan(loaded.Letter, token, _ => { }, startOffset, startCount));
+				: await Task.Run(() => DeepScan(loaded.Letter, token, _ => { }, startOffset, startCount, loaded.BootSig));
 			operationTimer.Stop(); operationStopwatch.Stop();
-			loaded.Files.AddRange(more.Files);
+			// The resumed pass runs with its OWN independent MaxRecoverEntries budget, so appending it whole could
+			// take the grid to twice the cap the limit exists to enforce. Only take what still fits.
+			int room = Math.Max(0, MaxRecoverEntries - loaded.Files.Count);
+			var added = more.Files.Count > room ? more.Files.Take(room).ToList() : more.Files;
+			loaded.Files.AddRange(added);
 			loaded.ResumeOffset = more.ResumeOffset; loaded.DeepPartial = more.DeepPartial;
 			_lastScan = loaded;
 			RecoverGrid.ItemsSource = loaded.Files;
 			ApplyRecoverFilter();
-			foreach (var f in more.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
-			progressDoneGiB = progressTotalGiB;
-			if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfDeepFound"), loaded.Files.Count);
-			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+			foreach (var f in added) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			// Same honesty rule as the first pass: a stopped resume did not finish the drive either.
+			if (more.DeepPartial)
+			{
+				if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfDeepFoundPartial"), loaded.Files.Count, FormatBytes(more.ResumeOffset));
+			}
+			else
+			{
+				progressDoneGiB = progressTotalGiB;
+				if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfDeepFound"), loaded.Files.Count);
+				ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+				UpdateProgressStats();   // refresh the stats LINE too — the timer has stopped, so nothing else will
+			}
 			SetBusy(busy: false);
 		}
 		catch (Exception ex) { failed = true; ShowError(L("RfDeepFailed"), ex); }
@@ -10769,6 +12078,22 @@ exit 0
 			if (failed && RecoverStatusText != null) RecoverStatusText.Text = "";
 			UpdateRecoverSelectionInfo();
 		}
+	}
+
+	// Win32 reserved device names: writing to "aux.jpg" opens the AUX device, not a file, so the recovered data goes
+	// nowhere (or throws). Prefix any name whose base is a reserved device (with or without extension) with '_'.
+	private static readonly HashSet<string> _reservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"CON","PRN","AUX","NUL","COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9",
+		"LPT1","LPT2","LPT3","LPT4","LPT5","LPT6","LPT7","LPT8","LPT9",
+	};
+	private static string MakeNonReservedFileName(string name)
+	{
+		int dot = name.IndexOf('.');
+		string stem = dot < 0 ? name : name.Substring(0, dot);
+		if (_reservedDeviceNames.Contains(stem.TrimEnd(' ', '.'))) return "_" + name;
+		if (name.EndsWith(".") || name.EndsWith(" ")) name = name.TrimEnd('.', ' ') + "_"; // trailing dot/space is also illegal
+		return string.IsNullOrEmpty(name) ? "recovered" : name;
 	}
 
 	// Cleans a recovered file's folder path into a safe relative directory (drops drive letters, invalid chars).
@@ -10874,9 +12199,11 @@ exit 0
 		if (e.Kind == IsoKind.Direct) return e.A;
 		if (e.Kind == IsoKind.Index) return await PickFromIndex(http, e.A, e.B);
 		string parentHtml = await http.GetStringAsync(e.A);
-		var dirs = Regex.Matches(parentHtml, "href=\"(" + e.B + ")\"", RegexOptions.IgnoreCase).Select(m => m.Groups[1].Value).Distinct().ToList();
+		// Trim the trailing '/' from each dir href BEFORE sorting: NaturalSortKey('22/')='..22/' vs NaturalSortKey('22.1/')='..22.00000001/'
+		// compare '/' (0x2F) > '.' (0x2E), so the OLDER base '22/' sorted AFTER '22.1/' and .Last() picked the base over the point release.
+		var dirs = Regex.Matches(parentHtml, "href=\"(" + e.B + ")\"", RegexOptions.IgnoreCase).Select(m => m.Groups[1].Value.Trim('/')).Distinct().ToList();
 		if (dirs.Count == 0) return "";
-		string dir = dirs.OrderBy(NaturalSortKey, StringComparer.Ordinal).Last().Trim('/');
+		string dir = dirs.OrderBy(NaturalSortKey, StringComparer.Ordinal).Last();
 		string child = e.A.TrimEnd('/') + "/" + dir + "/";
 		return await PickFromIndex(http, child, e.C);
 	}
@@ -10911,6 +12238,11 @@ exit 0
 			MessageBox.Show(L("Mb035"), "DriveForge — download ISO", MessageBoxButton.OK, MessageBoxImage.Exclamation);
 			return;
 		}
+		// Warn before fetching over an unencrypted http:// link (a user-pasted URL) — the ISO could be tampered with in
+		// transit and there is no checksum verification. The catalog's own "fetch latest" entries are all https.
+		if (uri.Scheme == Uri.UriSchemeHttp &&
+			MessageBox.Show(L("DlHttpWarn"), L("MbDownloadTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
+			return;
 
 		string name = Path.GetFileName(uri.LocalPath);
 		if (string.IsNullOrWhiteSpace(name)) name = "download.iso";
@@ -10921,8 +12253,7 @@ exit 0
 		string part = dest + ".part"; // download here, rename to the real name only after a complete download
 
 		if (File.Exists(dest) &&
-			MessageBox.Show(name + " already exists in your Downloads folder. Download it again and overwrite?",
-				"DriveForge — download ISO", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+			MessageBox.Show(string.Format(L("DlOverwrite"), name, folder), L("MbDownloadTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
 			return;
 
 		bool failed = false;
@@ -10975,6 +12306,7 @@ exit 0
 			SetBusy(busy: false);
 			NotifyOperationDone(true);
 			if (DlSaveHint != null) DlSaveHint.Text = "Saved: " + dest;
+			if (!total.HasValue) MessageBox.Show(L("DlSizeUnverified"), L("MbDownloadTitle"), MessageBoxButton.OK, MessageBoxImage.Warning);   // no Content-Length -> a truncated body can look complete; tell the user to verify the ISO
 			if (MessageBox.Show(string.Format(L("MbDownloaded"), dest), L("MbDownloadTitle"),
 					MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + dest + "\"") { UseShellExecute = true }); } catch { }
@@ -10989,16 +12321,21 @@ exit 0
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
 			_progressFullRange = false;
-			SetBusy(busy: false);
+			// Pass a status: the per-block progress writes "Downloading x.iso — 1.2 GB / 4.0 GB (30%)" straight into
+			// StatusText, and a stopped/failed download (which shows no dialog by design) otherwise left that line
+			// claiming a live download next to a zeroed bar, with the .part file already deleted.
+			SetBusy(busy: false, failed ? L("SxReady") : null);
 			if (failed && DlSaveHint != null) DlSaveHint.Text = "";
 		}
 	}
 
 	private async Task MultiBootFlowAsync()
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!IsAdministrator()) { MessageBox.Show(L("Mb036"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-
+		_toolOpStarting = true;   // synchronous reentrancy guard: the whole pre-write phase (dialogs + the multi-minute Ventoy download) runs with isBusy still false
+		try
+		{
 		await RefreshDisksAsync();
 		var candidates = disks.Where(d => !d.IsSystem).ToList();
 		if (candidates.Count == 0) { MessageBox.Show(L("Mb037"), "DriveForge — multi-boot USB", MessageBoxButton.OK, MessageBoxImage.Information); return; }
@@ -11047,12 +12384,29 @@ exit 0
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
 			_progressFullRange = true; PauseButton.Content = L("BtnPause");
+			// Clear the byte counters like every other progress-driving flow. Nothing here feeds them (Ventoy reports its
+			// own percentage), so leaving the PREVIOUS operation's done/total in place made UpdateProgressStats drive the
+			// bar from stale bytes: after e.g. an ISO write it read done == total, inflated the ceiling and slammed the bar
+			// to ~89% within a second — then fought the real percentage RunVentoyAsync writes every 400 ms, so it visibly
+			// oscillated between the true value and 89% for the whole install.
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, (update ? "Updating" : "Setting up") + $" multi-boot engine on Disk {disk.Number}...");
 			ProgressBar.Value = 0.0;
+			if (!await VerifyTargetDiskUnchangedAsync(disk)) return;   // the disk can renumber during the (multi-minute) Ventoy download — re-confirm identity (size/serial/name) before the whole-disk wipe
 			await RunVentoyAsync(exe, disk.Number, install: !update);
+			// A fresh install just repartitioned the disk; the new "Ventoy" volume can take a moment to be enumerated/mounted
+			// by Windows (and DiskHasVentoyAsync returns false on any transient PowerShell hiccup), so POLL a few times
+			// before treating its absence as a real failure — otherwise a genuinely successful wipe+install false-fails.
+			bool ventoyOk = false;
+			for (int vi = 0; vi < 6 && !ventoyOk; vi++) { if (vi > 0) await Task.Delay(500); ventoyOk = await DiskHasVentoyAsync(disk.Number); }
+			if (!ventoyOk) throw new InvalidOperationException("Ventoy reported success but no Ventoy data partition was found — the install did not complete.");
 			operationTimer.Stop(); operationStopwatch.Stop();
 			ProgressBar.Value = 100.0;
+			// Pin the LABEL and refresh the stats LINE as well: the timer has already stopped, so both would otherwise
+			// keep whatever the last tick sampled (e.g. "60%" beside a full bar on a short install).
+			if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+			UpdateProgressStats();
 			SetBusy(busy: false);
 			NotifyOperationDone(true);
 			await RefreshDisksAsync();
@@ -11066,6 +12420,8 @@ exit 0
 			_progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop();
 			SetBusy(busy: false);
 		}
+		}
+		finally { _toolOpStarting = false; }
 	}
 
 	// True if the disk already carries a Ventoy data partition (exFAT/NTFS volume labelled "Ventoy").
@@ -11101,7 +12457,7 @@ exit 0
 	{
 		string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge", "Tools", "ventoy");
 		string? found = FindVentoyExe(root);
-		if (found != null) return found;
+		if (found != null) return await EnsureVentoyTrustedAsync(found) ? found : null;   // re-verify the cached binary each run (guards cache-poisoning) before running it elevated
 
 		if (MessageBox.Show(L("Mb038"),
 				"DriveForge — multi-boot engine", MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes)
@@ -11117,6 +12473,8 @@ exit 0
 			var m = Regex.Match(api, "\"browser_download_url\"\\s*:\\s*\"([^\"]*windows\\.zip)\"", RegexOptions.IgnoreCase);
 			if (!m.Success) throw new InvalidOperationException("Could not find the Ventoy Windows download on GitHub.");
 			string url = m.Groups[1].Value;
+			if (!url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://objects.githubusercontent.com/", StringComparison.OrdinalIgnoreCase))
+				throw new InvalidOperationException("Unexpected Ventoy download host (not github.com): " + url);
 			Log("Downloading Ventoy: " + url);
 			byte[] bytes = await http.GetByteArrayAsync(url);
 			string zip = Path.Combine(root, "ventoy-windows.zip");
@@ -11125,7 +12483,7 @@ exit 0
 			try { File.Delete(zip); } catch { }
 			found = FindVentoyExe(root);
 			if (found == null) throw new InvalidOperationException("Ventoy2Disk.exe was not found after extracting the download.");
-			return found;
+			return await EnsureVentoyTrustedAsync(found) ? found : null;
 		}
 		finally { SetBusy(busy: false); }
 	}
@@ -11134,6 +12492,27 @@ exit 0
 	{
 		try { return Directory.Exists(root) ? Directory.GetFiles(root, "Ventoy2Disk.exe", SearchOption.AllDirectories).FirstOrDefault() : null; }
 		catch { return null; }
+	}
+
+	// True when the file carries a VALID Authenticode signature (full trust-chain check via Get-AuthenticodeSignature).
+	private async Task<bool> IsAuthenticodeValidAsync(string path)
+	{
+		try
+		{
+			string o = await RunProcessCaptureAsync("powershell.exe",
+				"-NoProfile -Command \"(Get-AuthenticodeSignature -LiteralPath '" + path.Replace("'", "''") + "').Status\"");
+			return o.Trim().Equals("Valid", StringComparison.OrdinalIgnoreCase);
+		}
+		catch { return false; }
+	}
+
+	// Gate before running the (elevated, whole-disk-destructive) Ventoy binary: require a valid Authenticode signature,
+	// else make the user explicitly accept running an unverified binary. Guards a MITM'd download or a poisoned cache.
+	private async Task<bool> EnsureVentoyTrustedAsync(string exe)
+	{
+		if (await IsAuthenticodeValidAsync(exe)) return true;
+		return MessageBox.Show(string.Format(L("MbVentoyUnsigned"), exe),
+			L("MbMultiBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) == MessageBoxResult.OK;
 	}
 
 	// Runs Ventoy2Disk.exe in command-line mode and reports progress from its cli_percent.txt / cli_done.txt files.
@@ -11186,122 +12565,11 @@ exit 0
 			throw new InvalidOperationException("Ventoy reported a failure (status=" + (result.done.Length == 0 ? "none" : result.done) + ").\r\n" + result.log);
 	}
 
-	// Builds a self-contained HTML "Certificate of Data Erasure" for a completed wipe and opens it in the
-	// default browser, where the user can Print -> Save as PDF. No external libraries; needs no network.
-	private async Task GenerateWipeCertificateAsync(DiskItem disk, string methodLabel, int[] fills, DateTime started, TimeSpan duration)
-	{
-		// Try to read the drive's serial number for the record (best-effort).
-		string serial = "—";
-		try
-		{
-			string s = await RunProcessCaptureAsync("powershell.exe",
-				"-NoProfile -Command \"(Get-Disk -Number " + disk.Number + ").SerialNumber\"");
-			s = (s ?? "").Trim();
-			if (!string.IsNullOrWhiteSpace(s)) serial = s;
-		}
-		catch { }
-
-		string PassName(int f) => f == 0 ? "zeros (0x00)" : f == 1 ? "ones (0xFF)" : "random data";
-		var passSb = new StringBuilder();
-		for (int i = 0; i < fills.Length; i++)
-			passSb.Append("<li>Pass " + (i + 1) + " of " + fills.Length + " — " + PassName(fills[i]) + "</li>");
-
-		string certId = Guid.NewGuid().ToString("N").ToUpperInvariant();
-		certId = certId.Substring(0, 4) + "-" + certId.Substring(4, 4) + "-" + certId.Substring(8, 4) + "-" + certId.Substring(12, 4);
-		DateTime ended = started.Add(duration);
-		string H(string s) => System.Net.WebUtility.HtmlEncode(s ?? "");
-		string durTxt = (duration.TotalHours >= 1 ? (int)duration.TotalHours + "h " : "") + duration.Minutes + "m " + duration.Seconds + "s";
-		// Report what was actually overwritten — only claim full coverage when essentially the whole drive was written.
-		long coveredBytes = _lastWipeCoveredBytes > 0 ? _lastWipeCoveredBytes : disk.Size;
-		bool fullCoverage = disk.Size <= 0 || coveredBytes >= (long)(disk.Size * 0.999);
-		string resultHtml = fullCoverage
-			? "<b style=\"color:#16a34a\">Every sector overwritten &mdash; data is not recoverable</b>"
-			: "<b style=\"color:#b45309\">Drive overwritten (" + fills.Length + " pass(es)) &mdash; see byte count below</b>";
-
-		string html =
-			"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>DriveForge — Certificate of Data Erasure</title>" +
-			"<style>" +
-			"*{box-sizing:border-box}body{margin:0;background:#e2e8f0;font-family:'Segoe UI',Arial,sans-serif;color:#0f172a;padding:24px}" +
-			".cert{max-width:820px;margin:0 auto;background:#fff;border:1px solid #cbd5e1;box-shadow:0 10px 30px rgba(2,6,23,.15);border-radius:10px;overflow:hidden}" +
-			".hd{background:linear-gradient(135deg,#0f172a,#1e3a5f);color:#f8fafc;padding:26px 32px;display:flex;align-items:center;justify-content:space-between}" +
-			".hd h1{margin:0;font-size:22px;letter-spacing:.5px}.hd .sub{color:#cbd5e1;font-size:13px;margin-top:4px}" +
-			".brand{font-size:26px;font-weight:700}.brand span{color:#60a5fa}" +
-			".banner{background:#16a34a;color:#fff;text-align:center;font-size:18px;font-weight:700;padding:12px;letter-spacing:.5px}" +
-			".body{padding:28px 32px}" +
-			"table{width:100%;border-collapse:collapse;margin:6px 0 18px}" +
-			"th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:14px;vertical-align:top}" +
-			"th{width:40%;color:#475569;font-weight:600}" +
-			".sec{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#1e3a5f;margin:18px 0 4px}" +
-			"ul{margin:6px 0 16px 0;padding-left:22px}li{font-size:14px;margin:2px 0}" +
-			".sign{display:flex;gap:40px;margin-top:30px}.sign div{flex:1}" +
-			".fld{width:100%;border:none;background:transparent;font:600 16px 'Segoe UI',Arial;color:#0f172a;padding:14px 2px 6px;outline:none}.fld:focus{background:#f1f5f9;border-radius:4px}" +
-			".line{border-top:1px solid #94a3b8;margin-top:0;padding-top:6px;font-size:12px;color:#64748b}" +
-			".foot{font-size:11px;color:#64748b;padding:16px 32px;border-top:1px solid #e2e8f0;line-height:1.5}" +
-			".toolbar{max-width:820px;margin:0 auto 14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}" +
-			".btn{background:#2563eb;color:#fff;border:none;border-radius:7px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;box-shadow:0 2px 6px rgba(37,99,235,.3)}.btn:hover{background:#1d4ed8}" +
-			".tip{font-size:12.5px;color:#475569}" +
-			"@media print{body{background:#fff;padding:0}.cert{box-shadow:none;border:none}.no-print{display:none!important}.fld{padding-top:14px}}" +
-			"</style></head><body>" +
-			"<div class=\"toolbar no-print\"><button class=\"btn\" onclick=\"window.print()\">&#128424;&nbsp; Print / Save as PDF</button>" +
-			"<span class=\"tip\">Fill in the signature &amp; date below, then click <b>Print / Save as PDF</b> and pick <b>Save as PDF</b> as the printer.</span></div>" +
-			"<div class=\"cert\">" +
-			"<div class=\"hd\"><div><div class=\"brand\">Drive<span>Forge</span></div><div class=\"sub\">Certificate ID " + H(certId) + "</div></div>" +
-			"<div style=\"text-align:right\"><h1>Certificate of<br>Data Erasure</h1></div></div>" +
-			"<div class=\"banner\">DATA SANITIZED &mdash; NOT RECOVERABLE</div>" +
-			"<div class=\"body\">" +
-			"<div class=\"sec\">Drive</div><table>" +
-			"<tr><th>Model</th><td>" + H(disk.FriendlyName) + "</td></tr>" +
-			"<tr><th>Serial number</th><td>" + H(serial) + "</td></tr>" +
-			"<tr><th>Capacity</th><td>" + H(FormatBytes(disk.Size)) + "</td></tr>" +
-			"<tr><th>Bus / media</th><td>" + H(disk.BusType + " / " + disk.MediaType) + "</td></tr>" +
-			"<tr><th>Physical disk #</th><td>" + disk.Number + "</td></tr>" +
-			"</table>" +
-			"<div class=\"sec\">Erasure</div><table>" +
-			"<tr><th>Method</th><td>" + H(methodLabel) + "</td></tr>" +
-			"<tr><th>Overwrite passes</th><td>" + fills.Length + "</td></tr>" +
-			"<tr><th>Started</th><td>" + H(started.ToString("yyyy-MM-dd HH:mm:ss")) + "</td></tr>" +
-			"<tr><th>Finished</th><td>" + H(ended.ToString("yyyy-MM-dd HH:mm:ss")) + "</td></tr>" +
-			"<tr><th>Duration</th><td>" + H(durTxt) + "</td></tr>" +
-			"<tr><th>Data overwritten</th><td>" + H(FormatBytes(coveredBytes)) + " of " + H(FormatBytes(disk.Size)) + "</td></tr>" +
-			"<tr><th>Result</th><td>" + resultHtml + "</td></tr>" +
-			"</table>" +
-			"<div class=\"sec\">Pass detail</div><ul>" + passSb + "</ul>" +
-			"<div class=\"sec\">Performed on</div><table>" +
-			"<tr><th>Computer</th><td>" + H(Environment.MachineName) + "</td></tr>" +
-			"<tr><th>Operator</th><td>" + H(Environment.UserName) + "</td></tr>" +
-			"<tr><th>Software</th><td>DriveForge (raw physical-sector overwrite)</td></tr>" +
-			"</table>" +
-			"<div class=\"sign\">" +
-			"<div><input class=\"fld\" type=\"text\" placeholder=\"\" aria-label=\"Operator signature\"><div class=\"line\">Operator signature</div></div>" +
-			"<div><input class=\"fld\" type=\"text\" value=\"" + H(ended.ToString("yyyy-MM-dd")) + "\" aria-label=\"Date\"><div class=\"line\">Date</div></div></div>" +
-			"</div>" +
-			"<div class=\"foot\">This certificate records a destructive overwrite of " + (fullCoverage ? "all addressable sectors" : "the drive (see byte count above)") + " on the drive named above, performed with DriveForge. " +
-			"A multi-pass overwrite renders previously stored data unrecoverable by software means. Note: on some solid-state drives, wear-levelling and over-provisioning may retain a small number of inaccessible blocks; for the highest assurance on SSDs, combine this with the drive's built-in Secure Erase or physical destruction. Keep this certificate for your records.</div>" +
-			"</div></body></html>";
-
-		// Let the user choose where to save it (defaults to the Desktop with a descriptive name).
-		// If they cancel the dialog, nothing is written — the certificate is entirely optional.
-		var dlg = new Microsoft.Win32.SaveFileDialog
-		{
-			Title = L("WipeCertDlgTitle"),
-			Filter = L("WipeCertFilter") + " (*.html)|*.html",
-			FileName = "DriveForge-Wipe-Certificate-Disk" + disk.Number + "-" + started.ToString("yyyyMMdd-HHmmss") + ".html",
-			InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-			AddExtension = true,
-			OverwritePrompt = true
-		};
-		if (dlg.ShowDialog(this) != true) return;
-		string file = dlg.FileName;
-		await File.WriteAllTextAsync(file, html, new UTF8Encoding(false));
-		Log("Wipe certificate saved: " + file);
-		try { Process.Start(new ProcessStartInfo(file) { UseShellExecute = true }); } catch { }
-	}
-
 	// Read-only surface test: reads every sector of the selected disk to find bad / unreadable blocks. Detects
 	// a failing drive that still reports "healthy". Writes nothing — safe to run on any disk, including the system one.
 	private async void SurfaceTest_Click(object sender, RoutedEventArgs e)
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		var disk = (DiagDiskBox?.SelectedItem ?? DiskBox?.SelectedItem) as DiskItem;
 		if (disk == null) { MessageBox.Show(L("Mb039"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!IsAdministrator()) { MessageBox.Show(L("Mb040"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
@@ -11312,35 +12580,96 @@ exit 0
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
-			_progressFullRange = true; PauseButton.Content = L("BtnPause");
+			// When the size is known the total is REAL, so it must not be inflated by the clone-only "near completion"
+			// heuristic in UpdateProgressStats (which rewrites the total x1.12 at 97% and would freeze the bar there) — the
+			// other full-range ops (free-space wipe, deep scan, resume scan) all set _progressFixedTotal for that reason.
+			// But when the size is UNKNOWN (empty card reader, uninitialised disk) there is no real total to fix: pinning a
+			// fake 1 GiB total would peg the bar at a false 100% within seconds, contradicting the "coverage could not be
+			// verified" verdict — so run indeterminate instead. Both flags cleared in the finally so they can't leak.
+			bool sizeKnown = disk.Size > 0;
+			_progressFullRange = true; _progressFixedTotal = sizeKnown; PauseButton.Content = L("BtnPause");
 			progressTotalGiB = Math.Max(1.0, disk.Size / 1073741824.0);
 			progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			if (ToolStopButton != null) ToolStopButton.IsEnabled = true;
 			SetBusy(busy: true, string.Format(L("BzSurface"), disk.Number));
 			ProgressBar.Value = 0.0;
+			ProgressBar.IsIndeterminate = !sizeKnown;   // no known total -> no meaningful percentage; SetBusy(false) resets this
 
 			var res = await Task.Run(() => RunSurfaceScanCore(disk));
 			operationTimer.Stop(); operationStopwatch.Stop();
 			double secs = Math.Max(0.001, operationStopwatch.Elapsed.TotalSeconds);
 			double avgMb = res.readBytes / 1048576.0 / secs;
-			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
+			// The scan stops early on a 0-byte read. That is usually just the end of the device, but it is ALSO how a dying
+			// USB/SD controller behaves when it stops responding — so a scan that covered 0.5% of the drive must never be
+			// reported as "no bad blocks, the surface looks healthy". Compare what was actually read against the disk size.
+			// A disk whose size we don't know (empty card-reader slot, uninitialised disk) gives us nothing to compare
+			// against, so coverage is UNVERIFIABLE — that must not count as "fully covered" either.
+			bool covered = disk.Size > 0 && res.readBytes >= disk.Size - (8L * 1024 * 1024);
+			string coverageNote = disk.Size > 0
+				? $"Read {FormatBytes(res.readBytes)} of {FormatBytes(disk.Size)} ({res.readBytes * 100.0 / disk.Size:F1}%)"
+				: $"Read {FormatBytes(res.readBytes)}";
+			// Don't slam the bar to 100% for a scan that ended early — a full bar was itself part of the false
+			// "the whole drive was checked" impression. This MUST run before SetBusy(false): UpdateProgressStats only
+			// moves ProgressBar.Value while isBusy is true, so doing it afterwards would silently do nothing.
+			ProgressBar.IsIndeterminate = false;
+			// covered -> full; known-size partial -> the true fraction; unknown size -> 0 (there is no meaningful fraction).
+			// The unknown case MUST be 0, not readBytes/fakeTotal: progressTotalGiB was floored to 1 GiB, so any real bytes
+			// read would drive UpdateProgressStats' byte block back up and re-fill the bar we just zeroed.
+			progressDoneGiB = covered ? progressTotalGiB
+				: sizeKnown ? Math.Min(progressTotalGiB, res.readBytes / 1073741824.0)
+				: 0.0;
+			// Set the bar BEFORE the update call: UpdateProgressStats writes the percent label from the value it sampled
+			// at entry, so without this the label would lag a tick and read 97% on a finished scan. A scan with no verified
+			// coverage (partial, or unknown size) must NOT end on a full bar — that was itself the false-"all checked" cue.
+			if (covered) ProgressBar.Value = 100.0;
+			else if (!sizeKnown) ProgressBar.Value = 0.0;
+			UpdateProgressStats();
+			// SetBusy(false) blanks the whole row when the user pressed Stop — which would throw away the honest
+			// end-state just computed above, including the case this method goes out of its way to get right: a Stop
+			// landing on the very LAST block still leaves a fully covered, clean scan, and the dialog says so. Snapshot
+			// the three widgets and put them back, so the row agrees with the verdict the user is reading.
+			double endBar = ProgressBar.Value;
+			string endPercent = ProgressPercentText?.Text ?? "";
+			string endStats = ProgressStatsText?.Text ?? "";
 			SetBusy(busy: false);
-			NotifyOperationDone(res.bad == 0 && !res.stopped);
+			if (stopRequested)
+			{
+				ProgressBar.Value = endBar;
+				if (ProgressPercentText != null) ProgressPercentText.Text = endPercent;
+				if (ProgressStatsText != null) ProgressStatsText.Text = endStats;
+				// The scan is over and has published its verdict — drop the sticky flag, or the SECOND
+				// SetBusy(false) in this method's own finally (and any later one, e.g. a device-change refresh)
+				// re-runs the stop-reset and blanks the row again the moment the dialog is dismissed.
+				stopRequested = false;
+			}
+			// Match the chime to the verdict: a Stop on the very last block still leaves a covered, clean scan.
+			NotifyOperationDone(res.bad == 0 && covered);
 
-			string verdict = res.bad == 0
-				? $"✓ No bad blocks found.\n\nRead {FormatBytes(res.readBytes)} with no read errors at ~{avgMb:F0} MB/s. The surface looks healthy."
-				: $"⚠ {res.bad} unreadable block(s) found ({FormatBytes(res.badBytes)}).\n\nThe drive may be failing — back up your data now and consider replacing it.";
-			if (res.stopped) verdict = "Surface test stopped before finishing.\n\n" + verdict;
+			// Distinguish "the USER cancelled" from "the drive stopped answering". Both leave the scan short, but blaming
+			// the hardware for a deliberate Stop is a false alarm on a perfectly healthy drive.
+			string verdict = res.bad > 0
+				? $"⚠ {res.bad} unreadable block(s) found ({FormatBytes(res.badBytes)}).\n\nThe drive may be failing — back up your data now and consider replacing it."
+				: covered
+					? $"✓ No bad blocks found.\n\n{coverageNote} with no read errors at ~{avgMb:F0} MB/s. The surface looks healthy."
+					: res.stopped
+						? $"Surface test stopped before finishing.\n\n{coverageNote} at ~{avgMb:F0} MB/s, with no read errors in that part. The rest of the drive was not checked, so this is not a verdict either way."
+						: disk.Size <= 0
+							? $"The drive did not report its size, so how much of it was checked could not be verified.\n\n{coverageNote} at ~{avgMb:F0} MB/s, with no read errors in that part. This is not a verdict either way."
+							: $"⚠ The test did NOT cover the whole drive.\n\n{coverageNote} at ~{avgMb:F0} MB/s, then the drive stopped returning data. No bad blocks were hit in the part that was read, but this is NOT a clean bill of health — a drive that stops responding mid-scan may be failing. Back up your data.";
+			if (res.stopped && res.bad > 0) verdict = "Surface test stopped before finishing.\n\n" + verdict;
 			ToolRecommendationDetailText.Text = verdict.Replace("\n", " ");
 			SetToolOutput($"Surface test — Disk {disk.Number} ({disk.FriendlyName})\r\nRead: {FormatBytes(res.readBytes)} of {FormatBytes(disk.Size)}\r\nAverage read: {avgMb:F0} MB/s\r\nBad blocks: {res.bad}" +
 				(res.detail.Length > 0 ? "\r\nFirst bad regions:\r\n" + res.detail : ""));
-			MessageBox.Show(verdict, "DriveForge — surface test", MessageBoxButton.OK, res.bad == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
+			MessageBox.Show(verdict, "DriveForge — surface test", MessageBoxButton.OK,
+				(res.bad > 0 || (!covered && !res.stopped && disk.Size > 0)) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("ErrSurface"), ex); }
 		finally
 		{
-			_progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop();
+			// Must clear BOTH: leaking _progressFixedTotal=true into a later clone/install would disable the inflation
+			// heuristic those operations rely on.
+			_progressFullRange = false; _progressFixedTotal = false; operationTimer.Stop(); operationStopwatch.Stop();
 			if (ToolStopButton != null) ToolStopButton.IsEnabled = false;
 			SetBusy(busy: false);
 		}
@@ -11356,6 +12685,7 @@ exit 0
 		long total = disk.Size > 0 ? disk.Size : long.MaxValue;
 		long pos = 0, readBytes = 0, badBytes = 0;
 		int bad = 0;
+		int readFail = 0;   // consecutive read exceptions — bails out of an unknown-size (long.MaxValue) scan of an empty/not-ready device
 		var regions = new List<string>();
 		while (pos < total && !stopRequested)
 		{
@@ -11374,6 +12704,7 @@ exit 0
 				// the disk misreports its size as <= 0 (empty card-reader slot / uninitialized disk), where `total` was
 				// set to long.MaxValue and every read would otherwise be counted as a fake bad region forever.
 				if (got == 0) break;
+				readFail = 0;
 				// A short read in the MIDDLE of the disk is an unreadable region, not the benign tail.
 				if (got < want && pos + want < total)
 				{
@@ -11385,6 +12716,10 @@ exit 0
 			{
 				bad++; badBytes += want;
 				if (regions.Count < 50) regions.Add("  at " + FormatBytes(pos));
+				// On an unknown-size device (total == long.MaxValue) an empty slot / not-ready reader makes EVERY read
+				// throw, which would otherwise invent bad blocks forever against the fake huge total. Bail after a run of
+				// consecutive failures so it stops instead of reporting endless bad regions.
+				if (disk.Size <= 0 && ++readFail >= 8) break;
 			}
 			pos += want;
 			Volatile.Write(ref _progressDoneBytes, pos);
@@ -11396,7 +12731,7 @@ exit 0
 	// to obscure the name, then delete it. Operates only on the chosen files — never the rest of the drive.
 	private async void ShredFiles_Click(object sender, RoutedEventArgs e)
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		int? what = ShowActionMenu(L("MbShredTitle"), L("AmShredWhatPrompt"),
 			new[] { L("AmShredFiles"), L("AmShredFolder") },
@@ -11416,7 +12751,11 @@ exit 0
 			using var fb = new Forms.FolderBrowserDialog { Description = L("DlgShredPickFolder") };
 			if (fb.ShowDialog() != Forms.DialogResult.OK) return;
 			baseFolder = fb.SelectedPath;
-			try { files.AddRange(Directory.EnumerateFiles(baseFolder, "*", SearchOption.AllDirectories)); }
+			// Reparse-safe enumeration: never follow junctions/symlinks, so a junction planted inside the chosen folder
+			// can't lead the shredder OUT to files on another drive and destroy them, and a cyclic reparse point can't
+			// hang the walk the way EnumerateFiles(AllDirectories) would. (Unlike SafeFiles this does NOT apply the temp-
+			// cleanup IsUnsafeCleanRoot guard — the user picked this exact folder to shred, so respect that choice.)
+			try { files.AddRange(EnumerateFilesReparseSafe(baseFolder)); }
 			catch (Exception ex) { ShowError(L("ErrListFolder"), ex); return; }
 		}
 		if (files.Count == 0) { MessageBox.Show(L("Mb041"), L("MbShredTitle"), MessageBoxButton.OK, MessageBoxImage.Information); return; }
@@ -11437,7 +12776,9 @@ exit 0
 		bool failed = false; int done = 0, fail = 0;
 		try
 		{
-			stopRequested = false; isPaused = false; _progressFullRange = true; PauseButton.Content = L("BtnPause");
+			// _progressFixedTotal: the total is the measured size of the selected files x passes — real, not a
+			// projection, so the clone-only 12%-inflation heuristic must stay out of it (it would stop the bar at ~89%).
+			stopRequested = false; isPaused = false; _progressFullRange = true; _progressFixedTotal = true; PauseButton.Content = L("BtnPause");
 			progressTotalGiB = Math.Max(1.0, totalBytes / 1073741824.0 * Math.Max(1, fills.Length));
 			progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
@@ -11455,7 +12796,26 @@ exit 0
 				{
 					try
 					{
-						foreach (var d in Directory.EnumerateDirectories(baseFolder, "*", SearchOption.AllDirectories).OrderByDescending(x => x.Length))
+						// Reparse-safe cleanup: remove any junction/symlink as a LINK only (never recurse into its target),
+						// and delete emptied REAL subdirectories bottom-up — so a junction can't get the shredder to delete
+						// files or folders on another drive.
+						var realDirs = new List<string>();
+						var dstack = new Stack<string>();
+						dstack.Push(baseFolder);
+						while (dstack.Count > 0)
+						{
+							string cur = dstack.Pop();
+							string[] subs;
+							try { subs = Directory.GetDirectories(cur); } catch { subs = Array.Empty<string>(); }
+							foreach (var s in subs)
+							{
+								bool reparse = false;
+								try { reparse = (File.GetAttributes(s) & FileAttributes.ReparsePoint) != 0; } catch { }
+								if (reparse) { try { Directory.Delete(s, false); } catch { } }   // drop the junction link, keep its target
+								else { realDirs.Add(s); dstack.Push(s); }
+							}
+						}
+						foreach (var d in realDirs.OrderByDescending(x => x.Length))
 							try { Directory.Delete(d, false); } catch { }
 						try { Directory.Delete(baseFolder, false); } catch { }
 					}
@@ -11471,7 +12831,7 @@ exit 0
 				"DriveForge — secure shred", MessageBoxButton.OK, MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrShred"), ex); }
-		finally { _progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); SetBusy(busy: false); }
+		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
 	}
 
 	// Overwrites one file in place with the given passes (0=zeros, 1=ones, 2=random), then renames + deletes it.
@@ -11479,30 +12839,16 @@ exit 0
 	{
 		try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
 		int[] passes = fills.Length == 0 ? new[] { 0 } : fills;
-		using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
-		{
-			long len = fs.Length;
-			int bufSize = (int)Math.Min(4 * 1024 * 1024, Math.Max(4096, len == 0 ? 4096 : len));
-			byte[] buf = new byte[bufSize];
-			using var rng = System.Security.Cryptography.RandomNumberGenerator.Create();
-			foreach (int fill in passes)
+		// Overwrite the default $DATA stream AND every alternate data stream (ADS). An ADS (file:stream) keeps its data
+		// in its OWN clusters, which File.Delete frees WITHOUT overwriting — so shredding only the main stream would
+		// leave the hidden ADS content fully recoverable. Enumerate and overwrite each named stream too.
+		OverwriteStream(path, passes, acc);
+		if (!stopRequested)
+			foreach (string adsPath in EnumerateAdsOpenPaths(path))
 			{
 				if (stopRequested) break;
-				if (fill == 0) Array.Clear(buf, 0, buf.Length);
-				else if (fill == 1) { for (int i = 0; i < buf.Length; i++) buf[i] = 0xFF; }
-				fs.Seek(0, SeekOrigin.Begin);
-				long rem = len;
-				while (rem > 0 && !stopRequested)
-				{
-					while (isPaused && !stopRequested) System.Threading.Thread.Sleep(150);
-					int w = (int)Math.Min(buf.Length, rem);
-					if (fill == 2) rng.GetBytes(buf.AsSpan(0, w));
-					fs.Write(buf, 0, w);
-					rem -= w; acc[0] += w; Volatile.Write(ref _progressDoneBytes, acc[0]);
-				}
-				fs.Flush(flushToDisk: true);
+				try { OverwriteStream(adsPath, passes, acc); } catch { }
 			}
-		}
 		// Stop pressed mid-shred: the file is only partially overwritten — deleting it now would lose it AND leave
 		// its remaining data recoverable. Keep it; the user was told it was not shredded.
 		if (stopRequested) return false;   // interrupted mid-shred: the (partial) file is deliberately kept — do NOT count it as shredded
@@ -11517,28 +12863,127 @@ exit 0
 		return true;
 	}
 
+	// Enumerates every file under an explicitly-chosen shred target, recursing into REAL subfolders only and never
+	// following a junction/symlink out of the tree (which would destroy files on another drive). No IsUnsafeCleanRoot
+	// guard: the user picked this folder deliberately, so unlike SafeFiles (built for temp cleanup) it does not refuse
+	// profile/special folders. Never throws mid-walk.
+	private static IEnumerable<string> EnumerateFilesReparseSafe(string root)
+	{
+		if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) yield break;
+		var stack = new Stack<string>();
+		stack.Push(root);
+		while (stack.Count > 0)
+		{
+			string cur = stack.Pop();
+			string[] files;
+			try { files = Directory.GetFiles(cur); } catch { files = Array.Empty<string>(); }
+			foreach (var f in files) yield return f;
+			string[] subs;
+			try { subs = Directory.GetDirectories(cur); } catch { subs = Array.Empty<string>(); }
+			foreach (var s in subs)
+			{
+				try { if ((File.GetAttributes(s) & FileAttributes.ReparsePoint) != 0) continue; } catch { }
+				stack.Push(s);
+			}
+		}
+	}
+
+	// Overwrites one NTFS data stream in place — the file itself, or a "file:stream" ADS path — with the given passes.
+	// Honors Stop/Pause. Throws if the stream can't be opened (the caller decides how to handle that).
+	private void OverwriteStream(string openPath, int[] passes, long[] acc)
+	{
+		using var fs = new FileStream(openPath, FileMode.Open, FileAccess.Write, FileShare.None);
+		long len = fs.Length;
+		int bufSize = (int)Math.Min(4 * 1024 * 1024, Math.Max(4096, len == 0 ? 4096 : len));
+		byte[] buf = new byte[bufSize];
+		using var rng = System.Security.Cryptography.RandomNumberGenerator.Create();
+		foreach (int fill in passes)
+		{
+			if (stopRequested) break;
+			if (fill == 0) Array.Clear(buf, 0, buf.Length);
+			else if (fill == 1) { for (int i = 0; i < buf.Length; i++) buf[i] = 0xFF; }
+			fs.Seek(0, SeekOrigin.Begin);
+			long rem = len;
+			while (rem > 0 && !stopRequested)
+			{
+				while (isPaused && !stopRequested) System.Threading.Thread.Sleep(150);
+				int w = (int)Math.Min(buf.Length, rem);
+				if (fill == 2) rng.GetBytes(buf.AsSpan(0, w));
+				fs.Write(buf, 0, w);
+				rem -= w; acc[0] += w; Volatile.Write(ref _progressDoneBytes, acc[0]);
+			}
+			fs.Flush(flushToDisk: true);
+		}
+	}
+
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	private struct WIN32_FIND_STREAM_DATA
+	{
+		public long StreamSize;
+		[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)] public string cStreamName;
+	}
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+	private static extern IntPtr FindFirstStreamW(string lpFileName, int InfoLevel, out WIN32_FIND_STREAM_DATA lpFindStreamData, uint dwFlags);
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+	private static extern bool FindNextStreamW(IntPtr hFindStream, out WIN32_FIND_STREAM_DATA lpFindStreamData);
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool FindClose(IntPtr hFindFile);
+
+	// Yields an openable path ("file:stream") for every NAMED alternate data stream of the file. The default "::$DATA"
+	// stream is skipped (the caller overwrites that via the plain path). Yields nothing on a non-NTFS volume or error.
+	private static IEnumerable<string> EnumerateAdsOpenPaths(string path)
+	{
+		IntPtr h = FindFirstStreamW(path, 0 /*FindStreamInfoStandard*/, out WIN32_FIND_STREAM_DATA data, 0);
+		if (h == new IntPtr(-1)) yield break;
+		try
+		{
+			do
+			{
+				string name = data.cStreamName;   // e.g. "::$DATA" (default) or ":notes:$DATA" (named)
+				if (!string.IsNullOrEmpty(name) && !name.Equals("::$DATA", StringComparison.OrdinalIgnoreCase))
+				{
+					string streamPart = name.EndsWith(":$DATA", StringComparison.OrdinalIgnoreCase)
+						? name.Substring(0, name.Length - 6) : name;   // ":notes:$DATA" -> ":notes"
+					yield return path + streamPart;
+				}
+			} while (FindNextStreamW(h, out data));
+		}
+		finally { FindClose(h); }
+	}
+
 	// Quick-format the selected drive (erases everything). Choose NTFS or exFAT. System disk is protected.
 	private async void FormatDrive_Click(object sender, RoutedEventArgs e)
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!(DiskBox.SelectedItem is DiskItem disk)) { MessageBox.Show(L("Mb042"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (disk.IsSystem) { MessageBox.Show(L("Mb043"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Hand); return; }
 		if (!IsAdministrator()) { MessageBox.Show(L("Mb044"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-
-		string contents = await GetDiskContentsAsync(disk.Number);
-		if (MessageBox.Show(string.Format(L("MbFormatConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-				L("MbFormatTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
-			return;
-
-		string[] fsOptions = { L("AmFsNtfs"), L("AmFsExfat"), L("AmFsFat32") };
-		int? fsSel = ShowActionMenu(L("AmFormatTitle"), string.Format(L("AmFormatPrompt"), disk.Number), fsOptions,
-			new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
-		if (fsSel == null) return;
-		string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
-
-		string scriptPath = Path.Combine(Path.GetTempPath(), $"winforge-format-{Guid.NewGuid():N}.txt");
+		// Hold the reentrancy guard across the WHOLE flow (incl. the confirm / fs-menu / GetDiskContentsAsync awaits that
+		// run before SetBusy sets isBusy), so a second destructive tool can't start concurrently in that window.
+		_toolOpStarting = true;
+		string scriptPath = "";
 		try
 		{
+			string contents = await GetDiskContentsAsync(disk.Number);
+			if (MessageBox.Show(string.Format(L("MbFormatConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
+					L("MbFormatTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
+				return;
+
+			string[] fsOptions = { L("AmFsNtfs"), L("AmFsExfat"), L("AmFsFat32") };
+			int? fsSel = ShowActionMenu(L("AmFormatTitle"), string.Format(L("AmFormatPrompt"), disk.Number), fsOptions,
+				new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
+			if (fsSel == null) return;
+			string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
+			// Windows' formatter (which diskpart drives) cannot CREATE a FAT32 volume larger than 32 GB. On a bigger disk the
+			// `format fs=fat32` line fails but diskpart still returns exit code 0, so the write reported success while the disk
+			// was actually left RAW/unusable. Reject up front and steer to exFAT (the modern large-capacity FAT successor).
+			if (fs == "fat32" && disk.Size > 32L * 1024 * 1024 * 1024)
+			{
+				MessageBox.Show(L("MbFat32TooBig"), L("MbFormatTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+				return;
+			}
+
+			scriptPath = Path.Combine(Path.GetTempPath(), $"winforge-format-{Guid.NewGuid():N}.txt");
 			SetBusy(busy: true, string.Format(L("BzFormat"), disk.Number, fs.ToUpperInvariant()));
 			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 			string script = $"select disk {disk.Number}\r\nclean\r\ncreate partition primary\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n";
@@ -11555,6 +13000,7 @@ exit 0
 		}
 		finally
 		{
+			_toolOpStarting = false;   // clear FIRST, so an (unlikely) throw from the cleanup below can't strand the guard
 			TryDeleteFile(scriptPath);
 			SetBusy(busy: false);
 		}
@@ -11567,6 +13013,61 @@ exit 0
 		string path = Path.Combine(Path.GetTempPath(), $"driveforge-dp-{Guid.NewGuid():N}.txt");
 		try { await File.WriteAllTextAsync(path, script, Encoding.ASCII); return await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(path)); }
 		finally { TryDeleteFile(path); }
+	}
+
+	// Largest unallocated extent on a disk, in bytes (0 if it can't be read) — the size an unsized `create partition
+	// primary` will actually consume. Used to size-check FAT32 against the real hole instead of the whole disk.
+	private async Task<long> LargestFreeExtentBytesAsync(int diskNumber)
+	{
+		try
+		{
+			string s = await RunProcessCaptureAsync("powershell.exe",
+				"-NoProfile -Command " + QuoteArgument($"(Get-Disk -Number {diskNumber} -ErrorAction SilentlyContinue).LargestFreeExtent"));
+			return long.TryParse(s.Trim(), out long v) ? v : 0;
+		}
+		catch { return 0; }
+	}
+
+	// Start offsets (bytes) of the partitions currently in a disk's live table. Used to tell a found VBR that IS a
+	// known partition from one that is genuinely lost (not in the table).
+	private async Task<List<long>> LivePartitionOffsetsAsync(int diskNumber)
+	{
+		var offsets = new List<long>();
+		try
+		{
+			string s = await RunProcessCaptureAsync("powershell.exe",
+				"-NoProfile -Command " + QuoteArgument($"Get-Partition -DiskNumber {diskNumber} -ErrorAction SilentlyContinue | ForEach-Object {{ $_.Offset }}"));
+			foreach (var line in (s ?? "").Split('\n'))
+				if (long.TryParse(line.Trim(), out long o) && o > 0) offsets.Add(o);
+		}
+		catch { }
+		return offsets;
+	}
+
+	// The physical disk number a drive letter currently lives on (-1 if it can't be read). Used to confirm a letter
+	// hasn't migrated to another disk before a disk-agnostic `select volume {letter}` delete.
+	private async Task<int> DiskNumberOfDriveLetterAsync(char letter)
+	{
+		try
+		{
+			string s = await RunProcessCaptureAsync("powershell.exe",
+				"-NoProfile -Command " + QuoteArgument($"(Get-Partition -DriveLetter {letter} -ErrorAction SilentlyContinue).DiskNumber"));
+			return int.TryParse(s.Trim(), out int n) ? n : -1;
+		}
+		catch { return -1; }
+	}
+
+	// Real size of a mounted volume, in bytes (0 if it can't be read). Used to tell whether a diskpart shrink/extend
+	// actually changed anything — diskpart exits 0 even when it declines the operation, and its text is localized.
+	private async Task<long> VolumeSizeBytesAsync(char letter)
+	{
+		try
+		{
+			string s = await RunProcessCaptureAsync("powershell.exe",
+				"-NoProfile -Command " + QuoteArgument($"(Get-Volume -DriveLetter {letter} -ErrorAction SilentlyContinue).Size"));
+			return long.TryParse(s.Trim(), out long v) ? v : 0;
+		}
+		catch { return 0; }
 	}
 
 	private bool GuardSystemDisk(DiskItem disk)
@@ -11588,27 +13089,32 @@ exit 0
 
 	private async void PartitionTool_Click(object sender, RoutedEventArgs e)
 	{
-		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		if (!(DiskBox.SelectedItem is DiskItem disk)) { MessageBox.Show(L("PtNoDisk"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		if (!IsAdministrator()) { MessageBox.Show(L("Mb045"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		int? a = ShowActionMenu(L("PtTitle"), string.Format(L("PtPrompt"), disk.Number),
-			new[] { L("PtResize"), L("MvPartOption"), L("PtCreate"), L("PtDelete"), L("PtQuickPart"), L("PtInit"), L("PtConvert"), L("PtCheck"), L("PtActive"), L("PtFindLost") },
-			new[] { 0xE9D9, 0xE90F, 0xE710, 0xE74D, 0xE777, 0xEDA2, 0xE72C, 0xE8FE, 0xE7C1, 0xE721 },
-			new[] { false, false, false, true, true, true, true, false, false, false }, 0);
-		if (a == null) return;
-		switch (a.Value)
+		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		_toolOpStarting = true;
+		try
 		{
-			case 0: await ResizePartitionFlow(disk); break;
-			case 1: await MovePartitionFlow(disk); break;
-			case 2: await CreatePartitionFlow(disk); break;
-			case 3: await DeletePartitionFlow(disk); break;
-			case 4: await QuickPartitionFlow(disk); break;
-			case 5: await InitializeDiskFlow(disk); break;
-			case 6: await ConvertPartStyleFlow(disk); break;
-			case 7: await CheckFsFlow(disk); break;
-			case 8: await SetActiveFlow(disk); break;
-			case 9: await FindLostPartitionsFlow(disk); break;
+			if (!(DiskBox.SelectedItem is DiskItem disk)) { MessageBox.Show(L("PtNoDisk"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+			if (!IsAdministrator()) { MessageBox.Show(L("Mb045"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+			int? a = ShowActionMenu(L("PtTitle"), string.Format(L("PtPrompt"), disk.Number),
+				new[] { L("PtResize"), L("MvPartOption"), L("PtCreate"), L("PtDelete"), L("PtQuickPart"), L("PtInit"), L("PtConvert"), L("PtCheck"), L("PtActive"), L("PtFindLost") },
+				new[] { 0xE9D9, 0xE90F, 0xE710, 0xE74D, 0xE777, 0xEDA2, 0xE72C, 0xE8FE, 0xE7C1, 0xE721 },
+				new[] { false, false, false, true, true, true, true, false, false, false }, 0);
+			if (a == null) return;
+			switch (a.Value)
+			{
+				case 0: await ResizePartitionFlow(disk); break;
+				case 1: await MovePartitionFlow(disk); break;
+				case 2: await CreatePartitionFlow(disk); break;
+				case 3: await DeletePartitionFlow(disk); break;
+				case 4: await QuickPartitionFlow(disk); break;
+				case 5: await InitializeDiskFlow(disk); break;
+				case 6: await ConvertPartStyleFlow(disk); break;
+				case 7: await CheckFsFlow(disk); break;
+				case 8: await SetActiveFlow(disk); break;
+				case 9: await FindLostPartitionsFlow(disk); break;
+			}
 		}
+		finally { _toolOpStarting = false; }
 	}
 
 	private async Task QuickPartitionFlow(DiskItem disk)
@@ -11621,12 +13127,31 @@ exit 0
 			new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
 		if (fsSel == null) return;
 		string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
+		// Windows' formatter cannot CREATE a FAT32 volume above 32 GB: `format fs=fat32` fails but diskpart STILL exits 0.
+		// This flow runs `clean` FIRST, so without this guard the disk is wiped and a partition is left RAW while
+		// PtQuickDone reports success. Guard the BIGGEST partition the script will actually create: partitions 1..n-1 get
+		// an explicit size=each, but the LAST one is emitted unsized, so it swallows the remainder (the 200 MB reserve +
+		// the division remainder) and is always larger than `each` — checking `each` would let it slip through.
+		long usableMb = disk.Size / (1024 * 1024) - 200;
+		long each = usableMb / n;
+		long lastMb = disk.Size / (1024 * 1024) - (n - 1) * each;
+		if (fs == "fat32" && lastMb > 32L * 1024)
+		{
+			MessageBox.Show(L("MbFat32TooBig"), L("PtQuickPart"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+			return;
+		}
+		// FAT32 has a MINIMUM too (Windows can't create one below ~32 MB), and that failure is silent in exactly the same
+		// way — diskpart exits 0 — so a tiny disk split several ways would be wiped by `clean` and left with RAW partitions
+		// reported as success. The generic PtTooSmall check below only requires 16 MB, so bound it here for FAT32.
+		if (fs == "fat32" && each < 33)
+		{
+			MessageBox.Show(string.Format(L("PtTooSmall"), n), L("PtQuickPart"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+			return;
+		}
 		if (!await ConfirmDestructive(disk, L("PtQuickPart"))) return;
 		string style = disk.Size > 2L * 1024 * 1024 * 1024 * 1024 || disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true ? "gpt" : "mbr";
 		var sb = new StringBuilder();
 		sb.Append($"select disk {disk.Number}\r\nclean\r\nconvert {style}\r\n");
-		long usableMb = disk.Size / (1024 * 1024) - 200;
-		long each = usableMb / n;
 		if (n > 1 && (usableMb <= 0 || each < 16)) // multiple partitions need an explicit size=; a too-small disk would yield an invalid diskpart script (after 'clean' already wiped it)
 		{
 			MessageBox.Show(string.Format(L("PtTooSmall"), n), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation);
@@ -11701,12 +13226,21 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, working);
+			long sizeBefore = await VolumeSizeBytesAsync(letter);   // baseline for the before/after check below
 			string outp = await RunDiskpartAsync(cmd);
 			SetToolOutput("diskpart resize\r\n\r\n" + outp);
 			Log($"Resize volume {letter}: ({(mode.Value == 1 ? "shrink" : "extend")}).");
 			await RefreshDisksAsync();
-			bool ok = true; // diskpart returned a zero exit (RunDiskpartAsync throws otherwise); don't parse the word "successfully", which is localized and never matches on the 16 non-English UI languages. The raw output is shown below regardless.
-			MessageBox.Show((ok ? string.Format(L("PtResizeDone"), letter) : L("PtResizeFailed")) + "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
+			// diskpart exits 0 even when it DECLINED the shrink/extend (not enough reclaimable space, no adjacent free
+			// space) or applied only part of it, and its result text is localized so it can't be parsed. The only
+			// locale-safe way to know whether anything actually changed is to compare the real volume size before/after —
+			// otherwise a no-op is reported as a green success and the user plans around space that was never freed.
+			long sizeAfter = await VolumeSizeBytesAsync(letter);
+			bool measured = sizeBefore > 0 && sizeAfter > 0;
+			bool ok = !measured || (mode.Value == 1 ? sizeAfter < sizeBefore : sizeAfter > sizeBefore);
+			string deltaNote = measured ? "\r\n\r\n" + FormatBytes(sizeBefore) + "  ->  " + FormatBytes(sizeAfter) : "";
+			Log($"Volume {letter}: {sizeBefore} -> {sizeAfter} bytes (measured={measured}, ok={ok}).");
+			MessageBox.Show((ok ? string.Format(L("PtResizeDone"), letter) : L("PtResizeFailed")) + deltaNote + "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
 				"DriveForge", MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrResize"), ex); }
@@ -11783,6 +13317,27 @@ exit 0
 		return true;
 	}
 
+	// Saves the disk's current 512-byte MBR (partition table + boot code) to the Desktop before a destructive raw move,
+	// so the original layout can be restored if the move is interrupted. Best-effort: returns the path, or null.
+	private string? SaveMbrBackup(int diskNumber)
+	{
+		try
+		{
+			byte[] mbr = new byte[512];
+			using (var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero))
+			{
+				if (h.IsInvalid) return null;
+				using var fs = new FileStream(h, FileAccess.Read);
+				ReadFull(fs, mbr, 512);
+			}
+			string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+				$"DriveForge-MBR-backup-Disk{diskNumber}-{DateTime.Now:yyyyMMdd-HHmmss}.bin");
+			File.WriteAllBytes(path, mbr);
+			return path;
+		}
+		catch { return null; }
+	}
+
 	private void UpdateMbrEntryStart(int diskNumber, int entryIndex, long newStartLBA)
 	{
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", 0xC0000000u, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
@@ -11821,7 +13376,11 @@ exit 0
 		long shift = mb * 2048; // MB -> 512-byte sectors
 		long total = disk.Size / 512;
 		long newStart = dir.Value == 0 ? p.StartLBA - shift : p.StartLBA + shift;
-		if (newStart < 2048 || newStart + p.Sectors > total) { MessageBox.Show(L("MvOutOfRange"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		// An MBR entry stores the start LBA in 32 bits and UpdateMbrEntryStart casts to uint, so a start (or end) beyond
+		// 2^32-1 sectors — reachable on a >2 TB disk that is still MBR-partitioned — would silently TRUNCATE and leave the
+		// entry pointing somewhere else entirely, losing the partition. Refuse anything the table cannot represent.
+		if (newStart < 2048 || newStart + p.Sectors > total || newStart + p.Sectors > 0xFFFFFFFFL)
+		{ MessageBox.Show(L("MvOutOfRange"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		foreach (var o in entries)
 		{
 			if (o.Index == p.Index) continue;
@@ -11831,11 +13390,27 @@ exit 0
 
 		if (MessageBox.Show(string.Format(L("MvConfirm"), pick.Value + 1, p.Fs + " " + FormatBytes(p.Sectors * 512L), FormatBytes(p.StartLBA * 512L), FormatBytes(newStart * 512L)),
 				L("MvTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+		// When the destination overlaps the partition's CURRENT location (any shift smaller than the partition), the copy
+		// rewrites the partition's own sectors as it goes. If it is then interrupted (I/O error, power loss, kill), the
+		// original data is already partly overwritten AND the table still points at it — there is nothing to roll back to.
+		// A non-overlapping move can be abandoned safely, so make this specific risk explicit before committing.
+		bool overlappingMove = newStart < p.StartLBA + p.Sectors && newStart + p.Sectors > p.StartLBA;
+		if (overlappingMove && MessageBox.Show(L("MvOverlapWarn"), L("MvTitle"),
+				MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // disks can renumber between refresh and click — confirm identity before moving raw sectors
+		// Keep a copy of the original 512-byte partition table before anything destructive: if the move is interrupted the
+		// table can at least be restored to describe the original layout while recovery tools work on the data.
+		string? mbrBackup = SaveMbrBackup(disk.Number);
+		if (mbrBackup != null) Log("Saved the original MBR partition table to: " + mbrBackup);
+		else Log("WARNING: could not save an MBR partition-table backup before the move.");
 
 		bool moved = false;
 		try
 		{
+			// Reset stopRequested like every other progress-driving flow: the flag is global and sticky, so a Stop
+			// pressed on ANY earlier operation would still be set here — and SetBusy(false) zeroes the bar when it is,
+			// leaving a SUCCESSFUL move announcing itself over an empty 0% bar.
+			stopRequested = false;
 			_progressFullRange = true;
 			SetBusy(busy: true, L("MvWorking"));
 			ProgressBar.Value = 0.0;
@@ -11850,6 +13425,11 @@ exit 0
 				return okCopy;
 			});
 			await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n");
+			// A partition move is deliberately NOT interruptible: abandoning it part-way leaves half-overwritten
+			// sectors with the table still pointing at them and nothing to roll back to. So a Stop pressed mid-move is
+			// ignored by design — but the flag stays set, and SetBusy(false) zeroes the bar when it is, which left a
+			// fully-completed move announcing "moved successfully" over an empty 0% bar. Say so, then clear it.
+			if (stopRequested) { Log("Stop was ignored: a partition move cannot be interrupted safely — it ran to completion."); stopRequested = false; }
 			ProgressBar.Value = 100.0;
 			SetBusy(busy: false);
 			await RefreshDisksAsync();
@@ -11988,6 +13568,44 @@ exit 0
 		try { fs.Flush(); FlushFileBuffers(h); } catch (Exception ex) { throw new IOException("GPT flush: " + ex.Message, ex); }
 	}
 
+	// Saves the disk's CURRENT (pre-move) GPT structures as separate named-by-LBA files, so a technician can
+	// manually restore them with a hex/disk editor if an interrupted move leaves the disk unreadable. Mirrors
+	// SaveMbrBackup's "best-effort disaster-recovery aid" role for the MBR move path.
+	private string? SaveGptBackup(int diskNumber, GptInfo g)
+	{
+		try
+		{
+			string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+				$"DriveForge-GPT-backup-Disk{diskNumber}-{DateTime.Now:yyyyMMdd-HHmmss}");
+			Directory.CreateDirectory(dir);
+			File.WriteAllBytes(Path.Combine(dir, "primary-header-LBA1.bin"), g.PrimaryHeader);
+			File.WriteAllBytes(Path.Combine(dir, $"primary-entries-LBA{g.PrimaryEntriesLBA}.bin"), g.Entries);
+			// ReadGpt never actually READS the on-disk backup header/entries (avoids ERROR_INVALID_FUNCTION some USB
+			// bridges throw on a buffered read at end-of-device) — g.BackupHeader is a clone of the primary with only
+			// MyLBA/AlternateLBA/PartitionEntryLBA patched, so its CRC fields are still the PRIMARY's (stale/wrong for
+			// this header). Fix the CRC on a COPY before saving — g.BackupHeader/g.Entries themselves must stay
+			// untouched here, since the actual move later calls FixGptHeaderCrc on THEM with the POST-move entries.
+			byte[] backupHeaderCopy = (byte[])g.BackupHeader.Clone();
+			FixGptHeaderCrc(backupHeaderCopy, g.Entries, (int)BitConverter.ToUInt32(backupHeaderCopy, 12));
+			File.WriteAllBytes(Path.Combine(dir, $"backup-header-LBA{g.BackupHeaderLBA}.bin"), backupHeaderCopy);
+			File.WriteAllBytes(Path.Combine(dir, $"backup-entries-LBA{g.BackupEntriesLBA}.bin"), g.Entries);
+			File.WriteAllText(Path.Combine(dir, "README.txt"),
+				"DriveForge GPT backup (pre-move)\r\n" +
+				$"Disk {diskNumber}, sector size {g.SectorSize} bytes.\r\n\r\n" +
+				"primary-header-LBA1.bin and primary-entries-*.bin: the EXACT bytes read from the disk before the move\r\n" +
+				"started.\r\n\r\n" +
+				"backup-header-*.bin and backup-entries-*.bin: this tool does not read the disk's actual backup GPT copy\r\n" +
+				"(some USB bridges error on that read) — these are instead a RECONSTRUCTED, CRC-valid mirror of the\r\n" +
+				"primary table, matching what a normal GPT write on this disk already assumes. If the disk's real backup\r\n" +
+				"copy had already diverged from the primary before the move, that difference is NOT preserved here.\r\n\r\n" +
+				"If the move was interrupted and the disk is now unreadable, a technician can write each file back to\r\n" +
+				"its named LBA with a disk/hex editor (or dd) to restore a self-consistent GPT table. Data sectors are\r\n" +
+				"NOT included here — only the partition table.\r\n");
+			return dir;
+		}
+		catch { return null; }
+	}
+
 	private async Task MoveGptFlow(DiskItem disk)
 	{
 		GptInfo g;
@@ -12034,11 +13652,25 @@ exit 0
 
 		if (MessageBox.Show(string.Format(L("MvConfirm"), pick.Value + 1, p.name + " " + FormatBytes(count * g.SectorSize), FormatBytes(p.first * g.SectorSize), FormatBytes(newFirst * g.SectorSize)),
 				L("MvTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+		// Same risk as the MBR move path: when the destination overlaps the partition's CURRENT sectors, the raw copy
+		// rewrites its own source as it goes, and an interruption leaves the data partly overwritten with the table
+		// still pointing at it — nothing to roll back to. Warn explicitly before committing, exactly like MBR does.
+		bool overlappingMove = newFirst <= p.last && newLast >= p.first;
+		if (overlappingMove && MessageBox.Show(L("MvOverlapWarn"), L("MvTitle"),
+				MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // disks can renumber between refresh and click — confirm identity before moving raw sectors
+		// Keep a copy of the original GPT table before anything destructive, same as the MBR move path.
+		string? gptBackup = SaveGptBackup(disk.Number, g);
+		if (gptBackup != null) Log("Saved the original GPT partition table to: " + gptBackup);
+		else Log("WARNING: could not save a GPT partition-table backup before the move.");
 
 		bool moved = false;
 		try
 		{
+			// Reset stopRequested like every other progress-driving flow: the flag is global and sticky, so a Stop
+			// pressed on ANY earlier operation would still be set here — and SetBusy(false) zeroes the bar when it is,
+			// leaving a SUCCESSFUL move announcing itself over an empty 0% bar.
+			stopRequested = false;
 			_progressFullRange = true;
 			SetBusy(busy: true, L("MvWorking"));
 			ProgressBar.Value = 0.0;
@@ -12062,6 +13694,9 @@ exit 0
 				return true;
 			});
 			await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n");
+			// See the MBR move: the copy is deliberately uninterruptible, so a mid-move Stop is ignored by design and
+			// must not leave a completed move showing a zeroed bar.
+			if (stopRequested) { Log("Stop was ignored: a partition move cannot be interrupted safely — it ran to completion."); stopRequested = false; }
 			ProgressBar.Value = 100.0; SetBusy(busy: false);
 			await RefreshDisksAsync();
 			Log($"Moved GPT partition #{pick.Value + 1} on Disk {disk.Number}: LBA {p.first} -> {newFirst}.");
@@ -12086,13 +13721,34 @@ exit 0
 		if (amt == null) return;
 		amt = amt.Trim();
 		string sizeClause;
+		long requestedMb = 0;
 		if (amt.Length == 0) sizeClause = "";
-		else if (long.TryParse(amt, out long mb) && mb > 0) sizeClause = $" size={mb}";
+		else if (long.TryParse(amt, out long mb) && mb > 0) { sizeClause = $" size={mb}"; requestedMb = mb; }
 		else { MessageBox.Show(L("PtBadAmount"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		int? fsSel = ShowActionMenu(L("PtCreate"), L("PtFsPrompt"), new[] { "NTFS", "exFAT", "FAT32" },
 			new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
 		if (fsSel == null) return;
 		string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
+		// Windows' formatter cannot CREATE a FAT32 volume above 32 GB: diskpart's `format fs=fat32` fails but STILL exits 0,
+		// so this flow would report PtCreateDone on a RAW, unusable partition. Reject up front, like FormatDrive_Click does.
+		// With no explicit size the partition fills the largest unallocated EXTENT, so ask Windows how big that really is —
+		// using the whole-disk size instead would wrongly refuse a legitimate 8 GB FAT32 hole on a 500 GB drive. If the
+		// query fails we let it through: unlike QuickPartition this flow issues no `clean`, so the worst case is the new
+		// partition alone being left RAW, with no pre-existing data destroyed.
+		if (fs == "fat32")
+		{
+			long fat32Mb = requestedMb;
+			if (fat32Mb == 0)
+			{
+				long freeBytes = await LargestFreeExtentBytesAsync(disk.Number);
+				fat32Mb = freeBytes > 0 ? freeBytes / (1024 * 1024) : 0;
+			}
+			if (fat32Mb > 32L * 1024)
+			{
+				MessageBox.Show(L("MbFat32TooBig"), L("PtCreate"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+				return;
+			}
+		}
 		if (MessageBox.Show(string.Format(L("PtCreateConfirm"), disk.Number), L("PtCreate"), MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // disks can renumber between the scan and the click — re-confirm identity before create+format
 		try
@@ -12121,6 +13777,16 @@ exit 0
 		else { int? pick = ShowChooserDialog(L("PtDelete"), L("PtPickVolume"), letters.Select(l => l + ":").ToArray(), 0); if (pick == null) return; letter = letters[pick.Value]; }
 		if (MessageBox.Show(string.Format(L("PtDeleteConfirm"), letter), L("PtDelete"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // confirm this is still the same physical disk before deleting a volume on it
+		// `select volume {letter}` is disk-AGNOSTIC — it deletes whatever volume currently holds that letter on ANY disk.
+		// The identity guard above only checks the physical DISK, so if the letter has migrated to a volume on a different
+		// disk since the scan (USB reshuffle, manual reassignment), this would delete the WRONG volume while the guard
+		// still passes. Confirm the letter still lives on THIS disk right before deleting. (Sibling flows scope with
+		// `select disk N`; delete can't select a partition by letter, so verify instead.)
+		if (await DiskNumberOfDriveLetterAsync(letter) != disk.Number)
+		{
+			MessageBox.Show(string.Format(L("PtDeleteMoved"), letter), L("PtDelete"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+			return;
+		}
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtDelete")));
@@ -12191,7 +13857,11 @@ exit 0
 			string outp = r.Output ?? "";
 			SetToolOutput($"chkdsk {letter}: /scan\r\n\r\n" + outp);
 			string tail = outp.Length > 700 ? outp.Substring(outp.Length - 700) : outp;
-			MessageBox.Show(string.Format(L("PtCheckDone"), letter) + "\r\n\r\n" + tail, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			// chkdsk /scan exits non-zero when it finds problems (0 = clean). Showing the same "done" + Information icon
+			// regardless made a volume WITH filesystem errors look identical to a clean one.
+			bool clean = r.ExitCode == 0;
+			MessageBox.Show(string.Format(L(clean ? "PtCheckDone" : "PtCheckErrors"), letter) + "\r\n\r\n" + tail,
+				"DriveForge", MessageBoxButton.OK, clean ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrCheck"), ex); }
 		finally { SetBusy(busy: false); }
@@ -12227,14 +13897,19 @@ exit 0
 			ProgressBar.Value = 0.0;
 			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
-			var mounted = new HashSet<char>(disk.DriveLetters ?? Array.Empty<char>());
 			var found = await Task.Run(() => ScanPhysicalForPartitions(disk.Number, disk.Size, p => Dispatcher.Invoke(() => ProgressBar.Value = p)));
 			ProgressBar.Value = 100.0;
+			// Mark which found VBRs correspond to a partition that IS in the live partition table (a normal, known
+			// partition) vs one that is NOT (genuinely possibly-lost). The old code left this detection DEAD (an unused
+			// HashSet) and labelled every found partition by offset==0 alone, so healthy mounted partitions were all
+			// shown as "possibly lost". Match by start offset (within 1 MiB, the scan's step).
+			var liveOffsets = await LivePartitionOffsetsAsync(disk.Number);
+			foreach (var p in found) p.Mounted = liveOffsets.Any(o => Math.Abs(o - p.Offset) < 1048576);
 			SetBusy(busy: false);
 			if (found.Count == 0) { MessageBox.Show(string.Format(L("PtLostNone"), disk.Number), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information); return; }
 			var sb = new StringBuilder();
 			foreach (var p in found)
-				sb.Append($"• {p.Fs} @ {FormatBytes(p.Offset)} — {FormatBytes(p.Bytes)}{(string.IsNullOrEmpty(p.Label) ? "" : " — \"" + p.Label + "\"")} — {(p.Offset == 0 ? L("PtLostMounted") : L("PtLostUnmounted"))}\r\n");
+				sb.Append($"• {p.Fs} @ {FormatBytes(p.Offset)} — {FormatBytes(p.Bytes)}{(string.IsNullOrEmpty(p.Label) ? "" : " — \"" + p.Label + "\"")} — {(p.Mounted ? L("PtLostKnown") : L("PtLostUnmounted"))}\r\n");
 			SetToolOutput("Find lost partitions — Disk " + disk.Number + "\r\n\r\n" + sb);
 			MessageBox.Show(string.Format(L("PtLostFound"), found.Count, disk.Number) + "\r\n\r\n" + sb + "\r\n" + L("PtLostHint"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
 		}
@@ -12326,11 +14001,29 @@ exit 0
 			var d2 = disks.FirstOrDefault(x => x.Number == disk.Number);
 			char letter = d2?.DriveLetters?.FirstOrDefault() ?? '\0';
 			string outp = "";
+			bool reTrimRan = false;
 			if (letter != '\0')
+			{
 				outp = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument($"Optimize-Volume -DriveLetter {letter} -ReTrim -Verbose"));
+				reTrimRan = true;
+			}
 			SetToolOutput("SSD erase (clean + quick format + ReTrim)\r\n\r\n" + outp);
-			Log($"SSD erase (TRIM) on Disk {disk.Number}.");
-			MessageBox.Show(string.Format(L("SsdDone"), disk.Number), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			// Only claim the controller actually DISCARDED the old blocks when this is really a TRIM-capable SSD AND ReTrim
+			// ran AND it is on an INTERNAL bus. DetectWipeMedia keys off the model name ("SSD"/"NVMe") with no bus check, so
+			// an EXTERNAL USB/FireWire/SD/MMC-bridged SSD (e.g. a portable "T7 SSD") classifies as Ssd and SKIPS the
+			// SsdNotSsdWarn gate — but its bridge may not pass TRIM through, leaving the data PHYSICALLY PRESENT after the
+			// quick-format. The codebase already refuses to trust USB for SSD inference; apply the same caution here. On a
+			// bridge bus, on non-SSD media, or when no volume letter was assigned so ReTrim never ran, fall through to the
+			// honest SsdDoneNoTrim warning that steers the user to the full-overwrite Wipe.
+			string bus = disk.BusType ?? "";
+			bool bridgeBus = bus.Contains("USB", StringComparison.OrdinalIgnoreCase)
+				|| bus.Contains("1394", StringComparison.OrdinalIgnoreCase)
+				|| bus.Equals("SD", StringComparison.OrdinalIgnoreCase)
+				|| bus.Equals("MMC", StringComparison.OrdinalIgnoreCase);
+			bool trimEffective = reTrimRan && DetectWipeMedia(disk) == WipeMedia.Ssd && !bridgeBus;
+			Log($"SSD erase on Disk {disk.Number}: ReTrim ran={reTrimRan}, media={DetectWipeMedia(disk)}, bus={bus}, bridge={bridgeBus}, discard-claimed={trimEffective}.");
+			MessageBox.Show(string.Format(L(trimEffective ? "SsdDone" : "SsdDoneNoTrim"), disk.Number),
+				"DriveForge", MessageBoxButton.OK, trimEffective ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrSsd"), ex); }
 		finally { SetBusy(busy: false); }
@@ -12398,8 +14091,164 @@ exit 0
 		Log(text);
 	}
 
+	// ---------- Keep the machine awake while an operation is running ----------
+	// A wipe, clone, surface scan or backup can run for hours. If Windows idles into sleep or hibernation half-way
+	// through, the operation dies with a disk left in an indeterminate state — a partially overwritten drive, a
+	// half-written clone. So hold a power request for as long as ANY operation is in flight.
+	//
+	// Why PowerCreateRequest and not the older SetThreadExecutionState: the legacy call is per-THREAD (it must be
+	// cleared from the exact thread that set it, and is dropped when that thread ends) and the OS keeps no count for
+	// it, so overlapping/unbalanced calls have to be hand-tracked. A power request is a process-wide handle that any
+	// thread can drive, the kernel refcounts it, and it carries a reason string that `powercfg /requests` prints — so
+	// an admin asking "why won't this PC sleep?" gets a direct answer instead of a bare exe path.
+	//
+	// SystemRequired holds the system idle timer, which gates idle-sleep AND idle-hibernate — one flag covers both.
+	// ExecutionRequired additionally stops Modern Standby from suspending the process once the screen goes dark.
+	// DisplayRequired is deliberately NOT taken: the screen is allowed to turn off, only sleep is held off.
+	//
+	// Two things this CANNOT do, by OS design — do not promise them: it does not block a sleep the user ASKS for
+	// (lid close, power button, Start > Sleep), and on a Modern Standby laptop running on BATTERY Windows terminates
+	// the request 5 minutes after the sleep timeout expires regardless. Long jobs belong on mains power.
+	private const uint PowerRequestContextVersion = 0;
+	private const uint PowerRequestContextSimpleString = 0x1;
+	private const int PowerRequestSystemRequired = 1;
+	private const int PowerRequestExecutionRequired = 3;   // Windows 8+; ignored gracefully if refused
+
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	private struct ReasonContext
+	{
+		public uint Version;
+		public uint Flags;
+		[MarshalAs(UnmanagedType.LPWStr)]
+		public string SimpleReasonString;   // overlays the first member of the REASON_CONTEXT union
+	}
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern IntPtr PowerCreateRequest(ref ReasonContext context);
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool PowerSetRequest(IntPtr powerRequest, int requestType);
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool PowerClearRequest(IntPtr powerRequest, int requestType);
+
+	private IntPtr _powerRequest = IntPtr.Zero;   // process-wide request handle, created on first use
+	private bool _sleepBlocked;                   // mirrors whether the requests below are currently held
+	private bool _powerSysHeld, _powerExecHeld;   // which request types actually took, so teardown clears only those
+	// UNBIASED time, not wall-clock and not tick count. This feature cannot block a sleep the USER asks for, so a hold
+	// genuinely can span a suspend — and both DateTime.UtcNow AND Environment.TickCount64 would count the hours the
+	// machine spent asleep as time it was "kept awake", which is the opposite of the truth. (On .NET 10
+	// Environment.TickCount64 is GetTickCount64, which IS biased; it only becomes unbiased on Windows in .NET 11.)
+	// QueryUnbiasedInterruptTime excludes sleep by definition. Units are 100 ns — one TimeSpan tick.
+	[DllImport("kernel32.dll")]
+	private static extern bool QueryUnbiasedInterruptTime(out ulong unbiasedTime);
+
+	private static long UnbiasedTicksNow()
+	{
+		if (QueryUnbiasedInterruptTime(out ulong t)) return (long)t;
+		return Environment.TickCount64 * TimeSpan.TicksPerMillisecond;   // same units, biased — only if the call fails
+	}
+
+	private long _sleepBlockStartTicks;           // unbiased tick at the start of the CURRENT hold segment
+	private long _sleepHeldTicks;                 // segments already banked, so a re-assert across a resume still totals correctly
+	private bool _sleepReasserting;               // set by the resume path: keep the running total instead of restarting it
+	private bool _powerUnavailableLogged;         // the "cannot keep this PC awake" note is worth saying once, not per operation
+
+	// Re-derives the desired state from the busy flags instead of counting set/clear calls. That is deliberate:
+	// SetBusy's true/false calls are NOT balanced across the app (the VHDX export re-asserts busy five times with one
+	// matching release; the clone and several other flows release twice), so any counter would either stick above
+	// zero and block sleep forever, or underflow and release mid-operation. Re-evaluating three booleans is immune to
+	// both, and makes every redundant call a no-op.
+	private void UpdateSleepBlock()
+	{
+		bool keepAwake = isBusy || _cleanBusy || _analyzerBusy;
+		if (keepAwake == _sleepBlocked) return;
+		if (keepAwake)
+		{
+			IntPtr h = EnsurePowerRequest();
+			// Both failure modes report ONCE per session, not per operation: unreported, the feature would be silently
+			// off forever; reported every time, a single affected machine gets one line per disk refresh, per USB
+			// plug/unplug and per health read — which is the log-drowning the release-side threshold exists to avoid.
+			if (h == IntPtr.Zero)
+			{
+				NotePowerRequestUnavailable("Windows would not create the keep-awake request");
+				return;   // leave _sleepBlocked false so the next operation retries
+			}
+			_powerSysHeld = PowerSetRequest(h, PowerRequestSystemRequired);
+			_powerExecHeld = PowerSetRequest(h, PowerRequestExecutionRequired);
+			if (!_powerSysHeld && !_powerExecHeld)
+			{
+				// An administrator can neutralise power requests (powercfg /requestsoverride). Never fail the
+				// operation over it — just say so, so a sleep mid-wipe is not a mystery afterwards.
+				NotePowerRequestUnavailable("Windows refused the keep-awake request");
+				return;
+			}
+			_sleepBlocked = true;
+			// Do NOT announce the hold here. Every trivial operation transitions this — a disk refresh, a health
+			// read, each USB plug/unplug — so logging on acquire buried the log in pairs of lines, starting with a
+			// pair at startup before the user had done anything, which reads like a bug. Report it on release
+			// instead, and only when the hold actually lasted long enough to have mattered.
+			if (!_sleepReasserting) _sleepHeldTicks = 0;   // a fresh hold starts the total over; a resume re-assert continues it
+			_sleepBlockStartTicks = UnbiasedTicksNow();
+		}
+		else
+		{
+			ReleasePowerRequest();
+			_sleepBlocked = false;
+			TimeSpan held = TimeSpan.FromTicks(Math.Max(0, _sleepHeldTicks + (UnbiasedTicksNow() - _sleepBlockStartTicks)));
+			_sleepHeldTicks = 0;
+			if (held >= TimeSpan.FromMinutes(1))
+				Log($"Kept this PC awake for {FormatDuration(held)} while the operation ran; normal sleep behaviour is restored.");
+		}
+	}
+
+	private void NotePowerRequestUnavailable(string what)
+	{
+		if (_powerUnavailableLogged) return;
+		_powerUnavailableLogged = true;
+		Log($"Note: {what} — this PC may still go to sleep during a long operation. Check `powercfg /requests` from an elevated prompt.");
+	}
+
+	private IntPtr EnsurePowerRequest()
+	{
+		if (_powerRequest != IntPtr.Zero) return _powerRequest;
+		try
+		{
+			ReasonContext ctx = new ReasonContext
+			{
+				Version = PowerRequestContextVersion,
+				Flags = PowerRequestContextSimpleString,
+				SimpleReasonString = "DriveForge: a disk operation is running"
+			};
+			IntPtr h = PowerCreateRequest(ref ctx);
+			// Failure is reported as INVALID_HANDLE_VALUE (-1), NOT a null handle.
+			if (h == IntPtr.Zero || h == new IntPtr(-1)) return IntPtr.Zero;
+			_powerRequest = h;
+		}
+		catch { return IntPtr.Zero; }   // unsupported OS — degrade to "the PC may sleep", never break the operation
+		return _powerRequest;
+	}
+
+	private void ReleasePowerRequest()
+	{
+		if (_powerRequest == IntPtr.Zero) return;
+		try
+		{
+			if (_powerExecHeld) { PowerClearRequest(_powerRequest, PowerRequestExecutionRequired); _powerExecHeld = false; }
+			if (_powerSysHeld) { PowerClearRequest(_powerRequest, PowerRequestSystemRequired); _powerSysHeld = false; }
+		}
+		catch { }
+	}
+
+	// True only while a disk refresh is the thing holding the busy state. Anyone else raising busy takes ownership
+	// from it, so a slow refresh cannot hand back a busy state that now belongs to a real operation.
+	private bool _refreshOwnsBusy;
+	private long _diskScanSeq;    // ticket handed to each disk scan
+	private long _diskListScan;   // ticket of the scan whose results the disk lists currently hold
+	private long _refreshBusyScan;   // ticket of the scan that holds busy, so only IT can hand the state back
+	private int _silentRescanRetries;   // bounds the auto-retry after a failed device-change rescan
+
 	private void SetBusy(bool busy, string? status = null)
 	{
+		if (busy) _refreshOwnsBusy = false;   // a real operation is taking over (RefreshDisksAsync re-claims after its own call)
 		isBusy = busy;
 		StartButton.IsEnabled = !busy;
 		CreateKitButton.IsEnabled = !busy;
@@ -12417,6 +14266,16 @@ exit 0
 			PauseButton.Content = L("BtnPause");
 			ToolPauseButton.Content = L("BtnPause");
 			activeProcess = null;
+			// A user Stop aborts the operation partway through — leave the bar at its last (partial) percentage looked
+			// stuck/broken for every subsequent idle moment (only a handful of handlers reset it themselves). A
+			// successful/failed-but-not-stopped completion is NOT touched here: several handlers deliberately set the
+			// bar to 100% and call SetBusy(false) BEFORE showing their "done" dialog, and resetting it here would make
+			// that 100% flash back to 0 before the user ever sees it.
+			// Reset the WHOLE row, not just the bar. Several flows pin `progressDoneGiB = progressTotalGiB`
+			// unconditionally on the way out — including after a Stop — so the stats line was left reading
+			// "Progress: 100.0% (476.9 / 476.9 GiB)" next to an empty bar and a "0%" label: three widgets
+			// contradicting each other while the dialog said the disk was only partially processed.
+			if (stopRequested) ResetProgressWidgets();
 		}
 		if (!string.IsNullOrWhiteSpace(status))
 		{
@@ -12427,6 +14286,7 @@ exit 0
 			// Re-apply the readiness gate so Start stays disabled if prerequisites are still missing.
 			UpdateStartReadiness();
 		}
+		UpdateSleepBlock();   // hold off / release sleep to match the new busy state
 	}
 
 	private async Task RunProcessAsync(string fileName, string arguments, bool allowFailure = false)
@@ -12789,6 +14649,31 @@ exit 0
 		return unit.Equals("MiB", StringComparison.OrdinalIgnoreCase) ? number / 1024.0 : number;
 	}
 
+	// "hh\:mm\:ss" renders the hours-WITHIN-THE-DAY component, not the total: past 24 h it silently wraps, so a
+	// 29-hour ETA printed as "05:07:38" and the Elapsed clock reset to zero once a day. Multi-pass wipes reach that
+	// easily (a 3-pass wipe of a 1 TB drive over USB 2.0 is well over a day; Gutmann's 35 passes far more), so show
+	// the day count as soon as there is one.
+	private static string FormatDuration(TimeSpan t)
+	{
+		if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+		return t.Days > 0 ? t.ToString(@"d\.hh\:mm\:ss") : t.ToString(@"hh\:mm\:ss");
+	}
+
+	// Return the WHOLE progress row to a clean idle state. Several flows used to zero ProgressBar.Value alone, which
+	// left the big "NN%" label and the stats line frozen on whatever the last timer tick sampled — an empty bar
+	// sitting next to "86%" and "Progress: 85.7% …" long after the operation had finished.
+	private void ResetProgressWidgets()
+	{
+		ProgressBar.IsIndeterminate = false;
+		ProgressBar.Value = 0.0;
+		if (ProgressPercentText != null) ProgressPercentText.Text = "0%";
+		if (ProgressStatsText != null)
+			ProgressStatsText.Text = string.Format(L("ProgStats"), "0.0", "", FormatDuration(operationStopwatch.Elapsed), "--:--:--");
+		// Clear the Windows taskbar overlay too. SetBusy normally owns it, but the two analyzer flows flip `isBusy`
+		// directly instead of calling SetBusy, so their taskbar bar kept scrolling after the scan had finished.
+		if (TaskbarInfo != null) TaskbarInfo.ProgressState = System.Windows.Shell.TaskbarItemProgressState.None;
+	}
+
 	private void UpdateProgressStats()
 	{
 		TimeSpan elapsed = operationStopwatch.Elapsed;
@@ -12796,14 +14681,48 @@ exit 0
 		// Elapsed clock with "—%" instead of a misleading fixed percentage, and skip the byte/ETA maths.
 		if (ProgressBar.IsIndeterminate)
 		{
-			ProgressStatsText.Text = string.Format(L("ProgStats"), "—", "", elapsed.ToString(@"hh\:mm\:ss"), "--:--:--");
+			ProgressStatsText.Text = string.Format(L("ProgStats"), "—", "", FormatDuration(elapsed), "--:--:--");
 			ProgressPercentText.Text = "";
 			if (TaskbarInfo != null)
 				TaskbarInfo.ProgressState = isBusy ? System.Windows.Shell.TaskbarItemProgressState.Indeterminate : System.Windows.Shell.TaskbarItemProgressState.None;
 			return;
 		}
-		double percent = Math.Max(0.0, Math.Min(100.0, ProgressBar.Value));
 		double currentGiB = progressDoneGiB;
+		// Snapshot the total BEFORE the block below, which may inflate it by 12%. The ETA must be computed against
+		// the total as it stood on entry: at a completion call (the caller has just pinned done = total) inflating
+		// first would make `progressTotalGiB > currentGiB` true again and quote a remaining time — several minutes
+		// of phantom work — for an operation that has already finished.
+		double totalBeforeBar = progressTotalGiB;
+
+		// Drive the ProgressBar from byte progress when a data copy is active.
+		// Maps 0–100% data fraction to the 40%–82% bar band (pre/post phases use 0–40 and 82–100).
+		// Only advances the bar, never retreats, so pre-copy phase values are not reset.
+		// Threshold of 0.3 GiB: a freshly-formatted NTFS target already reports ~0.1 GiB used (MFT/metadata),
+		// which is NOT copied data. Don't jump the bar to the 40% write-band until real writing has begun.
+		// MUST run BEFORE `percent` is read below: `percent` (and therefore the "N%" label, the stats line and
+		// the taskbar) is derived from ProgressBar.Value, so computing it first left every one of them showing
+		// the PREVIOUS tick's value. Invisible during a long operation that ticks every ~500 ms, but an op that
+		// finishes inside a single tick (e.g. a Quick wipe: bar jumps from the 2% prep stage straight to done)
+		// left the label frozen at the stale pre-jump percentage while the bar itself was full.
+		if (currentGiB > 0.3 && progressTotalGiB > 0.5 && isBusy)
+		{
+			// Expand total estimate if actuals exceed projection (VSS/hardlink inflation) — but NOT for a fixed-total
+			// op like a full-disk deep scan, where inflating would freeze the bar near 97%.
+			// `currentGiB < progressTotalGiB` distinguishes mid-copy from COMPLETION. Mid-copy the ceiling always stays
+			// ahead (it is pushed to current*1.12 from 97% on), so `current == total` is only ever reached when a
+			// handler deliberately pins `progressDoneGiB = progressTotalGiB` to say "finished". Inflating there
+			// permanently corrupted the field — the bar could not reach 100%, and any SECOND UpdateProgressStats call
+			// (StartButton's finally, backup's own repaint) then read the already-inflated total and rendered a
+			// completed clone as "100.0% (120.0 / 134.4 GiB)".
+			if (!_progressFixedTotal && currentGiB >= progressTotalGiB * 0.97 && currentGiB < progressTotalGiB)
+				progressTotalGiB = currentGiB * 1.12; // push ceiling 12% ahead of current position
+			double frac = Math.Min(1.0, currentGiB / progressTotalGiB);
+			double barTarget = _progressFullRange ? frac * 100.0 : 40.0 + frac * 42.0;
+			if (barTarget > ProgressBar.Value)
+				ProgressBar.Value = barTarget;
+		}
+
+		double percent = Math.Max(0.0, Math.Min(100.0, ProgressBar.Value));
 
 		// Sliding-window speed: push current sample, discard samples older than SpeedWindowSeconds,
 		// then derive MB/s from (newest - oldest) in the surviving window.
@@ -12827,37 +14746,26 @@ exit 0
 		progressPrevGiB = currentGiB;
 
 		string remaining = "--:--:--";
-		if (progressSpeedMb > 0.5 && progressTotalGiB > currentGiB)
+		// `percent < 99.95`: a full bar means the operation is over, so nothing remains. Some flows pin the bar to 100
+		// WITHOUT pinning done = total (Create-USB sizes its total as used x 1.25), and the speed sample never decays,
+		// so the completed run advertised a couple more minutes of work beside its "your USB is ready" dialog.
+		if (progressSpeedMb > 0.5 && totalBeforeBar > currentGiB && percent < 99.95)
 		{
-			double remainingSeconds = (progressTotalGiB - currentGiB) * 1024.0 / progressSpeedMb;
-			remaining = TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)).ToString(@"hh\:mm\:ss");
+			double remainingSeconds = (totalBeforeBar - currentGiB) * 1024.0 / progressSpeedMb;
+			remaining = FormatDuration(TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)));
 		}
 		else if (elapsed.TotalSeconds > 20.0 && percent > 1.0 && percent < 99.0)
 		{
 			double remainingSeconds = elapsed.TotalSeconds * (100.0 - percent) / percent;
-			remaining = TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)).ToString(@"hh\:mm\:ss");
+			remaining = FormatDuration(TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)));
 		}
 
-		// Drive the ProgressBar from byte progress when a data copy is active.
-		// Maps 0–100% data fraction to the 40%–82% bar band (pre/post phases use 0–40 and 82–100).
-		// Only advances the bar, never retreats, so pre-copy phase values are not reset.
-		// Threshold of 0.3 GiB: a freshly-formatted NTFS target already reports ~0.1 GiB used (MFT/metadata),
-		// which is NOT copied data. Don't jump the bar to the 40% write-band until real writing has begun.
-		if (currentGiB > 0.3 && progressTotalGiB > 0.5 && isBusy)
-		{
-			// Expand total estimate if actuals exceed projection (VSS/hardlink inflation) — but NOT for a fixed-total
-			// op like a full-disk deep scan, where inflating would freeze the bar near 97%.
-			if (!_progressFixedTotal && currentGiB >= progressTotalGiB * 0.97)
-				progressTotalGiB = currentGiB * 1.12; // push ceiling 12% ahead of current position
-			double frac = Math.Min(1.0, currentGiB / progressTotalGiB);
-			double barTarget = _progressFullRange ? frac * 100.0 : 40.0 + frac * 42.0;
-			if (barTarget > ProgressBar.Value)
-				ProgressBar.Value = barTarget;
-		}
-
-		// Show "X.X / Y.Y GiB" when a data copy is active — gives concrete progress context
-		string sizeInfo = progressTotalGiB > 0.5 && currentGiB > 0.3
-			? $" ({currentGiB:F1} / {progressTotalGiB:F1} GiB)"
+		// Show "X.X / Y.Y GiB" when a data copy is active — gives concrete progress context.
+		// Uses the pre-inflation snapshot, like the ETA: on a completion call (done pinned to total) the block above
+		// would otherwise have just pushed the ceiling 12% ahead, so every successful clone/backup/export ended on a
+		// line like "100.0% (120.0 / 134.4 GiB)" — a total larger than anything that was ever copied.
+		string sizeInfo = totalBeforeBar > 0.5 && currentGiB > 0.3
+			? $" ({currentGiB:F1} / {totalBeforeBar:F1} GiB)"
 			: string.Empty;
 
 		// Show GB/s for fast drives (NVMe, USB4), plain MB/s otherwise
@@ -12867,7 +14775,7 @@ exit 0
 				? $"{progressSpeedMb:F0} MB/s"
 				: "--";
 
-		ProgressStatsText.Text = string.Format(L("ProgStats"), percent.ToString("F1"), sizeInfo, elapsed.ToString(@"hh\:mm\:ss"), remaining);
+		ProgressStatsText.Text = string.Format(L("ProgStats"), percent.ToString("F1"), sizeInfo, FormatDuration(elapsed), remaining);
 		ProgressPercentText.Text = $"{percent:F0}%";
 
 		// Mirror progress onto the Windows taskbar icon (green bar, like a file copy).
@@ -13000,6 +14908,16 @@ exit 0
 
 	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 	private static extern SafeFileHandle CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+	// FILE_FLAG_NO_BUFFERING: reads bypass the OS/filesystem cache and hit the actual media. A verify MUST use this, or a
+	// counterfeit/fake-capacity or failing drive whose just-written bytes are still in RAM would falsely pass. It requires
+	// the file offset, the read length AND the buffer address to all be sector-aligned; callers align to 4096 (a multiple
+	// of both 512-byte and 4Kn sectors).
+	private const uint FileFlagNoBuffering = 0x20000000;
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool ReadFile(SafeFileHandle hFile, IntPtr lpBuffer, uint nNumberOfBytesToRead, out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool SetFilePointerEx(SafeFileHandle hFile, long liDistanceToMove, out long lpNewFilePointer, uint dwMoveMethod);
 
 	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 	private static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
@@ -13213,11 +15131,13 @@ exit 0
 	{
 		try
 		{
-			string fallbackDir = bootLetter + ":\\EFI\\Boot";
-			string fallback = Path.Combine(fallbackDir, "bootx64.efi");
-			if (File.Exists(fallback)) return true;
 			string source = bootLetter + ":\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
 			if (!File.Exists(source)) return false;
+			string fallbackDir = bootLetter + ":\\EFI\\Boot";
+			// Name the removable fallback after the image's REAL architecture: a 32-bit (x86) or ARM64 Windows dropped
+			// as bootx64.efi would never UEFI-boot. bcdboot itself writes bootia32.efi / bootaa64.efi for those.
+			string fallback = Path.Combine(fallbackDir, UefiFallbackNameFor(source));
+			if (File.Exists(fallback)) return true;
 			Directory.CreateDirectory(fallbackDir);
 			File.Copy(source, fallback, overwrite: true);
 			return File.Exists(fallback);
@@ -13228,11 +15148,47 @@ exit 0
 		}
 	}
 
+	// Returns the UEFI removable-media fallback filename (\EFI\Boot\boot*.efi) for the architecture of an EFI binary,
+	// read from its PE header machine field. Defaults to bootx64.efi on any read error (the overwhelmingly common case).
+	private static string UefiFallbackNameFor(string efiPath) => ReadPeMachine(efiPath) switch
+	{
+		0x014c => "bootia32.efi",   // IMAGE_FILE_MACHINE_I386 (x86)
+		0xAA64 => "bootaa64.efi",   // IMAGE_FILE_MACHINE_ARM64
+		_ => "bootx64.efi",          // 0x8664 (x64), 0 (read error) and anything unexpected
+	};
+
+	// Windows Setup only applies an unattend component whose processorArchitecture matches the applied image, so derive
+	// it from winload.efi's PE machine field. Defaults to amd64 on any read error (the overwhelmingly common case).
+	private static string UnattendArchForWindows(string windowsFolder) => ReadPeMachine(Path.Combine(windowsFolder, "System32", "winload.efi")) switch
+	{
+		0x014c => "x86",
+		0xAA64 => "arm64",
+		_ => "amd64",
+	};
+
+	// Reads the COFF machine field from a PE binary's header (e_lfanew -> PE sig -> machine). Returns 0 on any error.
+	private static ushort ReadPeMachine(string path)
+	{
+		try
+		{
+			using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+			using var br = new BinaryReader(fs);
+			if (fs.Length < 0x40) return 0;
+			fs.Seek(0x3C, SeekOrigin.Begin);            // e_lfanew: offset to the PE signature
+			int peOff = br.ReadInt32();
+			if (peOff <= 0 || (long)peOff + 6 > fs.Length) return 0;
+			fs.Seek(peOff, SeekOrigin.Begin);
+			if (br.ReadUInt32() != 0x00004550) return 0; // "PE\0\0"
+			return br.ReadUInt16();
+		}
+		catch { return 0; }
+	}
+
 	// First-boot answer file (a standard unattended-setup approach). For a faithful clone the OS is already
 	// past OOBE, so this is a safety net: it skips OOBE if it ever runs (e.g. a reset profile), and during
 	// any specialize pass it re-asserts the WinToGo essentials — keep host disks offline (SanPolicy=4) and
 	// preserve all device installs so moving the stick between PCs does not strip drivers for absent devices.
-	private static string BuildPortableUnattendXml(string localAccountName = "", string localAccountPassword = "")
+	private static string BuildPortableUnattendXml(string localAccountName = "", string localAccountPassword = "", string arch = "amd64")
 	{
 		// When a local account is requested, create it in oobeSystem so OOBE never demands a Microsoft account
 		// (the reliable bypass on 24H2/25H2). The password is encoded the way Windows Setup expects
@@ -13269,16 +15225,16 @@ exit 0
 		return "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n" +
 			"<unattend xmlns=\"urn:schemas-microsoft-com:unattend\">\r\n" +
 			"  <settings pass=\"specialize\">\r\n" +
-			"    <component name=\"Microsoft-Windows-PartitionManager\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\r\n" +
+			"    <component name=\"Microsoft-Windows-PartitionManager\" processorArchitecture=\"" + arch + "\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\r\n" +
 			"      <SanPolicy>4</SanPolicy>\r\n" +
 			"    </component>\r\n" +
-			"    <component name=\"Microsoft-Windows-PnpSysprep\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\r\n" +
+			"    <component name=\"Microsoft-Windows-PnpSysprep\" processorArchitecture=\"" + arch + "\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\r\n" +
 			"      <PersistAllDeviceInstalls>true</PersistAllDeviceInstalls>\r\n" +
 			"      <DoNotCleanUpNonPresentDevices>true</DoNotCleanUpNonPresentDevices>\r\n" +
 			"    </component>\r\n" +
 			"  </settings>\r\n" +
 			"  <settings pass=\"oobeSystem\">\r\n" +
-			"    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\r\n" +
+			"    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"" + arch + "\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\r\n" +
 			accountBlock +
 			"      <OOBE>\r\n" +
 			"        <HideEULAPage>true</HideEULAPage>\r\n" +
@@ -13300,7 +15256,8 @@ exit 0
 	// Drops the answer file where Windows auto-detects it on the cloned volume.
 	private static bool WritePortableUnattend(string windowsFolder, string localAccountName = "", string localAccountPassword = "")
 	{
-		string xml = BuildPortableUnattendXml(localAccountName, localAccountPassword);
+		string arch = UnattendArchForWindows(windowsFolder);
+		string xml = BuildPortableUnattendXml(localAccountName, localAccountPassword, arch);
 		bool any = false;
 		try
 		{

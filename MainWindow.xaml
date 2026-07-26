@@ -171,7 +171,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE88E;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbCreateT" Text="Create Windows USB" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbCreateT" Text="Create Windows USB" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbCreateS" Text="Install Windows from an ISO file" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -181,7 +181,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE8C8;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbClonePT" Text="Clone to USB / external drive" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbClonePT" Text="Clone to USB / external drive" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbClonePS" Text="Portable Windows that boots on any PC" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -191,7 +191,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE977;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbCloneIT" Text="Clone to internal disk" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbCloneIT" Text="Clone to internal disk" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbCloneIS" Text="Normal Windows install on another disk" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -201,7 +201,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="TbExportVhdx" Text="Export to VHDX" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="TbExportVhdx" Text="Export to VHDX" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbExportVhdxS" Text="Run this PC in a Hyper-V virtual machine" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -211,7 +211,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE74E;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbBackupT" Text="Back up to image" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbBackupT" Text="Back up to image" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbBackupS" Text="Save this PC to a .wim image file" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -221,7 +221,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbRestoreT" Text="Restore image" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbRestoreT" Text="Restore image" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbRestoreS" Text="Write a saved image back to a drive" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -231,7 +231,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xEB9F;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbLinuxT" Text="Bootable USB from ISO" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbLinuxT" Text="Bootable USB from ISO" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbLinuxS" Text="Linux or any ISO — written as a disk image" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -241,7 +241,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbDownloadT" Text="Download an ISO" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbDownloadT" Text="Download an ISO" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbDownloadS" Text="Get Windows or Linux install images" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -251,7 +251,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE8FD;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbMultiBootT" Text="Multi-boot USB" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbMultiBootT" Text="Multi-boot USB" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbMultiBootS" Text="Many ISOs on one stick — pick at boot" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -263,7 +263,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE90F;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbToolsT" Text="Drive tools" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbToolsT" Text="Drive tools" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbToolsS" Text="Health, speed and file-system scan" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -273,7 +273,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbRecoverT" Text="Recover deleted files" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbRecoverT" Text="Recover deleted files" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbRecoverS" Text="Undelete files from a drive (NTFS)" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -283,7 +283,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE894;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="SbCleanT" Text="Clean traces" FontWeight="SemiBold" FontSize="13" />
+                <TextBlock Name="SbCleanT" Text="Clean traces" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbCleanS" Text="Free space &amp; wipe usage traces" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -353,8 +353,8 @@
             <CheckBox Name="VerifyContentCheck" Content="Verify cloned data after writing (slower, safer)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="After cloning, re-read every file from the drive and compare it to the original to catch a bad USB stick. Adds time; uncheck only if you trust the drive." />
             <CheckBox Name="CompactImageCheck" Content="Compact image (smaller on disk, slightly slower at runtime)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Store Windows compressed so it takes less space on the drive. Saves space; apps open a hair slower. Good for smaller USB drives." />
             <CheckBox Name="EjectWhenDoneCheck" Content="Eject the drive when finished" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="When the operation completes, safely flush and eject the drive so you can unplug it right away. Skipped if BitLocker is still encrypting." />
-            <CheckBox Name="UseDismEngineCheck" Content="Use the Microsoft engine (DISM)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Clone using Microsoft's own imaging (DISM / WIMGAPI) instead of the built-in engine. Antivirus does not scan its reads, so the clone stays fast even with real-time protection on, and it fits a target smaller than the source. It writes a temporary image to your system drive first (needs some free space) and takes two passes." />
-            <CheckBox Name="UseNtfsRawEngineCheck" Content="Fast Clone — direct copy, not slowed by antivirus, no temporary file" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" ToolTip="Clone by reading the file table straight off the snapshot (invisible to antivirus, no temporary image, fits a smaller target) and writing files directly to the target — preserving data, timestamps, permissions (ACLs), hardlinks, junctions/reparse points, alternate data streams and decompressing WOF/NTFS-compressed files. This is the newest engine — treat the result as a TEST and use a spare disk. The proven wimlib/DISM engines remain the default." />
+            <CheckBox Name="UseDismEngineCheck" Content="Use the Microsoft engine (DISM)" IsChecked="False" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Clone using Microsoft's own imaging (DISM / WIMGAPI) instead of the built-in engine. Antivirus does not scan its reads, so the clone stays fast even with real-time protection on, and it fits a target smaller than the source. It writes a temporary image to your system drive first (needs some free space) and takes two passes." />
+            <CheckBox Name="UseNtfsRawEngineCheck" Content="Fast Clone" IsChecked="True" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" ToolTip="Clone by reading the file table straight off the snapshot (invisible to antivirus, no temporary image, fits a smaller target) and writing files directly to the target — preserving data, timestamps, permissions (ACLs), hardlinks, junctions/reparse points, alternate data streams and decompressing WOF/NTFS-compressed files. This is the default engine: fast and direct, with no temporary file. Uncheck it to clone with the Microsoft (DISM) engine instead." />
           </StackPanel>
         </Border>
         <Button Name="ScheduleCloneButton" Content="Schedule this clone (automatic backup)…" Margin="0,6,0,0" HorizontalAlignment="Left" Visibility="Collapsed" Style="{StaticResource GhostButtonStyle}" Click="ScheduleCloneButton_Click" ToolTip="Create a Windows scheduled task that re-runs this clone automatically (daily or weekly) to the selected drive — an automatic backup. Keep the drive connected at that time." />
@@ -1242,7 +1242,7 @@
 
               <Border Height="1" Background="{DynamicResource Border2Brush}" Margin="0,16,0,0" />
               <TextBlock Name="SettingsAboutLabel" Text="About &amp; support" FontSize="15" FontWeight="SemiBold" Margin="0,14,0,8" />
-              <TextBlock Name="AboutVersionText" Text="DriveForge 4.2.0" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
+              <TextBlock Name="AboutVersionText" Text="DriveForge 4.3.0" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
               <TextBlock Name="AboutPrivacyText" Text="Free and portable. No ads, no telemetry, no data collection — your files never leave your PC." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
               <TextBlock Name="AboutEngineText" Text="Clone/backup engine: wimlib 1.14.4 (GPLv3), bundled inside the app." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
               <TextBlock Name="SettingsSupportText" Text="DriveForge is free. If it helped you, you can support its development — thank you!" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,8" />

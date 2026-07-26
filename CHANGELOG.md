@@ -2,6 +2,84 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.3.0 — 2026-07-26
+
+A large safety and reliability pass across every feature in the app, plus a new keep-awake
+behaviour and the removal of the wipe "certificate" feature.
+
+### Removed
+- **The Wipe "Certificate of Data Erasure" has been removed.** DriveForge is not an accredited
+  certification body, and generating a certificate implied a level of formal assurance the
+  project isn't in a position to offer. Wipe itself is unchanged — it still securely overwrites
+  the drive — it just no longer offers to produce a certificate afterwards.
+
+### New
+- **The PC no longer goes to sleep or hibernates while an operation is running** (wipe, clone,
+  backup, scan, download, etc.) — the display can still turn off. This cannot override a sleep
+  you initiate yourself (lid close, power button, Start > Sleep), and on a laptop running on
+  battery with Modern Standby, Windows still forces sleep about 5 minutes after its own timeout;
+  plug in for long jobs.
+- Progress reporting is more accurate: several operations (Wipe, raw ISO write + verify,
+  capacity test, Shred) could finish with the bar and percentage stuck around 89% and a
+  stats line quoting a bogus total instead of showing 100% / the real size.
+
+### Safety fixes (data-loss / false-success prevention)
+- **File Analyzer**: duplicate/large-file deletion now goes through Windows' own delete
+  confirmation (with the "this can't be undone" warning) instead of silently bypassing the
+  Recycle Bin for files too large for it or on drives without one; a protected/master folder
+  set *after* a scan is now honored; Undo now actually restores files (it previously failed to
+  match filenames with extensions hidden); a file that was both a "largest file" and a
+  duplicate-set's last copy can no longer be deleted from both grids at once.
+- **Multi-Boot USB (Ventoy)**: re-verifies the target disk right before the wipe (a disk can
+  renumber if a drive is unplugged/replugged during the multi-minute download), verifies the
+  downloaded Ventoy tool is digitally signed before running it elevated, and no longer reports
+  success or failure incorrectly around timing edge cases.
+- **Disk erase tools**: Shredding a folder that contains a junction/symlink no longer follows it
+  onto another drive; "SSD Secure Erase" no longer claims blocks were discarded on media that
+  doesn't actually support TRIM (HDDs, most USB flash drives, some USB-bridged SSDs); FAT32
+  formatting over 32 GB (which silently fails) is now blocked up front instead of reporting
+  success on an unusable drive; Shred now also overwrites alternate data streams, not just the
+  main file content.
+- **Partition tools**: an interrupted overlapping partition move could previously corrupt data
+  with no way back — there's now an explicit warning plus an automatic backup of the partition
+  table before the move; Resize no longer reports success when the resize was actually declined.
+- **Diagnostics (Health / SMART / Surface scan / Speed test)**: a failing drive could be reported
+  as healthy in several cases (a stale cached report, a matching-substring bug that read
+  "Unhealthy" as containing "healthy", a surface scan that stopped on the first bad read and
+  called the rest of the drive fine); the Speed test — which writes to free space — now discloses
+  that and asks first, since those are exactly the clusters a Recovery scan might need.
+- **Clone, Restore, Export VHDX, Backup-to-image**: all four now correctly flag a run as
+  incomplete instead of reporting full success when files are skipped or a step fails partway
+  (previously only some of these were checked); restoring a backup now validates the saved image
+  and checks capacity honestly before wiping the destination; backing up now writes to a
+  temporary file and swaps it in only after the new backup is verified, so a failed backup can
+  no longer destroy a good existing one.
+- **Create Windows USB**: fixed BitLocker failures being silently swallowed and reported as
+  success, 32-bit/ARM64 images not booting on UEFI, and a double-click launching two destructive
+  operations on the same disk at once.
+- **Download ISO / Verify ISO checksum**: fixed picking the wrong (older) release when several
+  point releases exist, a truncated download being saved as if complete with no warning, and
+  common checksum-paste formats (a filename attached, a `sha256:` prefix, a whole checksum-list
+  file) being flagged as "does not match" on a perfectly good image.
+
+### Other fixes and improvements
+- Fixed the nav-sidebar "Clone to USB / external drive" label getting cut off mid-word in every
+  language.
+- Fast Clone is now the default cloning engine (was DISM); its warning text no longer mentions
+  antivirus, and cloning now shows a single format-confirmation prompt instead of two.
+- The Desktop clone report is now only created when something needs a second look — a clean
+  successful clone no longer leaves a folder + text file behind.
+- The progress bar now resets properly after pressing Stop on any operation (previously stuck at
+  its last position on most of them).
+- Selecting Wipe no longer makes the Drive-tools overview card spuriously repaint as if you'd
+  clicked Health.
+- TestBoot (boot a physical disk in a VM) now protects against targeting the wrong disk, no
+  longer strands a disk offline silently on a script error, and recovers automatically if the
+  app is closed or crashes mid-session.
+- Numerous smaller correctness fixes in the raw NTFS clone/recovery engine shared by Clone,
+  Export, Restore and Recover (bounds-checking on malformed filesystem records, alternate data
+  streams on hidden/system files and directories, 4Kn sector alignment).
+
 ## v4.2.0 — 2026-07-13
 
 Adds faithful backup-image restore and completes the multi-language coverage.

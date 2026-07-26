@@ -60,6 +60,7 @@ public partial class MainWindow
 		public long CreatedUtc, ModifiedUtc, ChangedUtc, AccessedUtc;   // raw FILETIME (100-ns since 1601)
 		public uint SecurityId;
 		public bool HasAttrList;
+		public bool ExtIncomplete;             // an $ATTRIBUTE_LIST extension record (or a $DATA header) was unreadable/malformed — completeness can't be trusted
 		public uint ReparseTag;
 		public int ReparseLen;                 // resident reparse-buffer length; -1 = non-resident (rare)
 		public byte[]? ReparseBuffer;          // full REPARSE_DATA_BUFFER (tag+len+data) to replay via FSCTL_SET_REPARSE_POINT
@@ -210,7 +211,7 @@ public partial class MainWindow
 						node.ChangedUtc = BitConverter.ToInt64(buf, cpos + 0x10);
 						node.AccessedUtc = BitConverter.ToInt64(buf, cpos + 0x18);
 						node.DosAttributes = BitConverter.ToUInt32(buf, cpos + 0x20);
-						if (vlen >= 0x38 && cpos + 0x38 <= buf.Length) node.SecurityId = BitConverter.ToUInt32(buf, cpos + 0x34);
+						if (vlen >= 0x38 && cpos + 0x38 <= attrOff + attrLen) node.SecurityId = BitConverter.ToUInt32(buf, cpos + 0x34);
 					}
 					break;
 				}
@@ -243,7 +244,7 @@ public partial class MainWindow
 					{
 						int vlen = BitConverter.ToInt32(buf, attrOff + 0x10);
 						int cpos = attrOff + BitConverter.ToUInt16(buf, attrOff + 0x14);
-						if (vlen >= 0 && cpos >= attrOff && cpos + vlen <= attrOff + attrLen)
+						if (vlen >= 0 && cpos >= attrOff && cpos <= attrOff + attrLen && vlen <= attrOff + attrLen - cpos)
 						{
 							st.Resident = true; st.RealSize = vlen; st.ValidDataLength = vlen; st.SawVcnZero = true;
 							st.ResidentData = new byte[vlen];
@@ -252,6 +253,10 @@ public partial class MainWindow
 					}
 					else
 					{
+						// A non-resident header must be a full 0x40 bytes (mapping-pairs offset @0x20, RealSize @0x30, VDL @0x38).
+						// A shorter attrLen means a malformed record — reading these would pull size/offset from the NEXT
+						// attribute (silent truncation or a garbage giant size). Skip + flag so a lost main stream fails loudly.
+						if (attrLen < 0x40 || attrOff + 0x40 > end) { node.ExtIncomplete = true; break; }
 						long startVcn = BitConverter.ToInt64(buf, attrOff + 0x10);
 						int runOff = BitConverter.ToUInt16(buf, attrOff + 0x20);
 						var runs = DecodeRuns(buf, attrOff + runOff, attrOff + attrLen);
@@ -271,7 +276,7 @@ public partial class MainWindow
 					{
 						int vlen = BitConverter.ToInt32(buf, attrOff + 0x10);
 						int cpos = attrOff + BitConverter.ToUInt16(buf, attrOff + 0x14);
-						if (vlen >= 8 && cpos >= attrOff && cpos + vlen <= attrOff + attrLen)
+						if (vlen >= 8 && cpos >= attrOff && cpos <= attrOff + attrLen && vlen <= attrOff + attrLen - cpos)
 						{
 							node.ReparseTag = BitConverter.ToUInt32(buf, cpos);
 							node.ReparseLen = vlen;
@@ -305,11 +310,12 @@ public partial class MainWindow
 		{
 			int vlen = BitConverter.ToInt32(buf, attrOff + 0x10);
 			int cpos = attrOff + BitConverter.ToUInt16(buf, attrOff + 0x14);
-			if (vlen <= 0 || cpos + vlen > buf.Length) return;
+			if (vlen <= 0 || cpos < attrOff || vlen > attrOff + attrLen - cpos) return;   // bound to THIS attribute's value, not the whole record (else foreign list entries leak in)
 			ParseAttrListEntries(buf, cpos, cpos + vlen, selfRec, targets);
 		}
 		else
 		{
+			if (attrLen < 0x40 || attrOff + 0x40 > buf.Length) return;   // malformed non-resident header — don't read runOff/RealSize past the attribute
 			int runOff = BitConverter.ToUInt16(buf, attrOff + 0x20);
 			long realSize = BitConverter.ToInt64(buf, attrOff + 0x30);
 			var runs = DecodeRuns(buf, attrOff + runOff, attrOff + attrLen);
@@ -352,9 +358,10 @@ public partial class MainWindow
 			int tg = 0;
 			foreach (long trec in targets)
 			{
-				if (tg++ > 4096) break;
+				if (tg++ > 4096) { node.ExtIncomplete = true; break; }   // too many extension records to follow — can't guarantee completeness
 				byte[]? ext = ReadMftRecordByNumber(vr, mftRuns, trec, recSize, clusterSize, bytesPerSector);
 				if (ext != null) MergeRecordAttributes(ext, 0, recSize, node, vr, clusterSize, null);
+				else node.ExtIncomplete = true;   // an extension record was unreadable — a $DATA fragment may be missing; don't write a silent truncated/0-byte file
 			}
 		}
 		return node;
@@ -448,7 +455,9 @@ public partial class MainWindow
 		var map = new Dictionary<uint, byte[]>();
 		byte[]? rec = ReadMftRecordByNumber(vr, mftRuns, 9, recSize, clusterSize, bytesPerSector);
 		if (rec == null) return map;
-		var node = BuildNode(9, rec, 0, false, vr, mftRuns, recSize, clusterSize, bytesPerSector);   // resolves an $ATTRIBUTE_LIST if $Secure is fragmented
+		RawNode node;
+		try { node = BuildNode(9, rec, 0, false, vr, mftRuns, recSize, clusterSize, bytesPerSector); }   // resolves an $ATTRIBUTE_LIST if $Secure is fragmented
+		catch { return map; }   // a corrupt $Secure record must not abort the whole security pass (which would leave the clone with default ACLs)
 		if (!node.Streams.TryGetValue("$SDS", out var sds)) return map;
 		byte[] data = ReadStreamBytes(vr, sds, clusterSize);
 		long pos = 0; int guard = 0;
@@ -479,7 +488,7 @@ public partial class MainWindow
 	{
 		if (st.Resident) return st.ResidentData ?? Array.Empty<byte>();
 		using var ms = new MemoryStream();
-		long left = st.RealSize > 0 ? st.RealSize : long.MaxValue;
+		long left = Math.Min(st.RealSize > 0 ? st.RealSize : long.MaxValue, 512L << 20);   // cap: $SDS is small; a corrupt huge RealSize must not drive an unbounded MemoryStream (OOM)
 		foreach (var frag in st.Fragments.OrderBy(f => f.StartVcn))
 			foreach (var (lcn, count) in frag.Runs)
 			{
@@ -503,12 +512,12 @@ public partial class MainWindow
 			uint type = BitConverter.ToUInt32(buf, attrOff);
 			if (type == 0xFFFFFFFF) break;
 			int attrLen = BitConverter.ToInt32(buf, attrOff + 0x04);
-			if (attrLen <= 0 || attrOff + attrLen > end) break;
+			if (attrLen <= 0 || attrOff + attrLen > end || attrOff + 0x18 > end) break;
 			if (type == 0x10)
 			{
 				int vlen = BitConverter.ToInt32(buf, attrOff + 0x10);
 				int c = attrOff + BitConverter.ToUInt16(buf, attrOff + 0x14);
-				if (vlen >= 0x38 && c + 0x38 <= buf.Length) return BitConverter.ToUInt32(buf, c + 0x34);
+				if (vlen >= 0x38 && c >= attrOff && c + 0x38 <= attrOff + attrLen) return BitConverter.ToUInt32(buf, c + 0x34);
 				return 0;
 			}
 			attrOff += attrLen;
@@ -651,7 +660,34 @@ public partial class MainWindow
 				return;
 			}
 
-			if (isDir) return;                               // plain directories were created in the dir pass
+			if (isDir)
+			{
+				// Directories have no unnamed $DATA, but NTFS allows NAMED $DATA streams ON a directory. The directory
+				// itself was created in the dir pass; copy any named streams onto it here (they were silently lost before).
+				bool hasNamedStream = false;
+				foreach (var k in node.Streams.Keys) if (k.Length > 0) { hasNamedStream = true; break; }
+				if (hasNamedStream)
+				{
+					var dnames = node.Names.Count > 0 ? node.Names : new List<(string Name, long ParentRef)> { (node.PrimaryName, node.ParentRef) };
+					foreach (var (nm, par) in dnames)
+					{
+						if (string.IsNullOrEmpty(nm)) continue;
+						string dd = ResolvePath(par, dirNames);
+						string dr = "\\" + dd + nm;
+						if (dr.StartsWith("\\$Extend\\", StringComparison.OrdinalIgnoreCase)) continue;
+						if (IsNtfsCloneExcluded(dr, true)) continue;
+						string dfull = root + dd + nm, dsrc = sourceLetter + ":\\" + dd + nm;
+						foreach (var kv in node.Streams)
+						{
+							if (kv.Key.Length == 0 || kv.Key == "WofCompressedData" || kv.Value.Encrypted) continue;
+							try { CopyStreamViaApi(Ext(dsrc) + ":" + kv.Key, Ext(dfull) + ":" + kv.Key, stats); }
+							catch { stats.AdsErrors++; }
+						}
+						break;   // directories aren't hardlinked — one path is enough
+					}
+				}
+				return;                               // plain directories were created in the dir pass
+			}
 			node.Streams.TryGetValue("", out var main);
 			// EFS-encrypted files: the on-disk $DATA is ciphertext we have no key for. Copy it (all streams, ciphertext +
 			// $EFS metadata) via the EFS backup/restore RAW API — which needs NO decryption key. The clone carries the
@@ -720,14 +756,16 @@ public partial class MainWindow
 			// stream to target:streamname. Reading the OS view via the file API handles resident / non-resident /
 			// NTFS-compressed uniformly. WofCompressedData is the WOF backing (the main stream was materialised
 			// decompressed already) and EFS streams can't be decrypted — skip both.
-			if (writtenPath != null && writtenSourceFull != null && node.Streams.Count > 1)
+			if (writtenPath != null && writtenSourceFull != null && node.Streams.Keys.Any(k => k.Length > 0))
 			{
-				// WriteFileWithMeta already stamped the DOS attributes, possibly READONLY — which blocks opening ANY
-				// stream (named or main) of the file for write. Clear READONLY for the ADS writes, then restore it
-				// (re-applying READONLY does not remove the streams that were just written).
+				// WriteFileWithMeta already stamped the DOS attributes. CreateFile(CREATE_ALWAYS) on a file that already
+				// carries READONLY, HIDDEN or SYSTEM returns ACCESS_DENIED (documented Win32 behaviour) — which would
+				// silently drop EVERY ADS on such files. Temporarily clear all three for the ADS writes, then restore
+				// them (re-applying the attributes does not remove the streams that were just written).
+				const uint adsBlockAttrs = 0x1u | 0x2u | 0x4u; // FILE_ATTRIBUTE_READONLY | HIDDEN | SYSTEM
 				uint tgtAttr = node.DosAttributes & DosAttrSettableMask;
-				bool clearedRo = (tgtAttr & 0x1) != 0;
-				if (clearedRo) SetFileAttributesW(Ext(writtenPath), (tgtAttr & ~0x1u) == 0 ? RawFileAttrNormal : (tgtAttr & ~0x1u));
+				bool clearedAttrs = (tgtAttr & adsBlockAttrs) != 0;
+				if (clearedAttrs) SetFileAttributesW(Ext(writtenPath), (tgtAttr & ~adsBlockAttrs) == 0 ? RawFileAttrNormal : (tgtAttr & ~adsBlockAttrs));
 				try
 				{
 					foreach (var kv in node.Streams)
@@ -737,7 +775,7 @@ public partial class MainWindow
 						catch { stats.AdsErrors++; }
 					}
 				}
-				finally { if (clearedRo) SetFileAttributesW(Ext(writtenPath), tgtAttr); }
+				finally { if (clearedAttrs) SetFileAttributesW(Ext(writtenPath), tgtAttr); }
 			}
 
 			if ((++processed & 0x3FFF) == 0)
@@ -877,6 +915,10 @@ public partial class MainWindow
 	private void WriteFileWithMeta(VolumeReader vr, RawNode node, RawStream? main, string path, string sourceFull,
 		int clusterSize, byte[] zeroBuf, RawCloneStats stats)
 	{
+		// If the unnamed $DATA lived in an $ATTRIBUTE_LIST extension record we couldn't read (or a $DATA header was
+		// malformed), `main` is null because we LOST the data, not because the file is empty — writing now would produce
+		// a silent 0-byte clone counted as success. Fail loudly so the caller records it as an error, not a phantom file.
+		if (main == null && node.ExtIncomplete) throw new IOException($"$DATA unreadable (dropped/malformed $ATTRIBUTE_LIST extension) — refusing a silent 0-byte clone of {path}");
 		bool ok = false;
 		try
 		{
@@ -900,8 +942,11 @@ public partial class MainWindow
 							// Backup semantics so an ACL-restricted file still reads via SeBackupPrivilege.
 							using var sh = new SafeFileHandleWrite(CreateFile(Ext(sourceFull), GenericRead, 0x7u, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics, IntPtr.Zero));
 							if (sh.Handle.IsInvalid) { int err = Marshal.GetLastWin32Error(); throw new IOException($"Open compressed/WOF source failed ({err}) for {sourceFull}", unchecked((int)(0x80070000u | (uint)err))); }
+							long cbefore = fs.Position;
 							using (var src = new FileStream(sh.Handle, FileAccess.Read)) src.CopyTo(fs, 4 << 20);
-							stats.Bytes += main.RealSize; stats.CompressedViaApi++;
+							long ccopied = fs.Position - cbefore;
+							stats.Bytes += ccopied; stats.CompressedViaApi++;
+							if (ccopied < main.RealSize) stats.ReadShortfalls++;   // OS/WOF read returned fewer bytes than the recorded size — flag the (silent) truncation
 						}
 						else stats.Bytes += WriteNonResident(vr, main, fs, clusterSize, zeroBuf, stats, sparse);
 					}

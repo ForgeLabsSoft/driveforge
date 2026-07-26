@@ -65,6 +65,9 @@ public partial class MainWindow
 		// Deep-scan checkpoint: byte offset where a (paused/stopped) carving scan left off, so it can resume later.
 		public long ResumeOffset;
 		public bool DeepPartial;      // true if a deep scan was stopped before reaching the end
+		// 512-byte boot sector captured at scan time — used to detect a stale session whose drive letter now points at a
+		// different disk (removable letters get reused), so recovery/resume doesn't touch the wrong volume.
+		public byte[]? BootSig;
 	}
 
 	private NtfsScanResult? _lastScan;
@@ -94,11 +97,19 @@ public partial class MainWindow
 		public bool Contiguous { get; set; }
 		public bool Carved { get; set; }
 		public long ByteOffset { get; set; }
+		// SourcePath is the ENTIRE recovery payload of a Recycle Bin row (recover = copy that $R file). Omitting it
+		// here used to reload those rows with an empty payload, which recovered every file as 0 bytes and still
+		// reported success. StatusKind/RecoverPercent carry the honest health pill, which was likewise being lost.
+		public string SourcePath { get; set; } = "";
+		public string StatusKind { get; set; } = "info";
+		public int RecoverPercent { get; set; } = -1;
 	}
 
 	private sealed class SessionDto
 	{
-		public int Version { get; set; } = 1;
+		// v2 added SourcePath/StatusKind/RecoverPercent. v1 files still load (their rows simply carry no SourcePath —
+		// RecoverOne refuses those loudly instead of writing a 0-byte file and calling it a success).
+		public int Version { get; set; } = 2;
 		public string Letter { get; set; } = "";
 		public string ImagePath { get; set; } = "";
 		public bool IsExFat { get; set; }
@@ -108,6 +119,7 @@ public partial class MainWindow
 		public long FatOffset { get; set; }
 		public long ResumeOffset { get; set; }
 		public bool DeepPartial { get; set; }
+		public string BootSig { get; set; } = ""; // base64 512-byte boot fingerprint, for stale-session (wrong-disk) detection
 		public List<SessionFileDto> Files { get; set; } = new();
 	}
 
@@ -121,6 +133,7 @@ public partial class MainWindow
 			ClusterSize = _lastScan.ClusterSize, BytesPerSector = _lastScan.BytesPerSector,
 			DataAreaOffset = _lastScan.DataAreaOffset, FatOffset = _lastScan.FatOffset,
 			ResumeOffset = _lastScan.ResumeOffset, DeepPartial = _lastScan.DeepPartial,
+			BootSig = _lastScan.BootSig != null ? Convert.ToBase64String(_lastScan.BootSig) : "",
 		};
 		foreach (var f in _lastScan.Files)
 			dto.Files.Add(new SessionFileDto
@@ -131,6 +144,7 @@ public partial class MainWindow
 				ResidentData = f.ResidentData != null ? Convert.ToBase64String(f.ResidentData) : "",
 				Runs = f.Runs.Select(r => new[] { r.Lcn, r.Count }).ToList(),
 				ExFat = f.ExFat, FirstCluster = f.FirstCluster, Contiguous = f.Contiguous, Carved = f.Carved, ByteOffset = f.ByteOffset,
+				SourcePath = f.SourcePath, StatusKind = f.StatusKind, RecoverPercent = f.RecoverPercent,
 			});
 		File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(dto));
 	}
@@ -138,7 +152,7 @@ public partial class MainWindow
 	private NtfsScanResult LoadSession(string path)
 	{
 		var dto = System.Text.Json.JsonSerializer.Deserialize<SessionDto>(File.ReadAllText(path)) ?? throw new IOException("Empty or invalid session file.");
-		if (dto.Version != 1) throw new IOException($"This .dfscan was made by a newer DriveForge (format v{dto.Version}). Update DriveForge to open it.");
+		if (dto.Version > 2) throw new IOException($"This .dfscan was made by a newer DriveForge (format v{dto.Version}). Update DriveForge to open it.");
 		var scan = new NtfsScanResult
 		{
 			Letter = string.IsNullOrEmpty(dto.Letter) ? '\0' : dto.Letter[0],
@@ -146,6 +160,7 @@ public partial class MainWindow
 			ClusterSize = dto.ClusterSize, BytesPerSector = dto.BytesPerSector,
 			DataAreaOffset = dto.DataAreaOffset, FatOffset = dto.FatOffset,
 			ResumeOffset = dto.ResumeOffset, DeepPartial = dto.DeepPartial,
+			BootSig = string.IsNullOrEmpty(dto.BootSig) ? null : Convert.FromBase64String(dto.BootSig),
 		};
 		foreach (var d in dto.Files)
 		{
@@ -156,6 +171,8 @@ public partial class MainWindow
 				ModifiedText = d.ModifiedText, Status = d.Status, Recoverable = d.Recoverable, Resident = d.Resident,
 				ResidentData = string.IsNullOrEmpty(d.ResidentData) ? null : Convert.FromBase64String(d.ResidentData),
 				ExFat = d.ExFat, FirstCluster = d.FirstCluster, Contiguous = d.Contiguous, Carved = d.Carved, ByteOffset = d.ByteOffset,
+				SourcePath = d.SourcePath ?? "", StatusKind = string.IsNullOrEmpty(d.StatusKind) ? "info" : d.StatusKind,
+				RecoverPercent = d.RecoverPercent,
 			};
 			if (d.Runs != null) foreach (var r in d.Runs) if (r.Length >= 2) f.Runs.Add((r[0], r[1]));
 			scan.Files.Add(f);
@@ -174,7 +191,10 @@ public partial class MainWindow
 		// must not invent data past end-of-device / a bad sector use `got` to stop instead of trusting the buffer.
 		public byte[] Read(long offset, int length, out int got)
 		{
-			const int sector = 512;
+			// Align to 4096, not 512: a \\.\X: volume handle does non-cached I/O, which requires the offset AND length to
+			// be multiples of the LOGICAL sector size. 4096-aligned reads are also 512-aligned, so this is correct on
+			// 512n/512e drives yet also works on true 4Kn (4096 logical-sector) drives where 512 alignment throws.
+			const int sector = 4096;
 			long alignedStart = offset - (offset % sector);
 			int pad = (int)(offset - alignedStart);
 			int toRead = ((pad + length + sector - 1) / sector) * sector;
@@ -206,7 +226,24 @@ public partial class MainWindow
 	}
 
 	// Opens whichever source a scan came from: a live volume, or a disk-image file.
-	private VolumeReader OpenSource(NtfsScanResult g) => string.IsNullOrEmpty(g.ImagePath) ? OpenVolume(g.Letter) : new VolumeReader(g.ImagePath);
+	private VolumeReader OpenSource(NtfsScanResult g)
+	{
+		if (!string.IsNullOrEmpty(g.ImagePath)) return new VolumeReader(g.ImagePath);
+		var vr = OpenVolume(g.Letter);
+		// A saved session can be reopened after the original drive is gone; removable-media letters get reused, so the
+		// letter may now point to a DIFFERENT disk. Recovering with the saved raw offsets against the wrong volume yields
+		// garbage counted as success — verify the boot sector still matches the one captured at scan time.
+		if (g.BootSig != null && g.BootSig.Length == 512)
+		{
+			byte[] cur = vr.Read(0, 512);
+			if (!cur.AsSpan().SequenceEqual(g.BootSig))
+			{
+				vr.Dispose();
+				throw new IOException($"The volume at {g.Letter}: is not the one this session was scanned from — its drive letter now points to a different disk. Recovery was stopped to avoid reading the wrong data. Reconnect the original drive, or re-scan.");
+			}
+		}
+		return vr;
+	}
 
 	// Returns false if a sector's update-sequence sentinel does NOT match the record USN — a torn / partially-updated
 	// record whose sector tails hold stale bytes. Callers that must not parse inconsistent data (the destructive clone)
@@ -216,6 +253,9 @@ public partial class MainWindow
 		int usaOff = BitConverter.ToUInt16(rec, baseOff + 0x04);
 		int usaCount = BitConverter.ToUInt16(rec, baseOff + 0x06);
 		if (usaCount < 1) return true;
+		// usaOff comes from the (possibly corrupt) record header; a garbage value would read the USN out of bounds and
+		// crash the whole scan on a damaged volume — the exact case recovery runs on. Skip the fixup best-effort instead.
+		if (baseOff + usaOff + 2 > rec.Length || baseOff + usaOff < 0) return true;
 		ushort usn = BitConverter.ToUInt16(rec, baseOff + usaOff);
 		bool consistent = true;
 		for (int i = 1; i < usaCount; i++)
@@ -244,7 +284,9 @@ public partial class MainWindow
 			int lenBytes = header & 0x0F, offBytes = (header >> 4) & 0x0F;
 			// Bound against the attribute's own mapping-pairs end, not the whole record — otherwise a run header at
 			// the tail with no 0x00 terminator decodes length/offset bytes out of the NEXT attribute into a bogus run.
-			if (lenBytes == 0 || pos + lenBytes + offBytes > end || pos + lenBytes + offBytes > rec.Length) break;
+			// A real run length/offset field is at most 8 bytes; a nibble >8 (corruption/bit-rot) would make the shift
+			// below reach >=64 and wrap (C# masks the count &0x3F), silently corrupting the count/LCN — reject it.
+			if (lenBytes == 0 || lenBytes > 8 || offBytes > 8 || pos + lenBytes + offBytes > end || pos + lenBytes + offBytes > rec.Length) break;
 			long count = 0;
 			for (int i = 0; i < lenBytes; i++) count |= (long)rec[pos + i] << (8 * i);
 			pos += lenBytes;
@@ -253,7 +295,7 @@ public partial class MainWindow
 			{
 				long delta = 0;
 				for (int i = 0; i < offBytes; i++) delta |= (long)rec[pos + i] << (8 * i);
-				if ((rec[pos + offBytes - 1] & 0x80) != 0) delta |= -1L << (8 * offBytes);
+				if (offBytes < 8 && (rec[pos + offBytes - 1] & 0x80) != 0) delta |= -1L << (8 * offBytes);   // offBytes==8: the full 64-bit delta is already assembled, no sign-extend (and -1L<<64 would wrap to -1)
 				pos += offBytes; lcn += delta;
 				runs.Add((lcn, count));
 			}
@@ -367,7 +409,15 @@ public partial class MainWindow
 		}
 		AnnotateNtfsHealth(vr, mftByteOffset, recSize, bytesPerSector, clusterSize, result.Files);
 		result.Files = result.Files
-			.GroupBy(f => f.Path + "|" + f.Size).Select(g => g.First())
+			.GroupBy(f => f.Path + "|" + f.Size)
+			// Pick the BEST record in each duplicate group, not whichever the MFT happened to list first. Repeatedly
+			// saving+deleting the same path at the same size (config/office/DB temp files) leaves several deleted
+			// records; taking First() let a stale, unrecoverable one shadow a perfectly recoverable copy. Health is
+			// already annotated above, so Recoverable/RecoverPercent are meaningful here.
+			.Select(g => g.OrderByDescending(f => f.Recoverable)
+						  .ThenByDescending(f => f.RecoverPercent)
+						  .ThenByDescending(f => f.ModifiedUtc ?? DateTime.MinValue)
+						  .First())
 			.OrderByDescending(f => f.Recoverable).ThenByDescending(f => f.ModifiedUtc ?? DateTime.MinValue).ToList();
 		progress(100);
 		return result;
@@ -458,16 +508,20 @@ public partial class MainWindow
 					}
 				}
 			}
-			else if (type == 0x80 && buf[attrOff + 0x09] == 0) // unnamed $DATA
+			else if (type == 0x80 && attrOff + 0x0E <= end && buf[attrOff + 0x09] == 0) // unnamed $DATA
 			{
 				ushort af = BitConverter.ToUInt16(buf, attrOff + 0x0C);
 				bool compEnc = (af & 0x4001) != 0;
 				bool nonRes = buf[attrOff + 0x08] != 0;
-				if (!nonRes)
+				if (!nonRes && attrOff + 0x16 <= end)   // resident header reads reach attrOff+0x16; bound them (torn record with a tiny attrLen)
 				{
 					int len = BitConverter.ToInt32(buf, attrOff + 0x10);
 					int c = attrOff + BitConverter.ToUInt16(buf, attrOff + 0x14);
-					if (len >= 0 && c + len <= buf.Length)
+					// Bound the resident value by the END OF THE MFT RECORD, not the 1 MB read chunk: a corrupt length
+					// field on a torn MFT would otherwise pass and copy up to ~1 MB of the NEXT records' bytes into a
+					// bogus "notes.txt". Compute in LONG so a near-int.MaxValue `len` can't overflow c+len to a
+					// negative int that slips under the bound and then throws OutOfMemory on new byte[len].
+					if (len >= 0 && (long)c + len <= Math.Min((long)buf.Length, (long)end))
 					{
 						df.Resident = true; df.ResidentData = new byte[len];
 						Array.Copy(buf, c, df.ResidentData, 0, len);
@@ -476,7 +530,7 @@ public partial class MainWindow
 						haveData = true;
 					}
 				}
-				else
+				else if (nonRes && attrOff + 0x38 <= end)   // non-resident reads reach attrOff+0x38 (real size @ +0x30, 8 bytes)
 				{
 					long real = BitConverter.ToInt64(buf, attrOff + 0x30);
 					int runOff = BitConverter.ToUInt16(buf, attrOff + 0x20);
@@ -542,7 +596,10 @@ public partial class MainWindow
 			foreach (var (lcn, count) in f.Runs)
 			{
 				if (lcn < 0) continue;
-				for (long c = lcn; c < lcn + count; c++) { totalC++; if (IsUsed(c)) usedC++; }
+				// Bound the walk to the volume's real cluster count (bitmap size): a corrupt data-run length (DecodeRuns
+				// does not clamp `count`, which can be up to 2^63) would otherwise spin this loop for hours on a damaged
+				// volume — the exact case recovery runs on. Clusters past the volume can't be allocated anyway.
+				for (long c = lcn; c < lcn + count && (c >> 3) < bm.LongLength; c++) { totalC++; if (IsUsed(c)) usedC++; }
 			}
 			ApplyHealth(f, totalC > 0 ? (double)usedC / totalC : -1, fragmented);
 		}
@@ -564,6 +621,11 @@ public partial class MainWindow
 	{
 		int bytesPerSectorShift = boot[0x6C];
 		int sectorsPerClusterShift = boot[0x6D];
+		// Validate against the exFAT spec (bytesPerSectorShift 9-12 = 512..4096; clusterSize <= 32 MB) BEFORE shifting:
+		// a corrupt boot could otherwise make `1 << shift` negative or huge, and that value becomes a VolumeReader.Read
+		// length -> OverflowException/OutOfMemory that aborts the scan. Mirrors ScanFat32's boot-sector guard.
+		if (bytesPerSectorShift < 9 || bytesPerSectorShift > 12 || sectorsPerClusterShift > 25 - bytesPerSectorShift)
+			throw new IOException("Unreadable exFAT boot sector.");
 		int bytesPerSector = 1 << bytesPerSectorShift;
 		int clusterSize = bytesPerSector << sectorsPerClusterShift;
 		long fatOffsetSec = BitConverter.ToUInt32(boot, 0x50);
@@ -578,18 +640,19 @@ public partial class MainWindow
 		var result = new NtfsScanResult { Letter = letter, IsExFat = true, ClusterSize = clusterSize, BytesPerSector = bytesPerSector, DataAreaOffset = dataOffset, FatOffset = fatOffset };
 
 		// Walk directories breadth-first starting at root, collecting deleted file entries.
-		var toVisit = new Queue<(long cluster, string path)>();
+		// Carry each directory's NoFatChain flag + length: a contiguously-allocated directory has no valid FAT
+		// chain, so reading it via the FAT truncated it to its first cluster and hid every file past ~1 cluster.
+		var toVisit = new Queue<(long cluster, string path, bool contiguous, long length)>();
 		var visited = new HashSet<long>();
-		toVisit.Enqueue((rootDirCluster, ""));
+		toVisit.Enqueue((rootDirCluster, "", false, 0));   // the root directory always uses a real FAT chain
 		int processed = 0;
 
 		while (toVisit.Count > 0)
 		{
 			if (ct.IsCancellationRequested) break;
-			var (startCluster, path) = toVisit.Dequeue();
+			var (startCluster, path, dirContiguous, dirLength) = toVisit.Dequeue();
 			if (startCluster < 2 || !visited.Add(startCluster)) continue;
-			// Read the directory's cluster chain (follow FAT).
-			byte[] dir = ReadExFatChain(vr, startCluster, fatOffset, ClusterToByte, clusterSize, 64L * 1024 * 1024);
+			byte[] dir = ReadExFatChain(vr, startCluster, fatOffset, ClusterToByte, clusterSize, 64L * 1024 * 1024, dirContiguous, dirLength);
 			processed++;
 			progress(Math.Min(95, processed));
 
@@ -631,13 +694,20 @@ public partial class MainWindow
 						bool isDir = (BitConverter.ToUInt16(dir, p + 0x04) & 0x10) != 0; // file attributes
 
 						bool clusterOk = firstCluster >= 2 && firstCluster < 2 + clusterCount;
+						// DataLength comes straight off disk and drives the recovery write loop, so a corrupt/stale
+						// value (power loss mid-metadata-write is the normal hazard on removable media) could ask for
+						// hundreds of GB. Trust it only if the volume could physically hold it — and, for a contiguous
+						// file, only if it fits between firstCluster and the end of the cluster heap.
+						long volumeBytes = clusterCount * (long)clusterSize;
+						bool lengthOk = dataLength > 0 && dataLength <= volumeBytes
+							&& (!noFatChain || (firstCluster - 2) + (dataLength + clusterSize - 1) / clusterSize <= clusterCount);
 						if (isDir)
 						{
-							if (clusterOk && !visited.Contains(firstCluster)) toVisit.Enqueue((firstCluster, path + name + "\\"));
+							if (clusterOk && !visited.Contains(firstCluster)) toVisit.Enqueue((firstCluster, path + name + "\\", noFatChain, dataLength));
 						}
 						else if (!string.IsNullOrWhiteSpace(name) && result.Files.Count < MaxRecoverEntries) // file: list both deleted ones and existing ones (on drive)
 						{
-							bool canRec = clusterOk && dataLength > 0;
+							bool canRec = clusterOk && lengthOk;
 							result.Files.Add(new DeletedFile
 							{
 								ExFat = true, Deleted = !inUse, Name = name, Path = path + name,
@@ -664,9 +734,27 @@ public partial class MainWindow
 	}
 
 	// Reads an exFAT cluster chain into memory (follows the FAT unless it runs away), capped at maxBytes.
-	private byte[] ReadExFatChain(VolumeReader vr, long firstCluster, long fatOffset, Func<long, long> clusterToByte, int clusterSize, long maxBytes)
+	// contiguous = the entry's NoFatChain flag: such an allocation does NOT maintain its FAT entries, so following
+	// the FAT there stops at the first cluster (silently truncating the data) — read it sequentially instead.
+	private byte[] ReadExFatChain(VolumeReader vr, long firstCluster, long fatOffset, Func<long, long> clusterToByte, int clusterSize, long maxBytes, bool contiguous = false, long contiguousLength = 0)
 	{
 		var ms = new MemoryStream();
+		if (contiguous && contiguousLength > 0)
+		{
+			long remaining = Math.Min(contiguousLength, maxBytes), c = firstCluster;
+			while (remaining > 0 && c >= 2)
+			{
+				if (stopRequested) break;
+				int chunk = (int)Math.Min(clusterSize, remaining);
+				byte[] d = vr.Read(clusterToByte(c), chunk, out int got);
+				if (got <= 0) break;
+				ms.Write(d, 0, got);
+				remaining -= got;
+				if (got < chunk) break;
+				c++;
+			}
+			return ms.ToArray();
+		}
 		long cl = firstCluster; int guard = 0;
 		var seen = new HashSet<long>();
 		while (cl >= 2 && ms.Length < maxBytes && guard++ < 1_000_000 && seen.Add(cl))
@@ -700,6 +788,11 @@ public partial class MainWindow
 		long dataOffset = (reservedSectors + (long)numFats * fatSize32) * bytesPerSector; // byte offset of cluster #2
 
 		long ClusterToByte(long cl) => dataOffset + (cl - 2) * (long)clusterSize;
+		// Cluster count bounds the stale first-cluster/size fields of deleted entries (FAT32 has no root-dir region).
+		long totalSectors32 = BitConverter.ToUInt16(boot, 0x13);
+		if (totalSectors32 == 0) totalSectors32 = BitConverter.ToUInt32(boot, 0x20);
+		long dataSectors32 = totalSectors32 - (reservedSectors + (long)numFats * fatSize32);
+		long clusterCount = dataSectors32 > 0 ? dataSectors32 / sectorsPerCluster : 0;
 		var result = new NtfsScanResult { Letter = letter, IsExFat = false, ClusterSize = clusterSize, BytesPerSector = bytesPerSector, DataAreaOffset = dataOffset, FatOffset = fatOffset };
 
 		var toVisit = new Queue<(long cluster, string path)>();
@@ -716,6 +809,7 @@ public partial class MainWindow
 			processed++; progress(Math.Min(95, processed));
 
 			var lfn = new List<string>();
+			int lfnChk = -1;
 			for (int p = 0; p + 32 <= dir.Length; p += 32)
 			{
 				byte first = dir[p];
@@ -723,19 +817,26 @@ public partial class MainWindow
 				byte attr = dir[p + 0x0B];
 				if (attr == 0x0F) // long-file-name entry
 				{
+					// Group by the CHECKSUM byte (0x0D), which survives deletion — NOT the sequence byte (0), which
+					// deletion overwrites with 0xE5. Same logic as ParseFatDirBuffer; keying on the sequence discarded
+					// the long name of every deleted file.
+					int chk = dir[p + 0x0D];
+					if (lfn.Count > 0 && chk != lfnChk) lfn.Clear();
+					lfnChk = chk;
 					lfn.Add(ReadLfnChars(dir, p));
 					continue;
 				}
-				if (attr == 0x08) { lfn.Clear(); continue; } // volume label
+				if (attr == 0x08) { lfn.Clear(); lfnChk = -1; continue; } // volume label
 				bool deleted = first == 0xE5;
 				bool isDir = (attr & 0x10) != 0;
 				long firstCluster = ((long)BitConverter.ToUInt16(dir, p + 0x14) << 16) | BitConverter.ToUInt16(dir, p + 0x1A);
 				long size = BitConverter.ToUInt32(dir, p + 0x1C);
 
-				// Assemble the name: prefer the long name (reverse order), else the 8.3 short name.
+				// Assemble the name: trust the same-checksum run if verifiable against this LIVE short entry, or accept
+				// it best-effort for a DELETED entry (whose short name's first byte is 0xE5); else the 8.3 short name.
 				string name = "";
-				if (lfn.Count > 0) { lfn.Reverse(); name = string.Concat(lfn).TrimEnd('￿', '\0', ' '); }
-				lfn.Clear();
+				if (lfn.Count > 0 && (deleted || LfnChecksum(dir, p) == lfnChk)) { lfn.Reverse(); name = string.Concat(lfn).TrimEnd('￿', '\0', ' '); }
+				lfn.Clear(); lfnChk = -1;
 				if (string.IsNullOrEmpty(name)) name = ShortName(dir, p, deleted);
 
 				if (string.IsNullOrWhiteSpace(name) || name == "." || name == "..") continue;
@@ -748,9 +849,15 @@ public partial class MainWindow
 				}
 				if (deleted)
 				{
+					// Honour the shared memory/UI cap — this loop was the only scanner that ignored it, so a
+					// high-churn FAT32 drive could blow past the limit the constant exists to enforce.
+					if (result.Files.Count >= MaxRecoverEntries) continue;
 					// List EVERY deleted file, even when its data location was wiped by the OS on delete — that
 					// way nothing silently disappears; unrecoverable ones are shown with a clear reason.
-					bool canRec = firstCluster >= 2 && size > 0;
+					// Bound the stale first-cluster/size fields by what the volume can physically hold, or an entry
+					// pointing far past the end of the device gets a green "recoverable" pill.
+					bool canRec = firstCluster >= 2 && (clusterCount <= 0 || firstCluster < 2 + clusterCount)
+						&& size > 0 && (clusterCount <= 0 || size <= clusterCount * (long)clusterSize);
 					result.Files.Add(new DeletedFile
 					{
 						ExFat = true, Contiguous = true, // recover by reading contiguous clusters via shared geometry
@@ -780,6 +887,17 @@ public partial class MainWindow
 		void grab(int off, int count) { for (int i = 0; i < count; i++) { int o = p + off + i * 2; if (o + 1 < dir.Length) { char c = (char)BitConverter.ToUInt16(dir, o); if (c == 0xFFFF || c == 0) return; sb.Append(c); } } }
 		grab(0x01, 5); grab(0x0E, 6); grab(0x1C, 2);
 		return sb.ToString();
+	}
+
+	// The LFN checksum every long-name slot of a chain carries at offset 0x0D: a rotate-right-add over the entry's
+	// 11-byte 8.3 name. Lets us verify a chain belongs to a LIVE short entry (its first byte is intact); for a DELETED
+	// entry the first byte is 0xE5 so the result won't match — callers accept the same-checksum run best-effort there.
+	private static int LfnChecksum(byte[] dir, int p)
+	{
+		int sum = 0;
+		for (int i = 0; i < 11; i++)
+			sum = ((((sum & 1) != 0) ? 0x80 : 0) + (sum >> 1) + dir[p + i]) & 0xFF;
+		return sum;
 	}
 
 	private static string ShortName(byte[] dir, int p, bool deleted)
@@ -911,10 +1029,16 @@ public partial class MainWindow
 		new Sig { Name = "SQLite database", Ext = ".sqlite", Header = new byte[]{0x53,0x51,0x4C,0x69,0x74,0x65,0x20,0x66,0x6F,0x72,0x6D,0x61,0x74,0x20,0x33,0x00}, Sqlite = true, MaxLen = 2048L<<20 },
 	};
 
-	private NtfsScanResult DeepScan(char letter, CancellationToken ct, Action<int> progress, long startOffset = 0, int startCount = 0)
+	private NtfsScanResult DeepScan(char letter, CancellationToken ct, Action<int> progress, long startOffset = 0, int startCount = 0, byte[]? expectedBootSig = null)
 	{
 		var result = new NtfsScanResult { Letter = letter };
 		var vr = OpenVolume(letter);
+		byte[] curBoot; try { curBoot = vr.Read(0, 512); } catch { curBoot = new byte[512]; }
+		// Resuming a saved deep-scan session: refuse if the drive letter now points at a different disk than it did when
+		// the scan was started (removable letters get reused), so we never scan/recover from the wrong drive.
+		if (expectedBootSig != null && expectedBootSig.Length == 512 && !curBoot.AsSpan().SequenceEqual(expectedBootSig))
+		{ vr.Dispose(); throw new IOException($"The volume at {letter}: is not the one this deep-scan session was started on — its drive letter now points to a different disk. Resuming was stopped to avoid scanning the wrong drive."); }
+		result.BootSig = curBoot;
 		long total = 0, pos = startOffset;
 		try
 		{
@@ -924,6 +1048,7 @@ public partial class MainWindow
 			int maxHeader = CarveSigs.Max(s => s.Header.Length);
 			int count = startCount;
 			long lastPush = 0;
+			long skipUntil = 0; // absolute byte offset a prior carved file extends to — skip re-scanning its interior across 32 MB blocks
 			pos -= pos % block; // resume on a block boundary
 			while (pos < total && !stopRequested)
 			{
@@ -933,7 +1058,12 @@ public partial class MainWindow
 				if (want <= maxHeader) break;
 				byte[] chunk = vr.Read(pos, want);
 				int limit = want - maxHeader;
-				for (int i = 0; i < limit; i += 512) // pos is always 512-aligned, so step whole sectors: deleted data starts on a sector boundary; far less loop overhead than testing every byte
+				int blkStartFiles; lock (result.Files) blkStartFiles = result.Files.Count;
+				int blkStartCount = count; // roll-back anchors: if Stop lands mid-block we undo this block and re-scan it on resume
+				// Skip the tail of a carved file that began in an earlier 32 MB block: otherwise block N+1 starts inside
+				// the still-open file and re-scans its interior, emitting spurious carves that can exhaust the entry cap.
+				int i0 = skipUntil > pos ? (int)Math.Min((long)limit, (skipUntil - pos + 511) & ~511L) : 0;
+				for (int i = i0; i < limit; i += 512) // pos is always 512-aligned, so step whole sectors: deleted data starts on a sector boundary; far less loop overhead than testing every byte
 				{
 					// every i lands on a sector boundary because the loop steps by 512 and pos is 512-aligned
 					Sig? hit = null;
@@ -963,9 +1093,21 @@ public partial class MainWindow
 							Name = $"deepscan_{count:D5}{ext}", Path = "(deep scan)",
 							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
 						}); } // cap carved entries like every other scanner, so a noisy disk can't exhaust memory
+						skipUntil = Math.Max(skipUntil, fileStart + len); // carry the carved file's end across the 32 MB block boundary
 						long advance = (fileStart + len) - pos;
 						if (advance > i + 512) { long next = (advance + 511) & ~511L; i = (int)(Math.Min((long)limit, next) - 512); } // resume at the next sector past the carved file (-512 offsets the loop's += 512)
 					}
+				}
+				if (stopRequested)
+				{
+					// Stop landed mid-block. The footer/box length-resolvers (FindFooter, Mp4Length) bail to 0 the
+					// instant stopRequested is set, so every remaining JPEG/PNG/PDF/MP4/… in this block would silently
+					// fail to carve — and advancing pos would checkpoint PAST this half-searched block, so resume would
+					// skip those files forever. Undo this block's partial carves and leave pos at its START so resume
+					// re-scans it cleanly. (Header-only signatures already carved this block are re-found on resume.)
+					lock (result.Files) { if (result.Files.Count > blkStartFiles) result.Files.RemoveRange(blkStartFiles, result.Files.Count - blkStartFiles); }
+					count = blkStartCount;
+					break;
 				}
 				pos += block;
 				// Live feedback: the percent rounds to 0 for a long time on big drives, so also show bytes + count,
@@ -1001,6 +1143,7 @@ public partial class MainWindow
 			const int block = 32 << 20;
 			int maxHeader = CarveSigs.Max(s => s.Header.Length);
 			int count = startCount; long lastPush = 0;
+			long skipUntil = 0; // absolute byte offset a prior carved file extends to — skip re-scanning its interior across 32 MB blocks
 			pos -= pos % block;
 			while (pos < total && !stopRequested)
 			{
@@ -1010,7 +1153,12 @@ public partial class MainWindow
 				if (want <= maxHeader) break;
 				byte[] chunk = vr.Read(pos, want);
 				int limit = want - maxHeader;
-				for (int i = 0; i < limit; i += 512) // pos is always 512-aligned, so step whole sectors: deleted data starts on a sector boundary; far less loop overhead than testing every byte
+				int blkStartFiles; lock (result.Files) blkStartFiles = result.Files.Count;
+				int blkStartCount = count; // roll-back anchors: if Stop lands mid-block we undo this block and re-scan it on resume
+				// Skip the tail of a carved file that began in an earlier 32 MB block: otherwise block N+1 starts inside
+				// the still-open file and re-scans its interior, emitting spurious carves that can exhaust the entry cap.
+				int i0 = skipUntil > pos ? (int)Math.Min((long)limit, (skipUntil - pos + 511) & ~511L) : 0;
+				for (int i = i0; i < limit; i += 512) // pos is always 512-aligned, so step whole sectors: deleted data starts on a sector boundary; far less loop overhead than testing every byte
 				{
 					// every i lands on a sector boundary because the loop steps by 512 and pos is 512-aligned
 					Sig? hit = null;
@@ -1040,9 +1188,21 @@ public partial class MainWindow
 							Name = $"deepscan_{count:D5}{ext}", Path = "(deep scan)",
 							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
 						}); } // cap carved entries like every other scanner, so a noisy disk can't exhaust memory
+						skipUntil = Math.Max(skipUntil, fileStart + len); // carry the carved file's end across the 32 MB block boundary
 						long advance = (fileStart + len) - pos;
 						if (advance > i + 512) { long next = (advance + 511) & ~511L; i = (int)(Math.Min((long)limit, next) - 512); } // resume at the next sector past the carved file (-512 offsets the loop's += 512)
 					}
+				}
+				if (stopRequested)
+				{
+					// Stop landed mid-block. The footer/box length-resolvers (FindFooter, Mp4Length) bail to 0 the
+					// instant stopRequested is set, so every remaining JPEG/PNG/PDF/MP4/… in this block would silently
+					// fail to carve — and advancing pos would checkpoint PAST this half-searched block, so resume would
+					// skip those files forever. Undo this block's partial carves and leave pos at its START so resume
+					// re-scans it cleanly. (Header-only signatures already carved this block are re-found on resume.)
+					lock (result.Files) { if (result.Files.Count > blkStartFiles) result.Files.RemoveRange(blkStartFiles, result.Files.Count - blkStartFiles); }
+					count = blkStartCount;
+					break;
 				}
 				pos += block;
 				progress(total > 0 ? (int)Math.Min(99, pos * 100 / total) : 0);
@@ -1248,12 +1408,20 @@ public partial class MainWindow
 		long dataOffset = rootDirOffset + (long)rootDirSectors * bytesPerSector; // byte offset of cluster #2
 		long ClusterToByte(long cl) => dataOffset + (cl - 2) * (long)clusterSize;
 
+		// FAT12 vs FAT16 is decided by CLUSTER COUNT (<4085 = FAT12), per the spec — the "FAT12"/"FAT16" string in the
+		// boot sector is documented as informational only. Both land here, but their FAT entry widths differ.
+		long totalSectors = BitConverter.ToUInt16(boot, 0x13);
+		if (totalSectors == 0) totalSectors = BitConverter.ToUInt32(boot, 0x20);
+		long dataSectors = totalSectors - (reservedSectors + (long)numFats * sectorsPerFat + rootDirSectors);
+		long clusterCount = dataSectors > 0 ? dataSectors / sectorsPerCluster : 0;
+		bool fat12 = clusterCount > 0 && clusterCount < 4085;
+
 		var result = new NtfsScanResult { Letter = letter, ClusterSize = clusterSize, BytesPerSector = bytesPerSector, DataAreaOffset = dataOffset, FatOffset = fatOffset };
 
-		// Parse the fixed-size root directory first, then walk sub-directories via the (16-bit) FAT.
+		// Parse the fixed-size root directory first, then walk sub-directories via the FAT.
 		byte[] root = vr.Read(rootDirOffset, rootDirSectors * bytesPerSector);
 		var subdirs = new Queue<(long cluster, string path)>();
-		ParseFatDirBuffer(root, "", false, subdirs, result.Files);
+		ParseFatDirBuffer(root, "", false, subdirs, result.Files, clusterCount, clusterSize);
 		progress(50);
 
 		var visited = new HashSet<long>();
@@ -1261,8 +1429,8 @@ public partial class MainWindow
 		{
 			var (cl, path) = subdirs.Dequeue();
 			if (cl < 2 || !visited.Add(cl)) continue;
-			byte[] dir = ReadFat16Chain(vr, cl, fatOffset, ClusterToByte, clusterSize, 16L * 1024 * 1024);
-			ParseFatDirBuffer(dir, path, false, subdirs, result.Files);
+			byte[] dir = ReadFat16Chain(vr, cl, fatOffset, ClusterToByte, clusterSize, 16L * 1024 * 1024, fat12);
+			ParseFatDirBuffer(dir, path, false, subdirs, result.Files, clusterCount, clusterSize);
 		}
 
 		AnnotateGenericHealth(result.Files);
@@ -1273,16 +1441,28 @@ public partial class MainWindow
 		return result;
 	}
 
-	private byte[] ReadFat16Chain(VolumeReader vr, long firstCluster, long fatOffset, Func<long, long> clusterToByte, int clusterSize, long maxBytes)
+	// Walks a FAT16 *or* FAT12 cluster chain. FAT12 packs each entry into 12 bits (entry n starts at byte n*3/2 and
+	// is the low or high 12 bits depending on n's parity) — reading those as 16-bit values, as this used to, returns
+	// a neighbouring entry's bits and walks a garbage chain.
+	private byte[] ReadFat16Chain(VolumeReader vr, long firstCluster, long fatOffset, Func<long, long> clusterToByte, int clusterSize, long maxBytes, bool fat12 = false)
 	{
 		var ms = new MemoryStream();
+		long eocMin = fat12 ? 0xFF8 : 0xFFF8, badMax = fat12 ? 0xFF0 : 0xFFF0;
 		long cl = firstCluster; int guard = 0; var seen = new HashSet<long>();
-		while (cl >= 2 && cl < 0xFFF0 && ms.Length < maxBytes && guard++ < 200000 && seen.Add(cl))
+		while (cl >= 2 && cl < badMax && ms.Length < maxBytes && guard++ < 200000 && seen.Add(cl))
 		{
 			if (stopRequested) break;
 			ms.Write(vr.Read(clusterToByte(cl), clusterSize), 0, clusterSize);
-			long next = BitConverter.ToUInt16(vr.Read(fatOffset + cl * 2, 2), 0);
-			if (next >= 0xFFF8 || next < 2) break;
+			long next;
+			if (fat12)
+			{
+				byte[] two = vr.Read(fatOffset + (cl * 3) / 2, 2);
+				if (two.Length < 2) break;
+				int raw = BitConverter.ToUInt16(two, 0);
+				next = (cl & 1) == 0 ? (raw & 0x0FFF) : (raw >> 4);
+			}
+			else next = BitConverter.ToUInt16(vr.Read(fatOffset + cl * 2, 2), 0);
+			if (next >= eocMin || next < 2) break;
 			cl = next;
 		}
 		return ms.ToArray();
@@ -1290,16 +1470,29 @@ public partial class MainWindow
 
 	// Shared FAT directory-entry parser (FAT16 root region and FAT16/FAT32 sub-directories). fat32 selects how
 	// the starting cluster is read (FAT32 uses the high word too).
-	private void ParseFatDirBuffer(byte[] dir, string path, bool fat32, Queue<(long cluster, string path)> subdirs, List<DeletedFile> files)
+	private void ParseFatDirBuffer(byte[] dir, string path, bool fat32, Queue<(long cluster, string path)> subdirs, List<DeletedFile> files, long clusterCount = 0, int clusterSizeBytes = 0)
 	{
 		var lfn = new List<string>();
+		int lfnChk = -1;
 		for (int p = 0; p + 32 <= dir.Length; p += 32)
 		{
 			byte first = dir[p];
 			if (first == 0x00) break; // end of directory
 			byte attr = dir[p + 0x0B];
-			if (attr == 0x0F) { lfn.Add(ReadLfnChars(dir, p)); continue; }
-			if (attr == 0x08) { lfn.Clear(); continue; } // volume label
+			if (attr == 0x0F)
+			{
+				// Group long-name slots by the CHECKSUM byte (0x0D), NOT the sequence byte (0). Deletion overwrites
+				// byte 0 of the short entry AND of every LFN slot with 0xE5, so the sequence / last-slot bits are gone
+				// for deleted files — the whole point of this feature — but the checksum byte, the 0x0F attribute and
+				// the name characters all survive. Slots of one chain share one checksum; reset the run when it changes
+				// (an orphan chain from an earlier file abutting this one). The name is assembled at the short entry.
+				int chk = dir[p + 0x0D];
+				if (lfn.Count > 0 && chk != lfnChk) lfn.Clear();
+				lfnChk = chk;
+				lfn.Add(ReadLfnChars(dir, p));
+				continue;
+			}
+			if (attr == 0x08) { lfn.Clear(); lfnChk = -1; continue; } // volume label
 			bool deleted = first == 0xE5;
 			bool isDir = (attr & 0x10) != 0;
 			long lo = BitConverter.ToUInt16(dir, p + 0x1A);
@@ -1307,8 +1500,12 @@ public partial class MainWindow
 			long size = BitConverter.ToUInt32(dir, p + 0x1C);
 
 			string name = "";
-			if (lfn.Count > 0) { lfn.Reverse(); name = string.Concat(lfn).TrimEnd('￿', '\0', ' '); }
-			lfn.Clear();
+			// Trust the assembled long name when the same-checksum run is (a) verifiable against this LIVE short
+			// entry's computed checksum (proving the slots belong to it, not an orphan chain) or (b) the entry is
+			// DELETED, whose short name's first byte is 0xE5 so the checksum can't be recomputed — accept the run
+			// best-effort (standard undelete behaviour; the shared-checksum grouping already rejects unrelated chains).
+			if (lfn.Count > 0 && (deleted || LfnChecksum(dir, p) == lfnChk)) { lfn.Reverse(); name = string.Concat(lfn).TrimEnd('￿', '\0', ' '); }
+			lfn.Clear(); lfnChk = -1;
 			if (string.IsNullOrEmpty(name)) name = ShortName(dir, p, deleted);
 			if (string.IsNullOrWhiteSpace(name) || name == "." || name == "..") continue;
 
@@ -1318,7 +1515,12 @@ public partial class MainWindow
 				continue;
 			}
 			if (files.Count >= MaxRecoverEntries) continue;
-			bool canRec = firstCluster >= 2 && size > 0;
+			// The first-cluster and size fields of a DELETED entry are frequently stale garbage. Bound both by what
+			// the volume can physically hold — otherwise a green "90% recoverable" pill is shown for an entry whose
+			// first cluster is far past the end of the device and whose data can never be read.
+			bool clusterInRange = firstCluster >= 2 && (clusterCount <= 0 || firstCluster < 2 + clusterCount);
+			bool sizeInRange = size > 0 && (clusterCount <= 0 || clusterSizeBytes <= 0 || size <= clusterCount * (long)clusterSizeBytes);
+			bool canRec = clusterInRange && sizeInRange;
 			// Contiguity/recoverability must respect the FAT width. RecoverOne's chain-walk (NtfsRecovery.cs ~1413)
 			// reads 32-bit FAT entries — correct for FAT32/exFAT, WRONG for FAT16/12. So:
 			//  - DELETED file → contiguous best-effort (the FAT chain is usually wiped on delete anyway);
@@ -1362,11 +1564,14 @@ public partial class MainWindow
 		bool isExFat = boot.Length >= 11 && boot[3] == 'E' && boot[4] == 'X' && boot[5] == 'F' && boot[6] == 'A' && boot[7] == 'T';
 		bool isFat32 = boot.Length >= 0x5A && boot[0x52] == 'F' && boot[0x53] == 'A' && boot[0x54] == 'T' && boot[0x55] == '3' && boot[0x56] == '2';
 		bool isFat16 = boot.Length >= 0x3B && boot[0x36] == 'F' && boot[0x37] == 'A' && boot[0x38] == 'T'; // FAT12 / FAT16
-		if (isNtfs) return ScanNtfs(letter, vr, boot, ct, progress);
-		if (isExFat) return ScanExFat(letter, vr, boot, ct, progress);
-		if (isFat32) return ScanFat32(letter, vr, boot, ct, progress);
-		if (isFat16) return ScanFat16(letter, vr, boot, ct, progress);
-		throw new IOException("This source is not a supported volume (NTFS, exFAT, FAT32, FAT16 or FAT12).");
+		NtfsScanResult r =
+			isNtfs ? ScanNtfs(letter, vr, boot, ct, progress) :
+			isExFat ? ScanExFat(letter, vr, boot, ct, progress) :
+			isFat32 ? ScanFat32(letter, vr, boot, ct, progress) :
+			isFat16 ? ScanFat16(letter, vr, boot, ct, progress) :
+			throw new IOException("This source is not a supported volume (NTFS, exFAT, FAT32, FAT16 or FAT12).");
+		r.BootSig = boot; // fingerprint for stale-session (wrong-disk) detection at recover time
+		return r;
 	}
 
 	// Rebuilds one deleted file onto disk by reading its clusters off the raw volume.
@@ -1382,10 +1587,16 @@ public partial class MainWindow
 		// Recycle Bin entry: the data still exists as a real $R file/folder — just copy it. Zero-risk recovery.
 		if (!string.IsNullOrEmpty(f.SourcePath))
 		{
-			if (Directory.Exists(f.SourcePath)) { CopyDirectory(f.SourcePath, outPath); return 0; }
+			// A folder copy is complete or it throws — report the full size so the caller doesn't read 0 as "truncated".
+			if (Directory.Exists(f.SourcePath)) { CopyDirectory(f.SourcePath, outPath); return f.Size; }
 			File.Copy(f.SourcePath, outPath, true);
 			try { return new FileInfo(outPath).Length; } catch { return f.Size; }
 		}
+		// No recovery payload at all — e.g. a Recycle Bin row reloaded from a v1 .dfscan, which stored no SourcePath.
+		// Refuse LOUDLY and BEFORE creating the output file: silently writing a 0-byte file that the caller counts as
+		// a success is what invites the user to delete the only surviving copy.
+		if (!f.Carved && !f.Resident && !f.ExFat && f.Runs.Count == 0 && f.Size > 0)
+			throw new InvalidOperationException("This entry carries no recovery data (it came from an older saved session). Re-scan the drive, then recover it.");
 		using var outFs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
 		int clusterSize = g.ClusterSize;
 
@@ -1413,13 +1624,17 @@ public partial class MainWindow
 			while (remaining > 0 && cl >= 2 && guard++ < 10_000_000 && seen.Add(cl))
 			{
 				int chunk = (int)Math.Min(clusterSize, remaining);
-				byte[] data = vr.Read(g.DataAreaOffset + (cl - 2) * (long)clusterSize, chunk);
-				outFs.Write(data, 0, chunk);
-				remaining -= chunk;
+				// Use the checked read: the old unchecked one wrote `chunk` bytes regardless, so an unreadable or
+				// out-of-range cluster was silently ZERO-FILLED and still counted toward a "full size" success.
+				byte[] data = vr.Read(g.DataAreaOffset + (cl - 2) * (long)clusterSize, chunk, out int got);
+				if (got <= 0) break;                 // unreadable / past the end of the volume — stop, never invent zeros
+				outFs.Write(data, 0, got);
+				remaining -= got;
+				if (got < chunk) break;              // short read — the rest of this cluster is unreadable
 				if (f.Contiguous) { cl++; }
 				else { long next = BitConverter.ToUInt32(vr.Read(g.FatOffset + cl * 4, 4), 0); if (next >= 0xFFFFFFF8 || next < 2) break; cl = next; }
 			}
-			return f.Size - remaining;
+			return f.Size - remaining;   // now reflects what was ACTUALLY written
 		}
 
 		// NTFS: walk data runs (absolute LCNs).
