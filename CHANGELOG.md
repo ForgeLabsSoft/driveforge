@@ -2,6 +2,47 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.3.1 — 2026-07-26
+
+Safety fixes to confirmation dialogs, a translation fix on the recovery warning, and the project's first
+automated test suite.
+
+### Safety
+- **Pressing Enter on a confirmation dialog no longer triggers the destructive action.** Nine dialogs had no
+  explicit default button, so Windows focused the first one — meaning Enter or Space confirmed instead of
+  cancelling. Affected: erase free space, capacity test, grow/create partition, set active partition, test boot
+  (which takes the disk offline and boots a guest OS that writes to it), overwrite a downloaded ISO, CHKDSK
+  repair, and closing the app during a running operation (which killed the running tool mid-write). All of them
+  now default to Cancel/No.
+- **Fixed a reentrancy hole in Shred and Surface test.** Both checked a "something is already starting" guard but
+  never set it, so the guard did nothing. During the file picker and confirmation dialogs — 49 lines of the shred
+  flow — a second destructive operation could be started on the same disk. Both now hold the guard for the whole
+  flow.
+- **The "you are recovering onto the same disk" warning was misleading in 15 languages.** This is an OK/Cancel
+  dialog where OK writes onto the very disk being recovered. English and Romanian spelled out what each button
+  does; the other 15 languages had been translated as a flat refusal, with no indication that OK proceeds anyway.
+  All 15 rewritten to state the risk, the recommended alternative, that you may continue if it is your only disk,
+  and what each button does.
+
+### Fixed
+- German text on that warning used informal address, out of step with every other German dialog, and called an
+  SSD/USB drive a "hard disk".
+- Arabic: the button legend on that warning displayed mirrored relative to the actual button positions.
+- Turkish text said "the files you rescued" rather than "the files you are trying to rescue".
+- Pause buttons lost their state when the language was switched: while an operation was paused, the button that
+  resumes it reverted to reading "Pause". The Clean panel's button likewise lost its computed size.
+- The engine checkboxes (Microsoft DISM / Fast Clone) no longer appear when installing Windows from an ISO —
+  they only ever applied to cloning, and did nothing there.
+- Installing from an ISO no longer shows the "you may need to reinstall your antivirus" note. That note is about
+  restoring a clone of an existing PC; a fresh install from a Windows ISO has no antivirus on it.
+- Removed two unused, half-translated internal strings.
+
+### Under the hood
+- **Added an automated test suite** (78 tests, runs in about a second) covering the pure logic, all 17
+  localizations (key parity, placeholder counts, structural drift) and the project's own code invariants. It runs
+  on every push and blocks a release if it fails. Four of the fixes above were found by it on its first run.
+- Added a manual hardware-test checklist for the parts that cannot be automated.
+
 ## v4.3.0 — 2026-07-26
 
 A large safety and reliability pass across every feature in the app, plus a new keep-awake

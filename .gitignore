@@ -11,6 +11,10 @@ DriveForge-clean-log/
 *.dll
 *.pdb
 
+# Test output
+TestResults/
+*.trx
+
 # IDE / OS junk
 .vs/
 *.user

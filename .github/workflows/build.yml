@@ -30,6 +30,29 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # Verification runs BEFORE the build/publish steps on purpose: GitHub Actions stops the job at the first
+      # failing step, so a red test blocks Restore, Publish, Attest AND the release step below. A broken build can
+      # therefore no longer be tagged into a release.
+      #
+      # The explicit project path is required. `dotnet test` at the repo root (there is no .sln) picks up
+      # DriveForge.csproj, runs ZERO tests and exits 0 — a silent false green that looks like passing CI.
+      - name: Run tests (unit + localization + code invariants)
+        run: >
+          dotnet test tests/DriveForge.Tests/DriveForge.Tests.csproj
+          -c Release
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory TestResults
+
+      # always() so the .trx is available precisely when tests FAILED. This is the only step that may ignore the
+      # job status — never put continue-on-error on the test step itself, that reintroduces the false green.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults/*.trx
+          if-no-files-found: warn
+
       - name: Restore
         run: dotnet restore DriveForge.csproj
 

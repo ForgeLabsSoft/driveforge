@@ -872,7 +872,7 @@ public partial class MainWindow : Window, IComponentConnector
 		if (headlessRun) return;
 		if (isBusy || _cleanBusy || _analyzerBusy)
 		{
-			MessageBoxResult messageBoxResult = MessageBox.Show(L("Mb004"), "DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Exclamation);
+			MessageBoxResult messageBoxResult = MessageBox.Show(L("Mb004"), "DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Exclamation, MessageBoxResult.No);
 			e.Cancel = messageBoxResult != MessageBoxResult.Yes;
 			// If the user confirms close, signal the background workers to stop AND kill the running external tool
 			// (diskpart/dism/wimlib) before teardown — otherwise it keeps writing to the disk after the app has exited.
@@ -1424,6 +1424,13 @@ public partial class MainWindow : Window, IComponentConnector
 			// automatically (whole-disk clone), so the checkbox is hidden there.
 			CloneOtherPartitionsCheck.Visibility = (ModeBox.SelectedIndex == ModeCloneCurrentWindows) ? Visibility.Visible : Visibility.Collapsed;
 			ScheduleCloneButton.Visibility = cloneMode ? Visibility.Visible : Visibility.Collapsed;
+			// Only RunExperimentalFullRootUsbCloneAsync (the clone flow) ever reads these two — a fresh ISO install
+			// applies install.wim directly and has no "engine" choice, so the checkboxes did nothing there but sit
+			// on screen looking like a decision the user needed to make. Same treatment as the bypass checkboxes above.
+			UseDismEngineCheck.Visibility = cloneMode ? Visibility.Visible : Visibility.Collapsed;
+			UseNtfsRawEngineCheck.Visibility = cloneMode ? Visibility.Visible : Visibility.Collapsed;
+			UseDismEngineCheck.IsEnabled = cloneMode;
+			UseNtfsRawEngineCheck.IsEnabled = cloneMode;
 			BypassRequirementsCheck.IsEnabled = installMode;
 			BypassAccountCheck.IsEnabled = installMode;
 			DebloatCheck.IsEnabled = installMode;
@@ -2295,7 +2302,12 @@ public partial class MainWindow : Window, IComponentConnector
 					UpdateProgressStats();
 					NotifyOperationDone(true);
 					string bootHelp = L("MbBootHelp");
-					MessageBox.Show(L("MbUsbDone") + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
+					// The antivirus-reinstall note only makes sense when restoring an actual PC backup/clone (WIM,
+					// VHDX, FFU) — that image can genuinely carry an installed, hardware-bound security suite. A
+					// fresh install from an official Windows ISO (ModeInstallFromImage) has no antivirus on it at
+					// all, so the note was pure noise there — worse, it read as if something HAD been carried over.
+					string avNote = ModeBox.SelectedIndex == ModeInstallFromImage ? "" : "\n\n" + L("MbAvCloneNote");
+					MessageBox.Show(L("MbUsbDone") + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + avNote, "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
 					if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(diskItem.Number);
 				}
 			}
@@ -2346,7 +2358,8 @@ public partial class MainWindow : Window, IComponentConnector
 			MessageBox.Show(L("DScanNeedLetter"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation);
 			return;
 		}
-		if (repair && MessageBox.Show(string.Format(L("DScanRepairConfirm"), driveLetter), L("DScanRepairTitle"), MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
+		// Safe default: Yes runs `chkdsk /r /x`, which force-dismounts the volume and can relocate data into found.000.
+		if (repair && MessageBox.Show(string.Format(L("DScanRepairConfirm"), driveLetter), L("DScanRepairTitle"), MessageBoxButton.YesNo, MessageBoxImage.Exclamation, MessageBoxResult.No) != MessageBoxResult.Yes)
 		{
 			return;
 		}
@@ -7452,7 +7465,7 @@ exit 0
 		// is least likely to expect losing their Previous Versions. Warn always, with wording true for each case.
 		string confirmBody = string.Format(L("MbWipeFreeConfirm"), letter, FormatBytes(free), fills.Length)
 			+ "\n\n" + L(disk.IsSystem ? "WipeVssWarn" : "WipeVssWarnAny");
-		if (MessageBox.Show(confirmBody, L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK)
+		if (MessageBox.Show(confirmBody, L("MbWipeFreeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		bool failed = false;
@@ -8253,7 +8266,7 @@ exit 0
 		if (free < 16L * 1024 * 1024) { MessageBox.Show(L("Mb030"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		if (MessageBox.Show(string.Format(L("MbCapacityConfirm"), disk.FriendlyName, letter, FormatBytes(disk.Size), FormatBytes(free)),
-				L("MbCapacityTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK)
+				L("MbCapacityTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		string dir = letter + ":\\__driveforge_captest__";
@@ -8438,7 +8451,7 @@ exit 0
 			bool uefi = fw.Value == 0;
 
 			if (MessageBox.Show(string.Format(L("MbBootTestConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), (uefi ? "UEFI" : "Legacy BIOS")),
-					L("MbTestBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK)
+					L("MbTestBootTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 				return;
 
 			// This offlines the disk on the host and boots an OS from it (the guest WRITES to it). Re-confirm the disk
@@ -12253,7 +12266,7 @@ exit 0
 		string part = dest + ".part"; // download here, rename to the real name only after a complete download
 
 		if (File.Exists(dest) &&
-			MessageBox.Show(string.Format(L("DlOverwrite"), name, folder), L("MbDownloadTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+			MessageBox.Show(string.Format(L("DlOverwrite"), name, folder), L("MbDownloadTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
 		bool failed = false;
@@ -12570,6 +12583,12 @@ exit 0
 	private async void SurfaceTest_Click(object sender, RoutedEventArgs e)
 	{
 		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		// Arm the guard for the WHOLE pre-write window. This handler CHECKED _toolOpStarting but never set it, so the
+		// guard was inert: the confirm dialogs below pump the message loop, and the adjacent always-enabled tool
+		// buttons could start a second operation on the same disk. Cleared in the outer finally.
+		_toolOpStarting = true;
+		try
+		{
 		var disk = (DiagDiskBox?.SelectedItem ?? DiskBox?.SelectedItem) as DiskItem;
 		if (disk == null) { MessageBox.Show(L("Mb039"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (!IsAdministrator()) { MessageBox.Show(L("Mb040"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
@@ -12673,6 +12692,8 @@ exit 0
 			if (ToolStopButton != null) ToolStopButton.IsEnabled = false;
 			SetBusy(busy: false);
 		}
+		}
+		finally { _toolOpStarting = false; }
 	}
 
 	private (long readBytes, int bad, long badBytes, bool stopped, string detail) RunSurfaceScanCore(DiskItem disk)
@@ -12732,6 +12753,12 @@ exit 0
 	private async void ShredFiles_Click(object sender, RoutedEventArgs e)
 	{
 		if (isBusy || _toolOpStarting) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		// Arm the guard for the WHOLE pre-write window. This handler CHECKED _toolOpStarting but never set it, so the
+		// guard was inert: the confirm dialogs below pump the message loop, and the adjacent always-enabled tool
+		// buttons could start a second operation on the same disk. Cleared in the outer finally.
+		_toolOpStarting = true;
+		try
+		{
 
 		int? what = ShowActionMenu(L("MbShredTitle"), L("AmShredWhatPrompt"),
 			new[] { L("AmShredFiles"), L("AmShredFolder") },
@@ -12832,6 +12859,8 @@ exit 0
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrShred"), ex); }
 		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
+		}
+		finally { _toolOpStarting = false; }
 	}
 
 	// Overwrites one file in place with the given passes (0=zeros, 1=ones, 2=random), then renames + deletes it.
@@ -13218,7 +13247,7 @@ exit 0
 			if (amt.Length == 0) extend = "extend";
 			else if (long.TryParse(amt, out long mb) && mb > 0) extend = $"extend size={mb}";
 			else { MessageBox.Show(L("PtBadAmount"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-			if (MessageBox.Show(string.Format(L("PtGrowConfirm"), letter), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+			if (MessageBox.Show(string.Format(L("PtGrowConfirm"), letter), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 			cmd = $"select volume {letter}\r\n{extend}\r\nexit\r\n";
 			working = string.Format(L("PtResizeWorking"), letter);
 		}
@@ -13749,7 +13778,7 @@ exit 0
 				return;
 			}
 		}
-		if (MessageBox.Show(string.Format(L("PtCreateConfirm"), disk.Number), L("PtCreate"), MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+		if (MessageBox.Show(string.Format(L("PtCreateConfirm"), disk.Number), L("PtCreate"), MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // disks can renumber between the scan and the click — re-confirm identity before create+format
 		try
 		{
@@ -13871,7 +13900,7 @@ exit 0
 	{
 		if (!GuardSystemDisk(disk)) return;
 		if (disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true) { MessageBox.Show(L("PtActiveGpt"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-		if (MessageBox.Show(string.Format(L("PtActiveConfirm"), disk.Number), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+		if (MessageBox.Show(string.Format(L("PtActiveConfirm"), disk.Number), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // disks can renumber between the scan and the click — re-confirm identity before flipping the active/boot partition
 		try
 		{

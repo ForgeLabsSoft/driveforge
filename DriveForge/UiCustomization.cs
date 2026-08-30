@@ -192,6 +192,9 @@ public partial class MainWindow
 		ApplyAccessibilityNames();
 		ApplyToolTips();
 		RefreshCleanLabels(); // data-driven clean categories follow the language too
+		// CleanRunButton is BOTH a control name and a string key, so the loop above resets it to the static
+		// "Clean now" — throwing away the computed size ("Clean now — 4.2 GB") that Analyze put there.
+		RecomputeCleanTotal();
 	}
 
 	// Localizes hover tooltips. ApplyLanguage only sets .Text/.Content/.Header, never .ToolTip, so the
@@ -280,6 +283,13 @@ public partial class MainWindow
 		if (ExPanelTitle != null) ExPanelTitle.Text = L("TbExportVhdx");
 		if (ExPanelDesc != null) ExPanelDesc.Text = L("SbExportVhdxS") + "\n\n" + L("ExportVhdxBackupHint");
 		if (ExportVhdxRunButton != null) ExportVhdxRunButton.Content = L("TbExportVhdx");
+		// Pause buttons encode LIVE STATE in their caption, so the generic FindName loop above (which writes the
+		// static "Pause" key) makes them lie: switch language while an operation is paused and the button that
+		// resumes it starts reading "Pause". RecoverPauseButton has the mirror-image bug — it is not a string key at
+		// all, so the loop never touches it and it keeps the PREVIOUS language's caption until the next state change.
+		if (PauseButton != null) PauseButton.Content = L(isPaused ? "BtnResume" : "BtnPause");
+		if (ToolPauseButton != null) ToolPauseButton.Content = L(isPaused ? "BtnResume" : "BtnPause");
+		if (RecoverPauseButton != null) RecoverPauseButton.Content = L(_recoverPaused ? "BtnResume" : "BtnPause");
 		if (StartButton != null)
 		{
 			StartButton.Content = backupMode ? L("StartBackup") : cloneMode ? L("StartClone")

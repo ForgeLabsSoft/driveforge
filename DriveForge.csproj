@@ -7,6 +7,12 @@
     <UseWPF>True</UseWPF>
     <UseWindowsForms>True</UseWindowsForms>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- This .csproj sits at the repo ROOT with no explicit Compile items, so it globs **/*.cs (and **/*.xaml as
+         Page). Without this exclusion, adding tests/ silently pulls the test sources — and the test project's own
+         generated obj/**/*.cs — into the APP build, which then fails on 'Xunit not found' and duplicate assembly
+         attributes. DefaultItemExcludes covers every default glob at once (Compile, Page, None, Resource,
+         EmbeddedResource); a Compile Remove would only cover one of them. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests\**;tools\**</DefaultItemExcludes>
   </PropertyGroup>
   <PropertyGroup>
     <LangVersion>preview</LangVersion>
