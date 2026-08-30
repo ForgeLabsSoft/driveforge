@@ -64,6 +64,40 @@ public class LocalizationTests
 		Assert.True(extra.Count == 0, "Keys present in a translation but not in English:\n" + string.Join("\n", extra));
 	}
 
+	/// <summary>
+	/// A key declared TWICE in the same language block. This is invisible everywhere else: the dictionary is an
+	/// indexer collection initializer, so a duplicate compiles without even a warning and the LAST assignment
+	/// silently wins. Every other test here reads the dictionary at RUNTIME, by which point the duplicate has
+	/// already collapsed — so this one has to parse the source instead.
+	///
+	/// It is not hypothetical: a reporting feature was added with an ErrReport key that already existed, and all
+	/// 17 of its new values were dead on arrival while the tests stayed green.
+	/// </summary>
+	[Fact]
+	public void NoKeyIsDeclaredTwiceInTheSameLanguageBlock()
+	{
+		string[] lines = File.ReadAllLines(Path.Combine(Mw.RepoRoot, "DriveForge", "UiStrings.cs"));
+		var duplicates = new List<string>();
+		string lang = null;
+		var seen = new Dictionary<string, int>();
+
+		for (int i = 0; i < lines.Length; i++)
+		{
+			Match block = Regex.Match(lines[i], @"^		\[""(\w\w)""\] = new\(\)$");
+			if (block.Success) { lang = block.Groups[1].Value; seen.Clear(); continue; }
+			if (lang == null) continue;
+			Match entry = Regex.Match(lines[i], @"^			\[""([A-Za-z0-9_]+)""\] = ");
+			if (!entry.Success) continue;
+			string key = entry.Groups[1].Value;
+			if (seen.TryGetValue(key, out int first))
+				duplicates.Add($"{key} [{lang}]: lines {first} and {i + 1} — the later value silently wins");
+			else seen[key] = i + 1;
+		}
+
+		Assert.True(duplicates.Count == 0,
+			"Duplicate localization key(s) — the earlier value is dead code:\n  " + string.Join("\n  ", duplicates));
+	}
+
 	// ------------------------------------------------------------------ C. placeholder arity
 
 	private static SortedSet<int> Placeholders(string value)

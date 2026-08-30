@@ -58,6 +58,16 @@ public class App : Application
 				string msg = "DriveForge hit an unexpected error and had to stop the current operation.";
 				if (path.Length > 0) msg += "\n\nA crash log was saved to:\n" + path;
 				msg += "\n\nDetails:\n" + (ex?.Message ?? "unknown error");
+				// The crash log is the single most useful thing a user can send, and this dialog is the only
+				// moment they know it exists. Name the channels here rather than hoping they find Settings later.
+				msg += "\n\nYou can report this at https://github.com/ForgeLabsSoft/driveforge/issues";
+				// Only point at the log if one was actually written — the write above is best-effort and swallows
+				// its own failure (full disk, locked profile), and telling someone to attach a file that does not
+				// exist wastes the one report they were willing to send.
+				msg += path.Length > 0
+					? "\nor email the crash log above to support@forgelabssoft.com."
+					: "\nor email support@forgelabssoft.com with what you were doing.";
+				msg += "\n\nNothing is submitted until you send it yourself.";
 				// These handlers can fire on a background/finalizer thread. Marshal the dialog to the UI thread
 				// (unless the process is already tearing down, where the UI pump may be gone and Invoke would hang).
 				Application? app = Current;

@@ -1247,6 +1247,7 @@
               <TextBlock Name="AboutEngineText" Text="Clone/backup engine: wimlib 1.14.4 (GPLv3), bundled inside the app." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
               <TextBlock Name="SettingsSupportText" Text="DriveForge is free. If it helped you, you can support its development — thank you!" TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,8" />
               <Button Name="DonateButton" Content="☕  Support on Ko-fi" HorizontalAlignment="Left" Style="{StaticResource OrangeButtonStyle}" Click="OpenDonate_Click" ToolTip="Opens the DriveForge Ko-fi page in your browser (pay by card, Apple/Google Pay or PayPal — no account needed). The app never asks for or handles payment details itself." />
+              <Button Name="ReportProblemButton" Content="Report a problem" HorizontalAlignment="Left" Margin="0,8,0,0" Style="{StaticResource GhostButtonStyle}" Click="ReportProblem_Click" ToolTip="Opens the bug form on GitHub, or an email to support, with your app and Windows versions filled in." />
               <CheckBox Name="ShowDonatePromptCheck" Content="Show a support message after a successful operation" IsChecked="True" Foreground="{DynamicResource MutedBrush}" Margin="0,10,0,0" />
             </StackPanel>
           </ScrollViewer>

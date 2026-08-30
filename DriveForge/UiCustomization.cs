@@ -209,7 +209,7 @@ public partial class MainWindow
 		"ScheduleCloneButton", "HealthToolButton", "SpeedToolButton", "ScanToolButton", "SurfaceToolButton",
 		"CapacityToolButton", "FormatToolButton", "PartitionToolButton", "TestBootToolButton",
 		"WipeToolButton", "ShredToolButton", "DiagDiskBox", "RecoverDeepScanButton", "RecoverMoreButton",
-		"RecoverZipButton", "DonateButton", "AnalyzeMasterBox", "AnalyzeSimilarButton", "AnalyzeGalleryButton",
+		"RecoverZipButton", "DonateButton", "ReportProblemButton", "AnalyzeMasterBox", "AnalyzeSimilarButton", "AnalyzeGalleryButton",
 		"RecoverRecycleButton", "RecoverGalleryButton",
 	};
 

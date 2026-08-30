@@ -7395,6 +7395,83 @@ exit 0
 	}
 
 	private const string DonateUrl = "https://ko-fi.com/driveforge";
+
+	// ---------- Reporting a problem ----------
+	// Nothing is ever sent automatically. The app promises "no telemetry, no data collection", and that promise is
+	// part of why people trust a tool that erases disks — so every path below only OPENS something the user then
+	// chooses to submit. Two channels on purpose: GitHub is structured and searchable, but most of this app's users
+	// are rescuing a broken PC and have no GitHub account, so email has to exist too.
+	private const string SupportEmail = "support@forgelabssoft.com";
+	private const string IssuesUrl = "https://github.com/ForgeLabsSoft/driveforge/issues/new?template=bug_report.yml";
+
+	// The issue template makes version and Windows build mandatory, and those are exactly the two fields people
+	// get wrong or omit, so they are filled in from the assembly and the OS rather than asked for.
+	private static string WindowsVersionString()
+	{
+		try { return System.Runtime.InteropServices.RuntimeInformation.OSDescription.Trim(); }
+		catch { return Environment.OSVersion.VersionString; }
+	}
+
+	// The session log — the thing the issue template calls the most useful attachment — is written to the DESKTOP
+	// by SaveLogToDesktop, which every failure path calls immediately before ShowError. %LocalAppData%\DriveForge
+	// holds only settings and crash.log. Pointing "open the log folder" at LocalAppData opened the wrong place and
+	// created it empty on a machine that had never crashed.
+	private static string LogFolderPath() =>
+		Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+
+	private static string CrashLogFolderPath() =>
+		Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge");
+
+	// context: a short line describing what just failed, when we already know it (empty when opened from Settings).
+	private void ReportProblem(string context)
+	{
+		int? pick = ShowActionMenu(L("ReportProblemButton"), L("RepPrompt"),
+			new[] { L("RepGitHub"), L("RepEmail"), L("RepLogFolder") },
+			new[] { 0xE8BD, 0xE715, 0xE8B7 }, new[] { false, false, false }, 0);
+		if (pick == null) return;
+		try
+		{
+			string ver = AppVersionString(), win = WindowsVersionString();
+			// The error text is scrubbed of the user profile path and capped. Windows puts the account holder's real
+			// name in every C:\Users\<Name>\... path, and this app's exceptions quote paths constantly — including
+			// the BitLocker recovery-key filename and the user's own document folders.
+			string safe = context.Replace(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+				"%UserProfile%", StringComparison.OrdinalIgnoreCase);
+			// Tool failures embed the whole captured stdout+stderr, which runs to tens of KB; escaping inflates it
+			// 2-3x. Past ~2 KB ShellExecute fails outright and a mailto body is silently truncated by the mail client.
+			// Keep the head — that is where the "<tool> exited with code N" line is; the rest is in the attached log.
+			if (safe.Length > 600) safe = safe.Substring(0, 600) + " ...";
+			if (pick == 0)
+			{
+				// Deliberately NOT sending the error text. Opening a URL transmits its query string to GitHub
+				// immediately — before the user sees the form and whether or not they ever submit it — and this is a
+				// PUBLIC issue tracker. Only the version and OS build travel, and neither identifies anyone.
+				string url = IssuesUrl
+					+ "&version=" + Uri.EscapeDataString(ver)
+					+ "&windows=" + Uri.EscapeDataString(win);
+				Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+			}
+			else if (pick == 1)
+			{
+				// Keep the body short: some mail clients truncate a long mailto body, and the log is attached by hand.
+				string body = "DriveForge " + ver + Environment.NewLine + win + Environment.NewLine + Environment.NewLine
+					+ (safe.Length > 0 ? safe + Environment.NewLine + Environment.NewLine : "")
+					+ L("RepEmailHint") + Environment.NewLine + CrashLogFolderPath() + Environment.NewLine + Environment.NewLine;
+				Process.Start(new ProcessStartInfo("mailto:" + SupportEmail
+					+ "?subject=" + Uri.EscapeDataString("DriveForge " + ver + " problem report")
+					+ "&body=" + Uri.EscapeDataString(body)) { UseShellExecute = true });
+			}
+			else
+			{
+				string dir = LogFolderPath();
+				Directory.CreateDirectory(dir);
+				Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true });
+			}
+		}
+		catch (Exception ex) { ShowError(L("ErrRepOpen"), ex); }
+	}
+
+	private void ReportProblem_Click(object sender, RoutedEventArgs e) => ReportProblem("");
 	private int _successCount;
 
 	private void OpenDonate_Click(object sender, RoutedEventArgs e) => OpenDonatePage();
@@ -14278,6 +14355,7 @@ exit 0
 	private void SetBusy(bool busy, string? status = null)
 	{
 		if (busy) _refreshOwnsBusy = false;   // a real operation is taking over (RefreshDisksAsync re-claims after its own call)
+		if (busy) _reportOffered = false;     // per OPERATION, not per session: one declined offer must not silence the rest
 		isBusy = busy;
 		StartButton.IsEnabled = !busy;
 		CreateKitButton.IsEnabled = !busy;
@@ -15112,7 +15190,23 @@ exit 0
 	{
 		Log(title + ": " + ex.Message);
 		MessageBox.Show(title + ":" + Environment.NewLine + ex.Message, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Hand);
+		// Offer to report ONLY when an operation was actually running. A catch block runs before its finally, so
+		// isBusy is still true for a genuine operation failure, and false for the trivial ones (a page that would
+		// not open, a dialog that was declined) which must not nag. This is where the useful reports come from:
+		// the user is looking at a real failure with the details in front of them.
+		// stopRequested: the most common way to reach a failure here is the user pressing Stop — killing the child
+		// process throws — and asking them to file a bug for something they cancelled on purpose is pure noise.
+		// _refreshOwnsBusy: a disk rescan raises busy but is not an operation the user started; a failing scan at
+		// startup would otherwise ask for a bug report before they had done anything at all.
+		// headlessRun: a scheduled unattended clone must never block on a dialog nobody is there to answer.
+		if (!isBusy || stopRequested || headlessRun || _refreshOwnsBusy || _reportOffered) return;
+		_reportOffered = true;   // one offer per operation — a failing loop cannot queue up a stack of prompts
+		if (MessageBox.Show(L("RepOffer"), "DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Question,
+				MessageBoxResult.No) == MessageBoxResult.Yes)
+			ReportProblem(title + ": " + ex.Message);
 	}
+
+	private bool _reportOffered;
 
 	private static bool IsAdministrator()
 	{

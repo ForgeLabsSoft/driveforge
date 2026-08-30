@@ -47,8 +47,18 @@ Grab the latest **`DriveForge.exe`** from the [**Releases**](https://github.com/
 
 ## Privacy
 
-- **No ads, no telemetry, no accounts.** Nothing about you is collected or sent anywhere.
+- **No ads, no telemetry, no accounts.** Nothing about you is collected or sent anywhere. There is no crash
+  reporter, no usage counter, and no "phone home" — the app never contacts us on its own.
 - **Works offline.** Core features (create from a local ISO, clone, back up, recover, wipe, diagnose) need no internet — the clone engine (wimlib) is built in. Only optional actions like downloading an ISO or the Ventoy engine use the network.
+- **Reporting a problem is entirely manual.** *Settings → Report a problem* (and the offer shown after a failed
+  operation) only **opens** something — the bug form on GitHub, or a pre-addressed email — and nothing is submitted
+  until you send it yourself. Specifically:
+  - The **GitHub** link carries only your DriveForge version and your Windows build, so the form's two required
+    fields are filled in. Error text is deliberately **not** put in the link: GitHub issues are public, and this
+    app's error messages quote full file paths, which on Windows contain your account name.
+  - The **email** option puts the error text in the message body for you to read before sending, with your
+    user-profile path replaced by `%UserProfile%`. It goes to one address, not a public tracker.
+  - Log files are never attached automatically. You choose what to include.
 
 ## Requirements
 

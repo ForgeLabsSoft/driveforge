@@ -37,10 +37,22 @@ automated test suite.
   restoring a clone of an existing PC; a fresh install from a Windows ISO has no antivirus on it.
 - Removed two unused, half-translated internal strings.
 
+### New — reporting a problem
+- **Added a way to report problems**, since until now nothing in the app pointed anywhere: *Settings → Report a
+  problem*, plus an offer after a failed operation and a pointer in the crash dialog. It opens either the bug form
+  on GitHub or an email to `support@forgelabssoft.com`, with your app and Windows versions already filled in.
+- **Nothing is submitted until you send it yourself** — there is still no telemetry and no automatic crash
+  reporting. The GitHub link deliberately carries only the version and Windows build: error messages in this app
+  quote full file paths, which on Windows contain your account name, and GitHub issues are public. The email
+  option does include the error text for you to review first, with your profile path replaced by `%UserProfile%`.
+- The offer after a failure is deliberately quiet: it never appears when *you* pressed Stop, never during a
+  background disk rescan, never in unattended scheduled runs, and at most once per operation.
+
 ### Under the hood
-- **Added an automated test suite** (78 tests, runs in about a second) covering the pure logic, all 17
-  localizations (key parity, placeholder counts, structural drift) and the project's own code invariants. It runs
-  on every push and blocks a release if it fails. Four of the fixes above were found by it on its first run.
+- **Added an automated test suite** (79 tests, runs in about a second) covering the pure logic, all 17
+  localizations (key parity, placeholder counts, duplicate keys, structural drift) and the project's own code
+  invariants. It runs on every push and blocks a release if it fails. Four of the fixes above were found by it on
+  its first run.
 - Added a manual hardware-test checklist for the parts that cannot be automated.
 
 ## v4.3.0 — 2026-07-26
