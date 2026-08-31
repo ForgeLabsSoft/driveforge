@@ -786,7 +786,13 @@ public partial class MainWindow
 		// (RawNtfsApplySecurity) runs later and APPENDS its results to this same file.
 		try
 		{
-			string diag = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "raw-engine-diag.txt");
+			// Diagnostics belong beside crash.log and settings.json in %LocalAppData%\DriveForge, not on the user's
+			// Desktop. This file was dropped there on EVERY Fast Clone run, with no prompt, no mention in the UI and
+			// no cleanup - an app that promises to leave nothing behind was quietly littering the one folder the
+			// user looks at most.
+			string diagDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge");
+			try { Directory.CreateDirectory(diagDir); } catch { }
+			string diag = Path.Combine(diagDir, "raw-engine-diag.txt");
 			File.WriteAllText(diag, "Raw NTFS engine diagnostics (copy pass)\n" +
 				$"Files written          : {stats.Files}\n" +
 				$"Directories            : {stats.Dirs}\n" +
@@ -897,7 +903,13 @@ public partial class MainWindow
 
 		try
 		{
-			string diag = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "raw-engine-diag.txt");
+			// Diagnostics belong beside crash.log and settings.json in %LocalAppData%\DriveForge, not on the user's
+			// Desktop. This file was dropped there on EVERY Fast Clone run, with no prompt, no mention in the UI and
+			// no cleanup - an app that promises to leave nothing behind was quietly littering the one folder the
+			// user looks at most.
+			string diagDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge");
+			try { Directory.CreateDirectory(diagDir); } catch { }
+			string diag = Path.Combine(diagDir, "raw-engine-diag.txt");
 			File.AppendAllText(diag, "\nSecurity pass (after post-processing)\n" +
 				$"SDS descriptors loaded : {stats.SdsLoaded}\n" +
 				$"ACLs applied           : {stats.SecApplied}\n" +

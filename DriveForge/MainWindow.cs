@@ -785,7 +785,7 @@ public partial class MainWindow : Window, IComponentConnector
 			SetBusy(busy: true, L("BzSha"));
 			stopRequested = false; isPaused = false;   // Stop is enabled during hashing; reset the flag so the loop below can honor it
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			long total = new FileInfo(path).Length;
 			string hash = await Task.Run(() =>
@@ -2107,7 +2107,7 @@ public partial class MainWindow : Window, IComponentConnector
 			SetBusy(busy: true, auto ? L("DSpdBusyAuto") : L("DSpdBusyManual"));
 			SetToolStatus(auto ? L("DSpdRunAuto") : L("DSpdRunManual"));
 			StartLiveTest(L("LiveSpeedTest"));
-			ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			SpeedResult speedResult = await Task.Run(() => MeasureDiskSpeed(disk, p => Dispatcher.Invoke(() =>
 			{
@@ -3380,7 +3380,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// partition's growing used-space while the apply runs, so the bar and speed move in real time.
 			progressDoneGiB = 0.0;
 			progressTotalGiB = Math.Max(1.0, GetCurrentWindowsUsedBytes() / 1073741824.0);
-			_speedWindow.Clear();
+			progressSpeedMb = 0.0; _speedWindow.Clear();
 			RawCloneStats? rawStats = null;
 			if (useRawEngine)
 			using (var rawPollCts = new CancellationTokenSource())
@@ -4874,7 +4874,7 @@ exit 0
 		SetStage(L("StgRestoreToDrive"), 20.0);
 		progressDoneGiB = 0.0;
 		progressTotalGiB = Math.Max(1.0, new FileInfo(wimPath).Length / 1073741824.0 * 1.8);
-		_speedWindow.Clear();
+		progressSpeedMb = 0.0; _speedWindow.Clear();
 		using (var pollCts = new CancellationTokenSource())
 		{
 			Task poll = PollPartitionUsedSpaceAsync(realRoot, pollCts.Token);
@@ -5055,7 +5055,7 @@ exit 0
 			// Prefer the VHDX's real used data for the progress total; imageBytes (the .vhdx file size) over-states a fixed
 			// VHDX, leaving the bar stuck low. Fall back to imageBytes if the used space couldn't be read above.
 			progressTotalGiB = Math.Max(1.0, (vhdxUsedBytes > 0 ? vhdxUsedBytes : imageBytes) / 1073741824.0);
-			ProgressBar.Value = 0.0; _speedWindow.Clear();
+			ProgressBar.Value = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			RawCloneStats? rawStats = null;
 			using (var rawPollCts = new CancellationTokenSource())
@@ -7523,6 +7523,13 @@ exit 0
 	// by SaveLogToDesktop, which every failure path calls immediately before ShowError. %LocalAppData%\DriveForge
 	// holds only settings and crash.log. Pointing "open the log folder" at LocalAppData opened the wrong place and
 	// created it empty on a machine that had never crashed.
+	/// <summary>Replaces the user profile path with %UserProfile%, so the Windows account holder's real name
+	/// does not travel with a problem report. Windows puts it in every C:\Users\&lt;Name&gt;\... path and this
+	/// app quotes paths constantly.</summary>
+	private static string ScrubUserProfile(string text) =>
+		text.Replace(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "%UserProfile%",
+			StringComparison.OrdinalIgnoreCase);
+
 	private static string LogFolderPath() =>
 		Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
 
@@ -7542,8 +7549,7 @@ exit 0
 			// The error text is scrubbed of the user profile path and capped. Windows puts the account holder's real
 			// name in every C:\Users\<Name>\... path, and this app's exceptions quote paths constantly — including
 			// the BitLocker recovery-key filename and the user's own document folders.
-			string safe = context.Replace(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-				"%UserProfile%", StringComparison.OrdinalIgnoreCase);
+			string safe = ScrubUserProfile(context);
 			// Tool failures embed the whole captured stdout+stderr, which runs to tens of KB; escaping inflates it
 			// 2-3x. Past ~2 KB ShellExecute fails outright and a mailto body is silently truncated by the mail client.
 			// Keep the head — that is where the "<tool> exited with code N" line is; the rest is in the attached log.
@@ -7563,7 +7569,10 @@ exit 0
 				// Keep the body short: some mail clients truncate a long mailto body, and the log is attached by hand.
 				string body = "DriveForge " + ver + Environment.NewLine + win + Environment.NewLine + Environment.NewLine
 					+ (safe.Length > 0 ? safe + Environment.NewLine + Environment.NewLine : "")
-					+ L("RepEmailHint") + Environment.NewLine + CrashLogFolderPath() + Environment.NewLine + Environment.NewLine;
+					+ L("RepEmailHint") + Environment.NewLine
+					// Two lines above, `safe` had the user profile path replaced by %UserProfile% precisely so the
+					// Windows account name does not travel. Appending the absolute log path put it straight back.
+					+ ScrubUserProfile(CrashLogFolderPath()) + Environment.NewLine + Environment.NewLine;
 				Process.Start(new ProcessStartInfo("mailto:" + SupportEmail
 					+ "?subject=" + Uri.EscapeDataString("DriveForge " + ver + " problem report")
 					+ "&body=" + Uri.EscapeDataString(body)) { UseShellExecute = true });
@@ -8978,7 +8987,7 @@ exit 0
 			progressPrevGiB = 0.0;
 			progressTotalGiB = Math.Max(1.0, GetCurrentWindowsUsedBytes() / 1073741824.0);
 			ProgressBar.Value = 0.0; // start the bar empty (UpdateProgressStats only advances it, never retreats)
-			_speedWindow.Clear();
+			progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart();
 			operationTimer.Start();
 			RawCloneStats? rawStats = null;
@@ -9810,7 +9819,7 @@ exit 0
 		{
 			long freed = 0; int filesDeleted = 0;
 			long binnedBytes = 0; int binnedFiles = 0;   // moved to the Recycle Bin: relocated, NOT freed
-			ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			int doneCats = 0;
 			if (cats.Any(c => c.Clipboard)) { try { Clipboard.Clear(); } catch { } }
@@ -10164,7 +10173,7 @@ exit 0
 			if (v < 0) ProgressBar.IsIndeterminate = true;
 			else { ProgressBar.IsIndeterminate = false; ProgressBar.Value = v; }
 		});
-		ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+		ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 		operationStopwatch.Restart(); operationTimer.Start();
 		try
 		{
@@ -10545,7 +10554,7 @@ exit 0
 		if (AnalyzeDeleteButton != null) AnalyzeDeleteButton.IsEnabled = false;
 		var progress = new Progress<string>(s => { if (AnalyzeStatusText != null) AnalyzeStatusText.Text = s; });
 		var bar = new Progress<double>(v => { if (v < 0) ProgressBar.IsIndeterminate = true; else { ProgressBar.IsIndeterminate = false; ProgressBar.Value = v; } });
-		ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+		ProgressBar.Value = 0.0; progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 		operationStopwatch.Restart(); operationTimer.Start();
 		try
 		{
@@ -10777,7 +10786,6 @@ exit 0
 
 	// ---------- Thumbnail gallery: see every duplicate photo/video at a glance before deleting ----------
 	private static readonly Dictionary<string, System.Windows.Media.ImageSource> _thumbCache = new(StringComparer.OrdinalIgnoreCase);
-	private System.Threading.CancellationTokenSource? _galleryCts;
 
 	private void AnalyzeGallery_Click(object sender, RoutedEventArgs e)
 	{
@@ -10842,11 +10850,12 @@ exit 0
 		}
 
 		win.Content = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(12), Content = outer };
-		_galleryCts?.Cancel();
-		_galleryCts = new System.Threading.CancellationTokenSource();
-		var ct = _galleryCts.Token;
+		// One CTS per window, not one shared field: with a single field, opening a second gallery cancelled the
+		// first one's thumbnail loading, and closing EITHER window cancelled whichever was loading at the time.
+		var galleryCts = new System.Threading.CancellationTokenSource();
+		var ct = galleryCts.Token;
 		_ = LoadGalleryThumbsAsync(toLoad, ct);
-		win.Closed += (_, __) => { try { _galleryCts?.Cancel(); } catch { } foreach (var (r, hh) in handlers) r.PropertyChanged -= hh; DupesGrid?.Items.Refresh(); UpdateMarkedSummary(); };
+		win.Closed += (_, __) => { try { galleryCts.Cancel(); galleryCts.Dispose(); } catch { } foreach (var (r, hh) in handlers) r.PropertyChanged -= hh; DupesGrid?.Items.Refresh(); UpdateMarkedSummary(); };
 		win.Show();
 	}
 
@@ -11368,7 +11377,7 @@ exit 0
 			stopRequested = false; _progressFullRange = true;
 			SetBusy(busy: true, string.Format(L("RfScanBusy"), letter));
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			if (RecoverStatusText != null) RecoverStatusText.Text = L("RfScanning");
 
@@ -11474,7 +11483,7 @@ exit 0
 			// Byte-based progress so the bar runs smoothly to 100% with a real ETA + MB/s (no 99% plateau).
 			long dtotal; try { dtotal = new DriveInfo(letter + ":").TotalSize; } catch { dtotal = 0; }
 			if (dtotal <= 0) dtotal = 256L << 30;
-			progressTotalGiB = dtotal / 1073741824.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = dtotal / 1073741824.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, string.Format(L("RfDeepBusy"), letter));
 			ProgressBar.Value = 0.0;
@@ -12053,7 +12062,7 @@ exit 0
 			RecoverStopButton.IsEnabled = true;
 			SetBusy(busy: true, string.Format(L("RfRecBusy"), picked.Count));
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			Directory.CreateDirectory(outDir);
 			var scan = _lastScan;
@@ -12159,7 +12168,7 @@ exit 0
 			RecoverStopButton.IsEnabled = true;   // the copy loop honours stopRequested — let the user actually reach it
 			SetBusy(busy: true, string.Format(L("RfZipBusy"), picked.Count));
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			Directory.CreateDirectory(temp);
 			var scan = _lastScan;
@@ -12493,7 +12502,7 @@ exit 0
 			_progressFullRange = true;
 			SetBusy(busy: true, L("BzDownloading") + name + "...");
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			if (DlSaveHint != null) DlSaveHint.Text = "Downloading to " + dest;
 
@@ -13722,7 +13731,7 @@ exit 0
 			_progressFullRange = true;
 			SetBusy(busy: true, L("MvWorking"));
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			await RunDiskpartAsync($"select disk {disk.Number}\r\noffline disk\r\nexit\r\n");
 			int idx = p.Index; long src = p.StartLBA, secs = p.Sectors, dst = newStart, dn = disk.Number;
@@ -13826,11 +13835,19 @@ exit 0
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
 		if (h.IsInvalid) throw new IOException("Could not open the disk for reading (run as administrator).");
 		using var fs = new FileStream(h, FileAccess.Read);
+		// ONE aligned read covering both candidate layouts, then probe in memory. Reading 512 bytes from offset 512
+		// is not sector-aligned on a 4Kn disk, and this handle does unbuffered I/O — so the 512 attempt did not just
+		// fail to match, it THREW, and the 4096 branch below it was never reached on exactly the disks it exists for.
+		// 8192 from offset 0 is a whole number of sectors at both 512 and 4096, so it is valid on either.
+		byte[] head = new byte[8192];
+		fs.Seek(0, SeekOrigin.Begin); ReadFull(fs, head, head.Length);
 		int ss = 0;
 		foreach (int cand in new[] { 512, 4096 })
 		{
-			byte[] hdr = new byte[cand]; fs.Seek(cand, SeekOrigin.Begin); ReadFull(fs, hdr, cand);
-			if (Encoding.ASCII.GetString(hdr, 0, 8) == "EFI PART") { ss = cand; g.PrimaryHeader = hdr; break; }
+			if (Encoding.ASCII.GetString(head, cand, 8) != "EFI PART") continue;
+			byte[] hdr = new byte[cand];
+			Array.Copy(head, cand, hdr, 0, cand);
+			ss = cand; g.PrimaryHeader = hdr; break;
 		}
 		if (ss == 0) throw new IOException("No GPT header found on this disk.");
 		g.SectorSize = ss;
@@ -13982,7 +13999,7 @@ exit 0
 			_progressFullRange = true;
 			SetBusy(busy: true, L("MvWorking"));
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			await RunDiskpartAsync($"select disk {disk.Number}\r\noffline disk\r\nexit\r\n");
 			int entryBase = p.idx * g.EntrySize;
@@ -14136,8 +14153,13 @@ exit 0
 		if (!GuardSystemDisk(disk)) return;
 		bool toGpt = !(disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true);
 		string target = toGpt ? "gpt" : "mbr";
-		if (MessageBox.Show(string.Format(L("PtConvertConfirm"), disk.Number, disk.PartitionStyle, target.ToUpperInvariant()), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
-		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // 'clean' wipes the whole disk — confirm identity first (disks can renumber between refresh and click)
+		// Route through the shared helper, like every other disk-erasing flow. The old dialog named the target only
+		// by NUMBER — and a disk number is the one property that changes when a drive is plugged, unplugged or
+		// re-enumerated, which is exactly what makes "Disk 2" ambiguous at the moment it matters. PtConfirmBody adds
+		// the friendly name, the size and what the disk currently contains, so the user can see it is the right one.
+		// The action keeps this flow's own detail (which way the conversion goes).
+		string convertAction = $"{L("PtConvert")} ({disk.PartitionStyle} → {target.ToUpperInvariant()})";
+		if (!await ConfirmDestructive(disk, convertAction)) return;
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtConvert")));
@@ -14203,7 +14225,7 @@ exit 0
 			stopRequested = false; _progressFullRange = true;
 			SetBusy(busy: true, string.Format(L("PtScanningLost"), disk.Number));
 			ProgressBar.Value = 0.0;
-			progressTotalGiB = 0.0; progressDoneGiB = 0.0; _speedWindow.Clear();
+			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			var found = await Task.Run(() => ScanPhysicalForPartitions(disk.Number, disk.Size, p => Dispatcher.Invoke(() => ProgressBar.Value = p)));
 			ProgressBar.Value = 100.0;

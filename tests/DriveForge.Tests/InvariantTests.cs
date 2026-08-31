@@ -207,20 +207,51 @@ public class InvariantTests
 	}
 
 	/// <summary>
-	/// RULE 6 — a flow entered DIRECTLY, with no wrapper to reset progress state for it, must reset that state itself.
+	/// RULE 6 — clearing the speed WINDOW must also clear the speed DERIVED from it.
 	///
-	/// The general rule ("every flow that claims the bar zeroes it") cannot be expressed here: most progress flows are
-	/// inner methods whose caller does the reset one frame up (RestoreWimToDriveAsync and
-	/// RunExperimentalFullRootUsbCloneAsync are both zeroed at their call sites), and a method-local check reports
-	/// those as violations. Writing it that way produced 17 false positives and zero real ones.
+	/// <c>_speedWindow</c> holds the samples; <c>progressSpeedMb</c> holds the value computed from them, and nothing
+	/// decays it. Clearing only the window leaves the previous operation's throughput in the field, and
+	/// UpdateProgressStats divides by it — so the new operation's first "Remaining" is computed from the speed of the
+	/// last one.
 	///
-	/// So this rule lists the flows that genuinely have no such wrapper. ResumeDeepScanAsync is invoked straight from
-	/// a MessageBox "Yes" branch; nothing above it touches the bar. It shipped inheriting the previous operation's
-	/// full bar — and because percent >= 99.95 also suppresses the ETA, "Remaining" stayed --:--:-- for the whole
-	/// scan. Add an entry here whenever a new flow is called the same way.
+	/// This rule was first written, seen to report 17 violations, and withdrawn on the assumption that the callers
+	/// reset the state one frame up. That was true for two of them and wrong for the rest: seven were Click handlers
+	/// wired straight from XAML with no wrapper at all. Checking two cases and generalising from them is how the bug
+	/// survived. All 17 now reset it, so the invariant holds everywhere and the rule can be stated plainly.
 	/// </summary>
 	[Fact]
-	public void DirectlyEnteredProgressFlowsResetTheBarAndTheSpeed()
+	public void ClearingTheSpeedWindowAlsoResetsTheSpeed()
+	{
+		var violations = new List<string>();
+
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			bool clearsWindow = method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+				.Any(i => i.Expression is MemberAccessExpressionSyntax ma
+					&& ma.Name.Identifier.Text == "Clear"
+					&& ma.Expression is IdentifierNameSyntax w && w.Identifier.Text == "_speedWindow");
+			if (!clearsWindow) continue;
+
+			if (!SourceModel.AssignmentsTo(method, "progressSpeedMb").Any())
+				violations.Add($"{SourceModel.Where(file, method)}  {name}: clears _speedWindow but never resets " +
+					"progressSpeedMb — its first ETA is computed from the previous operation's throughput");
+		}
+
+		Assert.True(violations.Count == 0,
+			"Speed window cleared without resetting the derived speed:\n  " + string.Join("\n  ", violations));
+	}
+
+	/// <summary>
+	/// RULE 6b — a flow entered DIRECTLY, with no wrapper above it, must also zero the progress bar itself.
+	///
+	/// The bar only ever advances, so a flow that does not zero it inherits the previous operation's position — and
+	/// an operation that ended at 100% leaves a full bar for the whole next run, with the ETA suppressed on top
+	/// (percent >= 99.95 disables it). Unlike the speed rule this one genuinely cannot be stated for every method:
+	/// most progress flows are inner methods whose caller zeroes the bar one frame up. So this lists the flows
+	/// invoked straight from a dialog branch, with nothing above them. Add an entry when a new one appears.
+	/// </summary>
+	[Fact]
+	public void DirectlyEnteredProgressFlowsZeroTheBar()
 	{
 		string[] directlyEntered = { "ResumeDeepScanAsync" };
 		var violations = new List<string>();
@@ -239,14 +270,10 @@ public class InvariantTests
 			if (!zeroesBar)
 				violations.Add($"{SourceModel.Where(file, method)}  {name}: never zeroes ProgressBar.Value — the bar only " +
 					"advances, so a resume after a completed operation sits at 100% for the whole scan");
-
-			if (!SourceModel.AssignmentsTo(method, "progressSpeedMb").Any())
-				violations.Add($"{SourceModel.Where(file, method)}  {name}: never resets progressSpeedMb — its first ETA is " +
-					"computed from the previous operation's throughput");
 		}
 
 		Assert.True(violations.Count == 0,
-			"Directly-entered progress flow that inherits the previous operation's state:\n  " + string.Join("\n  ", violations));
+			"Directly-entered progress flow that inherits the previous operation's bar:\n  " + string.Join("\n  ", violations));
 	}
 
 	/// <summary>

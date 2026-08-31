@@ -654,7 +654,11 @@ public partial class MainWindow
 			if (startCluster < 2 || !visited.Add(startCluster)) continue;
 			byte[] dir = ReadExFatChain(vr, startCluster, fatOffset, ClusterToByte, clusterSize, 64L * 1024 * 1024, dirContiguous, dirLength);
 			processed++;
-			progress(Math.Min(95, processed));
+			// `processed` is a COUNT of directories, not a percentage: a volume with 40 directories used to stop the
+			// bar at 40% and a volume with 500 pegged it at 95% within seconds. The true total is unknown until the
+			// walk finishes, so report the fraction of the tree discovered SO FAR that has been processed - a real
+			// measure that self-corrects as the queue grows, rather than a number that happens to look like one.
+			progress((int)Math.Min(95, processed * 100L / Math.Max(1, processed + toVisit.Count)));
 
 			int p = 0;
 			while (p + 32 <= dir.Length)
@@ -806,7 +810,12 @@ public partial class MainWindow
 			var (startCluster, path) = toVisit.Dequeue();
 			if (startCluster < 2 || !visited.Add(startCluster)) continue;
 			byte[] dir = ReadFat32Chain(vr, startCluster, fatOffset, ClusterToByte, clusterSize, 32L * 1024 * 1024);
-			processed++; progress(Math.Min(95, processed));
+			processed++;
+			// `processed` is a COUNT of directories, not a percentage: a volume with 40 directories used to stop the
+			// bar at 40% and a volume with 500 pegged it at 95% within seconds. The true total is unknown until the
+			// walk finishes, so report the fraction of the tree discovered SO FAR that has been processed - a real
+			// measure that self-corrects as the queue grows, rather than a number that happens to look like one.
+			progress((int)Math.Min(95, processed * 100L / Math.Max(1, processed + toVisit.Count)));
 
 			var lfn = new List<string>();
 			int lfnChk = -1;
