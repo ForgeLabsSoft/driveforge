@@ -251,6 +251,12 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private double progressSpeedMb;
 
+	// Suppresses the "Remaining" estimate for a single UpdateProgressStats call. Set it when the call is rendering
+	// the FINAL state of an operation that has already ended: a countdown computed there is not a prediction, it is
+	// a number that will sit on screen forever without ever counting down. Cleared again in SetBusy(busy: true) so a
+	// throw between set and clear cannot silence the ETA for every later operation.
+	private bool _progressNoEta;
+
 	// Previous-tick GiB value — used to compute per-second instant speed instead of average-from-start
 	private double progressPrevGiB;
 
@@ -12126,7 +12132,15 @@ exit 0
 			if (isImage) { try { dtotal = new FileInfo(loaded.ImagePath).Length; } catch { dtotal = 0; } }
 			else { try { dtotal = new DriveInfo(loaded.Letter + ":").TotalSize; } catch { dtotal = 0; } }
 			if (dtotal <= 0) dtotal = 256L << 30;
-			progressTotalGiB = dtotal / 1073741824.0; progressDoneGiB = startOffset / 1073741824.0; _speedWindow.Clear();
+			// The bar only ever ADVANCES (UpdateProgressStats never retreats it), so a resume started after any
+			// operation that ended at 100% used to show a full bar and "100%" for the entire scan — and because
+			// percent >= 99.95 also suppresses the ETA, "Remaining" stayed --:--:-- the whole time. Start it at zero
+			// and let the first tick lift it to the true resume fraction. Clearing progressSpeedMb matters for the
+			// same reason every other progress-driving flow in this file clears it: otherwise the first estimate is
+			// derived from the PREVIOUS operation's throughput.
+			ProgressBar.Value = 0.0;
+			progressTotalGiB = dtotal / 1073741824.0; progressDoneGiB = startOffset / 1073741824.0;
+			progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, L("RfDeepRunning"));
 			var token = _recoverCts.Token;
@@ -12720,7 +12734,13 @@ exit 0
 			// coverage (partial, or unknown size) must NOT end on a full bar — that was itself the false-"all checked" cue.
 			if (covered) ProgressBar.Value = 100.0;
 			else if (!sizeKnown) ProgressBar.Value = 0.0;
+			// This call renders the FINAL state of a scan that has ended, and the block below snapshots the line it
+			// produces and restores it after SetBusy(false) blanks the row. Without the flag, a scan stopped part-way
+			// left a real "Remaining" behind — computed from an honest partial percentage and a real read speed — and
+			// that frozen countdown then stayed on screen next to a dialog saying the scan had stopped.
+			_progressNoEta = true;
 			UpdateProgressStats();
+			_progressNoEta = false;
 			// SetBusy(false) blanks the whole row when the user pressed Stop — which would throw away the honest
 			// end-state just computed above, including the case this method goes out of its way to get right: a Stop
 			// landing on the very LAST block still leaves a fully covered, clean scan, and the dialog says so. Snapshot
@@ -14356,6 +14376,7 @@ exit 0
 	{
 		if (busy) _refreshOwnsBusy = false;   // a real operation is taking over (RefreshDisksAsync re-claims after its own call)
 		if (busy) _reportOffered = false;     // per OPERATION, not per session: one declined offer must not silence the rest
+		if (busy) _progressNoEta = false;     // safety net: a throw between set and clear must not silence the ETA for good
 		isBusy = busy;
 		StartButton.IsEnabled = !busy;
 		CreateKitButton.IsEnabled = !busy;
@@ -14853,18 +14874,25 @@ exit 0
 		progressPrevGiB = currentGiB;
 
 		string remaining = "--:--:--";
+		// `_progressNoEta`: the caller is rendering the end state of an operation that has already stopped. Both
+		// branches below would happily quote a time — the surface test stops at, say, 12% with a genuine read speed
+		// behind it — and that string is then snapshotted and restored over the row SetBusy(false) blanks, so a dead
+		// operation ends up advertising a countdown that never moves again.
 		// `percent < 99.95`: a full bar means the operation is over, so nothing remains. Some flows pin the bar to 100
 		// WITHOUT pinning done = total (Create-USB sizes its total as used x 1.25), and the speed sample never decays,
 		// so the completed run advertised a couple more minutes of work beside its "your USB is ready" dialog.
-		if (progressSpeedMb > 0.5 && totalBeforeBar > currentGiB && percent < 99.95)
+		if (!_progressNoEta)
 		{
-			double remainingSeconds = (totalBeforeBar - currentGiB) * 1024.0 / progressSpeedMb;
-			remaining = FormatDuration(TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)));
-		}
-		else if (elapsed.TotalSeconds > 20.0 && percent > 1.0 && percent < 99.0)
-		{
-			double remainingSeconds = elapsed.TotalSeconds * (100.0 - percent) / percent;
-			remaining = FormatDuration(TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)));
+			if (progressSpeedMb > 0.5 && totalBeforeBar > currentGiB && percent < 99.95)
+			{
+				double remainingSeconds = (totalBeforeBar - currentGiB) * 1024.0 / progressSpeedMb;
+				remaining = FormatDuration(TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)));
+			}
+			else if (elapsed.TotalSeconds > 20.0 && percent > 1.0 && percent < 99.0)
+			{
+				double remainingSeconds = elapsed.TotalSeconds * (100.0 - percent) / percent;
+				remaining = FormatDuration(TimeSpan.FromSeconds(Math.Max(0.0, remainingSeconds)));
+			}
 		}
 
 		// Show "X.X / Y.Y GiB" when a data copy is active — gives concrete progress context.

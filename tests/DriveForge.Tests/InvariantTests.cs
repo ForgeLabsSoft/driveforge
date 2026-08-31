@@ -207,6 +207,79 @@ public class InvariantTests
 	}
 
 	/// <summary>
+	/// RULE 6 — a flow entered DIRECTLY, with no wrapper to reset progress state for it, must reset that state itself.
+	///
+	/// The general rule ("every flow that claims the bar zeroes it") cannot be expressed here: most progress flows are
+	/// inner methods whose caller does the reset one frame up (RestoreWimToDriveAsync and
+	/// RunExperimentalFullRootUsbCloneAsync are both zeroed at their call sites), and a method-local check reports
+	/// those as violations. Writing it that way produced 17 false positives and zero real ones.
+	///
+	/// So this rule lists the flows that genuinely have no such wrapper. ResumeDeepScanAsync is invoked straight from
+	/// a MessageBox "Yes" branch; nothing above it touches the bar. It shipped inheriting the previous operation's
+	/// full bar — and because percent >= 99.95 also suppresses the ETA, "Remaining" stayed --:--:-- for the whole
+	/// scan. Add an entry here whenever a new flow is called the same way.
+	/// </summary>
+	[Fact]
+	public void DirectlyEnteredProgressFlowsResetTheBarAndTheSpeed()
+	{
+		string[] directlyEntered = { "ResumeDeepScanAsync" };
+		var violations = new List<string>();
+
+		foreach (string target in directlyEntered)
+		{
+			var found = SourceModel.Methods().Where(m => m.Name == target).ToList();
+			Assert.True(found.Count == 1, $"Expected exactly one {target}; found {found.Count}");
+			var (file, method, name) = found[0];
+
+			bool zeroesBar = method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+				.Any(a => a.Left is MemberAccessExpressionSyntax ma
+					&& ma.Name.Identifier.Text == "Value"
+					&& ma.Expression is IdentifierNameSyntax bar && bar.Identifier.Text == "ProgressBar"
+					&& a.Right is LiteralExpressionSyntax v && v.Token.ValueText is "0" or "0.0");
+			if (!zeroesBar)
+				violations.Add($"{SourceModel.Where(file, method)}  {name}: never zeroes ProgressBar.Value — the bar only " +
+					"advances, so a resume after a completed operation sits at 100% for the whole scan");
+
+			if (!SourceModel.AssignmentsTo(method, "progressSpeedMb").Any())
+				violations.Add($"{SourceModel.Where(file, method)}  {name}: never resets progressSpeedMb — its first ETA is " +
+					"computed from the previous operation's throughput");
+		}
+
+		Assert.True(violations.Count == 0,
+			"Directly-entered progress flow that inherits the previous operation's state:\n  " + string.Join("\n  ", violations));
+	}
+
+	/// <summary>
+	/// RULE 7 — the "Remaining" estimate is suppressible, and the one path that outlives its operation suppresses it.
+	///
+	/// SurfaceTest_Click snapshots the stats line and restores it after SetBusy(false) blanks the row, so whatever
+	/// "Remaining" says at that moment stays on screen indefinitely. A scan stopped part-way has an honest partial
+	/// percentage and a real read speed behind it, so the ETA branch fires and a dead operation ends up advertising a
+	/// countdown that never counts down. Both halves are checked: the guard existing in UpdateProgressStats, and
+	/// SurfaceTest_Click actually using it.
+	/// </summary>
+	[Fact]
+	public void TheStoppedSurfaceScanDoesNotLeaveALiveCountdown()
+	{
+		const string Flag = "_progressNoEta";
+
+		var stats = SourceModel.Methods().Single(m => m.Name == "UpdateProgressStats");
+		bool guarded = stats.Method.DescendantNodes().OfType<IfStatementSyntax>()
+			.Any(i => i.Condition is PrefixUnaryExpressionSyntax neg
+				&& neg.IsKind(SyntaxKind.LogicalNotExpression)
+				&& neg.Operand is IdentifierNameSyntax id && id.Identifier.Text == Flag);
+		Assert.True(guarded,
+			$"UpdateProgressStats no longer guards its Remaining computation with !{Flag} — a stopped operation can " +
+			"again leave a frozen countdown on screen.");
+
+		var surface = SourceModel.Methods().Single(m => m.Name == "SurfaceTest_Click");
+		Assert.True(SourceModel.AssignmentsTo(surface.Method, Flag).Any(SourceModel.AssignsTrue),
+			$"SurfaceTest_Click no longer raises {Flag} before the UpdateProgressStats call whose output it snapshots.");
+		Assert.True(SourceModel.AssignmentsTo(surface.Method, Flag).Any(SourceModel.AssignsFalse),
+			$"SurfaceTest_Click raises {Flag} but never lowers it.");
+	}
+
+	/// <summary>
 	/// RULE 5 — the source must stay parseable and the files must all be present. A trivial guard, but it turns a
 	/// renamed/moved file into one clear failure instead of every other rule silently checking nothing.
 	/// </summary>
