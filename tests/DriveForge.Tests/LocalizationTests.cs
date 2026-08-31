@@ -285,15 +285,12 @@ public class LocalizationTests
 	}
 
 	/// <summary>
-	/// Controls that legitimately keep their literal XAML text.
-	///
-	/// AppTitleText and AboutVersionText are the product name — a brand, not a phrase to translate.
-	/// ExPanelNote is a REAL GAP, listed here so the rule can protect everything else while staying honest about
-	/// the one paragraph that has never been translated in any language. Remove it from this list when it gets a key.
+	/// Controls that legitimately keep their literal XAML text: the product name, which is a brand rather than a
+	/// phrase to translate. Keep this list SHORT — every entry is a string the rule below stops protecting.
 	/// </summary>
 	private static readonly HashSet<string> LiteralTextIsCorrect = new()
 	{
-		"AppTitleText", "AboutVersionText", "ExPanelNote",
+		"AppTitleText", "AboutVersionText",
 	};
 
 	/// <summary>

@@ -20,8 +20,8 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
 - **Six pieces of the window stayed in English after switching language.** The task heading at the top of the
   panel, the administrator badge, and the progress line under the status text kept whatever language was active
   when the app started; the two clone-engine checkboxes ("Use the Microsoft engine (DISM)" and "Fast Clone") had
-  no translations at all and were English in all 17 languages. All are now translated and follow a language
-  switch immediately.
+  no translations at all and were English in all 17 languages. The descriptive paragraph in the Export VHDX
+  panel had never been translated either. All are now translated and follow a language switch immediately.
 - **Buttons no longer clip their own captions in longer languages.** Nineteen buttons had a fixed width chosen
   for the English text, so German "Laufwerk prüfen" rendered as "Laufwerk prü" and "Sicher entfernen" as
   "Sicher entferne". They now grow to fit their caption and keep the old width as a minimum, so the layout is
