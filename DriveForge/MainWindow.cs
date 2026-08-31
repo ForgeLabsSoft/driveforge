@@ -192,6 +192,23 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private volatile bool isPaused; // polled in worker-thread hot loops; volatile so Pause is always observed
 
+	/// <summary>
+	/// Blocks a worker thread for as long as the user has the operation paused. Returns false when Stop was pressed
+	/// (so callers can use it in place of a bare <c>if (stopRequested)</c> check).
+	/// </summary>
+	/// <remarks>
+	/// Pause is implemented by SUSPENDING the child process tree, which does nothing for engines that run inside
+	/// DriveForge itself. The raw NTFS clone is one of those and is the DEFAULT clone engine, so pressing Pause set
+	/// the flag, stopped the stopwatch, relabelled the button "Resume" and wrote "Operation paused." to the log
+	/// while the copy carried on writing to the disk at full speed — and the stopped stopwatch then corrupted the
+	/// ETA for the rest of the run. The engine's existing stop checks are the natural place to also honour a pause.
+	/// </remarks>
+	private bool WaitWhilePaused()
+	{
+		while (isPaused && !stopRequested) Thread.Sleep(150);
+		return !stopRequested;
+	}
+
 	private bool internalOperationStopped;
 
 	// Set true by an image/restore operation when a PRE-WRITE safety gate (target-health warning declined, or the
@@ -1491,7 +1508,11 @@ public partial class MainWindow : Window, IComponentConnector
 	private async void PauseButton_Click(object sender, RoutedEventArgs e)
 	{
 		Process? process = activeProcess;
-		if (process == null || process.HasExited)
+		// Same hazard StopButton_Click already guards against: the runner can exit AND dispose this Process on
+		// another thread between the read above and the check here, so HasExited throws ObjectDisposedException.
+		// Treat any failure as "already gone" rather than letting it reach the global handler as an error dialog.
+		bool alive; try { alive = process != null && !process.HasExited; } catch { alive = false; }
+		if (!alive)
 		{
 			if (isBusy)
 			{
@@ -1569,6 +1590,10 @@ public partial class MainWindow : Window, IComponentConnector
 				{
 					return;
 				}
+				// The modal pumps the message loop, so the operation can FINISH while the user is deciding.
+				// stopRequested is global and sticky: setting it now would leave it armed for whatever the user
+				// starts next, which would then stop itself the moment it checked the flag.
+				if (!isBusy) return;
 				stopRequested = true;
 				isPaused = false;
 				PauseButton.Content = L("BtnPause");
@@ -1583,6 +1608,10 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
+		// Re-check after the modal: the process can exit, and a NEW operation can claim activeProcess, while the
+		// confirmation is on screen. Without this, Yes could arm the sticky stopRequested against an operation
+		// the user never meant to stop, and kill a process tree that is no longer the one they were looking at.
+		if (!isBusy || !ReferenceEquals(activeProcess, process)) return;
 		stopRequested = true;
 		try
 		{
@@ -3089,6 +3118,21 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async Task RunExperimentalFullRootUsbCloneAsync(DiskItem targetDisk)
 	{
+		// Snapshot every option this clone depends on, ONCE, before any work starts. The controls stay live for the
+		// whole run — the sidebar can switch task, and the Options checkboxes are not among the controls SetBusy
+		// disables — so reading them again later means the operation can change its own parameters halfway through:
+		// a clone that began as "portable USB" could finish applying internal-disk registry settings, or the reverse,
+		// producing a drive configured for a machine the user never asked for. The confirm summary the user approved
+		// described THESE values, so these are the ones that must be used to the end.
+		bool optCloneOtherPartitions = CloneOtherPartitionsCheck?.IsChecked == true;
+		bool optDataPartition = DataPartitionCheck?.IsChecked == true;
+		bool optVerifyContent = VerifyContentCheck?.IsChecked == true;
+		bool optBypassRequirements = BypassRequirementsCheck?.IsChecked == true;
+		bool optBypassAccount = BypassAccountCheck?.IsChecked == true;
+		bool optBitLocker = BitLockerCheck?.IsChecked == true;
+		bool optEjectWhenDone = EjectWhenDoneCheck?.IsChecked == true;
+		bool optInternalTarget = ModeBox.SelectedIndex == ModeCloneInternal;
+
 		char currentTargetLetter = GetFirstUsableDriveLetter(targetDisk);
 		char bootLetter = GetFreeDriveLetter(currentTargetLetter);
 		char windowsLetter = GetFreeDriveLetter(currentTargetLetter, bootLetter);
@@ -3238,7 +3282,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 			// Internal-disk mode clones the WHOLE disk (all data partitions) automatically; portable mode
 			// makes it an optional checkbox.
-			if (CloneOtherPartitionsCheck.IsChecked == true || ModeBox.SelectedIndex == ModeCloneInternal)
+			if (optCloneOtherPartitions || optInternalTarget)
 			{
 				// Clone the source PC's other data partitions, each into its own NTFS partition on the target.
 				List<SourceDataPartition> srcParts = await GetSourceDataPartitionsAsync();
@@ -3286,7 +3330,7 @@ public partial class MainWindow : Window, IComponentConnector
 					}
 				}
 			}
-			else if (DataPartitionCheck.IsChecked == true)
+			else if (optDataPartition)
 			{
 				// Empty data partition from leftover space.
 				long leftover = mbrUsable - winBytesPlan - bootSlack;
@@ -3452,7 +3496,7 @@ public partial class MainWindow : Window, IComponentConnector
 				// confirm a complete, bootable Windows root.
 				Log("Content verification skipped in Microsoft-engine mode: the captured image was already verified, and re-reading the source here would be scanned by antivirus (slow).");
 			}
-			else if (VerifyContentCheck.IsChecked == true)
+			else if (optVerifyContent)
 			{
 				SetStage(L("StgVerifyCloned"), 74.0);
 				Log("Content verification (sampled): every file's presence + size is checked; boot-critical files plus a 1-in-8 sample of the rest are byte-compared against the VSS snapshot.");
@@ -3479,7 +3523,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// The raw engine now preserves ACLs, hardlinks and the copied AppX state (registry hives + package files)
 			// faithfully — like the WIM/DISM image apply — so it uses faithfulMode too: skip the AppX re-registration
 			// (which reset the ms-screenclip URI association) and leave antivirus working (no Re-Enable script needed).
-			registryOutput = await ApplyPortableRegistrySettingsToRealCloneAsync(realWindowsFolder, BypassRequirementsCheck.IsChecked == true, BypassAccountCheck.IsChecked == true, faithfulMode: true, portableMode: ModeBox.SelectedIndex != ModeCloneInternal);
+			registryOutput = await ApplyPortableRegistrySettingsToRealCloneAsync(realWindowsFolder, optBypassRequirements, optBypassAccount, faithfulMode: true, portableMode: !optInternalTarget);
 			registryOk = !registryOutput.Contains("FAILED", StringComparison.OrdinalIgnoreCase);
 			if (!registryOk)
 			{
@@ -3521,7 +3565,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 
 			bool bitLockerRequestedButFailed = false;
-			if (BitLockerCheck.IsChecked == true)
+			if (optBitLocker)
 			{
 				try
 				{
@@ -3588,7 +3632,7 @@ public partial class MainWindow : Window, IComponentConnector
 			string reportNote = reportPath != null ? "\n\n" + L("MbCloneReportLabel") + "\n" + reportPath : "";
 			MessageBox.Show((ok ? L("MbCloneDoneOk") : L("MbCloneDoneReview")) + dataCloneNote + bitLockerFailNote + rawErrorsNote + rawZeroNote + "\n\n" + L("MbCloneBody") + "\n\n" +(bitLockerEncrypting ? L("MbCloneBitlockerBusy") : L("MbCloneSafeRemove")) + "\n\n" + L("MbCloneBootHelp") + reportNote + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, (ok && dataCloneFailures == 0) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
 			if (cloneDialogOk) MaybeOfferDonation();
-			if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(targetDisk.Number);
+			if (optEjectWhenDone && !bitLockerEncrypting) await EjectDiskAsync(targetDisk.Number);
 		}
 		finally
 		{
@@ -8216,6 +8260,11 @@ exit 0
 
 		bool failed = false;
 		bool ejected = false; // set when we deliberately eject on the success path, so the finally net does not re-online (undo) the eject
+		// Set only once this flow is committed to touching the disk. The finally below onlines and clears read-only on
+		// disk.Number, and the identity check can bail BEFORE anything was taken offline — at which point that number
+		// may already refer to a DIFFERENT physical drive (the check failing is precisely the signal that the disk
+		// list moved underneath us). Recovering a disk we never disturbed meant changing someone else's drive state.
+		bool tookOffline = false;
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
@@ -8230,6 +8279,7 @@ exit 0
 			SetBusy(busy: true, string.Format(L("BzWriteIso"), disk.Number));
 			ProgressBar.Value = 0.0;
 			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
+				tookOffline = true;   // from here on the disk really is ours to put back
 				await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
 			bool writeCompleted = !stopRequested; // capture BEFORE the optional verify below reuses stopRequested
 			operationTimer.Stop(); operationStopwatch.Stop();
@@ -8281,7 +8331,7 @@ exit 0
 			_progressFullRange = false; _progressFixedTotal = false;
 			// Safety net: if we bailed (exception/stop/online-hiccup) before onlining, never leave the disk offline — but
 			// do NOT re-online a disk we deliberately ejected on the success path (that would silently undo the eject).
-			if (!ejected) { try { await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n"); } catch { } }
+			if (!ejected && tookOffline) { try { await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n"); } catch { } }
 			SetBusy(busy: false);
 		}
 	}
@@ -9809,7 +9859,12 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			ResetProgressWidgets();   // bar AND label AND stats line — zeroing only the bar left e.g. "86%" beside an empty one
 			_cleanBusy = false; SetBusy(busy: false);
-			if (StopButton != null) StopButton.Visibility = Visibility.Collapsed;  // the Clean view hides this row again
+			// Only hide it if the CLEAN view is still the one on screen. StopButton is the shared footer control, so
+			// collapsing it unconditionally from this operation's finally left the next destructive operation with no
+			// abort control at all: start a Clean, switch to a workflow task while it finishes, and the wipe or clone
+			// you start next has no Stop button until you re-select the task in the sidebar.
+			if (StopButton != null && CleanPanel?.Visibility == Visibility.Visible)
+				StopButton.Visibility = Visibility.Collapsed;
 			if (CleanAnalyzeButton != null) CleanAnalyzeButton.IsEnabled = true;
 			if (CleanRunButton != null) CleanRunButton.IsEnabled = true;
 		}
@@ -14638,7 +14693,7 @@ exit 0
 			else
 			{
 				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
-				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
+				((DispatcherObject)this).Dispatcher.BeginInvoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
 					TrackProgressFromOutput(e.Data);
@@ -14656,7 +14711,7 @@ exit 0
 			else
 			{
 				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
-				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
+				((DispatcherObject)this).Dispatcher.BeginInvoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
 					TrackProgressFromOutput(e.Data);
@@ -14668,7 +14723,7 @@ exit 0
 		{
 			exitCode = process.ExitCode;
 			processExited = true;
-			((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
+			((DispatcherObject)this).Dispatcher.BeginInvoke((Action)delegate
 			{
 				Log($"{fileName} exited with code {exitCode}.");
 			});
@@ -14737,7 +14792,7 @@ exit 0
 			else
 			{
 				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
-				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
+				((DispatcherObject)this).Dispatcher.BeginInvoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
 					TrackProgressFromOutput(e.Data);
@@ -14755,7 +14810,7 @@ exit 0
 			else
 			{
 				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
-				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
+				((DispatcherObject)this).Dispatcher.BeginInvoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
 					TrackProgressFromOutput(e.Data);
@@ -14767,7 +14822,7 @@ exit 0
 		{
 			exitCode = process.ExitCode;
 			processExited = true;
-			((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
+			((DispatcherObject)this).Dispatcher.BeginInvoke((Action)delegate
 			{
 				Log($"{fileName} exited with code {exitCode}.");
 			});

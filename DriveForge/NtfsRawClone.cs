@@ -83,12 +83,12 @@ public partial class MainWindow
 		const int chunkClusters = 256;
 		foreach (var (lcn, count) in mftRuns)
 		{
-			if (stopRequested) break;
+			if (!WaitWhilePaused()) break;
 			if (lcn < 0) { globalIndex += count * recsPerCluster; continue; }
 			long c = 0;
 			while (c < count)
 			{
-				if (stopRequested) break;
+				if (!WaitWhilePaused()) break;
 				int take = (int)Math.Min(chunkClusters, count - c);
 				int bytes = take * clusterSize;
 				byte[] buf = new byte[bytes];
@@ -614,7 +614,7 @@ public partial class MainWindow
 		Log("Raw NTFS engine: creating the directory tree (reading the snapshot MFT)...");
 		foreach (var kv in dirNames)
 		{
-			if (stopRequested) break;
+			if (!WaitWhilePaused()) break;
 			if (kv.Key < 16 || kv.Key == 5) continue;
 			string relDir = ResolvePath(kv.Value.parent, dirNames) + kv.Value.name;
 			string full = "\\" + relDir;
@@ -858,7 +858,7 @@ public partial class MainWindow
 		Log("Raw NTFS engine: applying file security descriptors...");
 		WalkMftRecords(vr, mftRuns, recSize, clusterSize, bytesPerSector, (recNo, buf, off, flags, baseRef, torn) =>
 		{
-			if (stopRequested) return;
+			if (!WaitWhilePaused()) return;
 			if ((flags & 0x01) == 0 || baseRef != 0 || torn) return;   // a torn file record wasn't ACL-relevant / wasn't written
 			if (recNo < 16 || (flags & 0x02) != 0) return;
 			RawNode node;
@@ -885,7 +885,7 @@ public partial class MainWindow
 		Log("Raw NTFS engine: applying directory security descriptors...");
 		foreach (var kv in dirNames)
 		{
-			if (stopRequested) break;
+			if (!WaitWhilePaused()) break;
 			if (kv.Key < 16 || kv.Key == 5) continue;
 			if (!dirSecId.TryGetValue(kv.Key, out uint sid) || sid == 0 || !sds.TryGetValue(sid, out var dsd)) continue;
 			string relDir = ResolvePath(kv.Value.parent, dirNames) + kv.Value.name;
