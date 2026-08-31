@@ -2,9 +2,13 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## v4.3.1 — 2026-08-31
 
-### Fixed
+Re-cut on 2026-08-31. The build first tagged v4.3.1 on 2026-08-30 was replaced before anyone had
+downloaded it, so this tag is the only v4.3.1 that ever reached anyone. It carries everything below plus
+the original v4.3.1 changes further down this section.
+
+### Fixed — found by a code audit of everything since v4.3.0
 - **The progress bar along the bottom of the window is no longer cut off by the window edge.** The bottom bar
   had a fixed height that its own contents outgrew whenever the "pick a drive first" hint was showing, so the
   bar's lower rounded edge was drawn past the bottom of the window and the percentage sat on what looked like a
@@ -27,7 +31,7 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   "Sicher entferne". They now grow to fit their caption and keep the old width as a minimum, so the layout is
   unchanged in English.
 
-## v4.3.1 — 2026-07-26
+### Also in v4.3.1 (from the 2026-08-30 build)
 
 Safety fixes to confirmation dialogs, a translation fix on the recovery warning, and the project's first
 automated test suite.
