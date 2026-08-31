@@ -5213,15 +5213,32 @@ exit 0
 		foreach (var a in new[] { "apply", "-", "1", target, "--recover-data" }) appPsi.ArgumentList.Add(a);
 		using var cap = Process.Start(capPsi) ?? throw new InvalidOperationException("Could not start wimlib capture.");
 		using var app = Process.Start(appPsi) ?? throw new InvalidOperationException("Could not start wimlib apply.");
-		// Drain both stderr streams concurrently so neither process blocks on a full pipe, and pump capture -> apply.
-		Task<string> capErr = cap.StandardError.ReadToEndAsync();
-		Task<string> appErr = app.StandardError.ReadToEndAsync();
-		try { await cap.StandardOutput.BaseStream.CopyToAsync(app.StandardInput.BaseStream); }
-		catch (IOException) { /* apply may have exited early (broken pipe) — its exit code below tells the real story */ }
-		finally { try { app.StandardInput.Close(); } catch { } }
-		await cap.WaitForExitAsync();
-		await app.WaitForExitAsync();
-		string capStdErr = await capErr, appStdErr = await appErr;
+		// Join the activeProcess contract with APPLY — the half that writes to the target disk. Neither process was
+		// registered before, so for the whole multi-hundred-gigabyte clone both Stop and Window_Closing's kill path
+		// (line 888) had nothing to reach: Stop showed "Stopping..." and the clone carried on writing, and closing
+		// the app left two wimlib processes still writing to the drive. Killing apply breaks the pipe, which brings
+		// capture down with it; the finally makes sure of it either way.
+		Process? previousActive = activeProcess;
+		activeProcess = app;
+		string capStdErr, appStdErr;
+		try
+		{
+			// Drain both stderr streams concurrently so neither process blocks on a full pipe, and pump capture -> apply.
+			Task<string> capErr = cap.StandardError.ReadToEndAsync();
+			Task<string> appErr = app.StandardError.ReadToEndAsync();
+			try { await cap.StandardOutput.BaseStream.CopyToAsync(app.StandardInput.BaseStream); }
+			catch (IOException) { /* apply may have exited early (broken pipe) — its exit code below tells the real story */ }
+			finally { try { app.StandardInput.Close(); } catch { } }
+			await cap.WaitForExitAsync();
+			await app.WaitForExitAsync();
+			capStdErr = await capErr; appStdErr = await appErr;
+		}
+		finally
+		{
+			// Capture has no owner of its own, so a Stop that killed apply must not leave it orphaned.
+			try { if (!cap.HasExited) cap.Kill(entireProcessTree: true); } catch { }
+			if (ReferenceEquals(activeProcess, app)) activeProcess = previousActive;
+		}
 		if (cap.ExitCode != 0)
 			throw new InvalidOperationException($"wimlib capture failed (exit {cap.ExitCode}) — the clone would be incomplete, so it was aborted. {capStdErr.Trim()}");
 		if (app.ExitCode != 0)
@@ -5899,7 +5916,7 @@ exit 0
 	{
 		var psi = new ProcessStartInfo
 		{
-			FileName = fileName,
+			FileName = ResolveSystemTool(fileName),   // absolute System32 path: a bare name lets CWD win the search
 			Arguments = arguments,
 			UseShellExecute = false,
 			CreateNoWindow = true,
@@ -12665,20 +12682,37 @@ exit 0
 			p.OutputDataReceived += (_, ev) => { if (ev.Data != null) lock (sbOut) sbOut.AppendLine(ev.Data); };
 			p.ErrorDataReceived += (_, ev) => { if (ev.Data != null) lock (sbOut) sbOut.AppendLine(ev.Data); };
 			p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
-			string pctFile = Path.Combine(dir, "cli_percent.txt");
-			while (!p.WaitForExit(400))
+			// Join the activeProcess contract. Ventoy repartitions the WHOLE disk, and without this it was the one
+			// child process Stop could not reach and Window_Closing's kill path (line 888) could not see: pressing
+			// Stop did nothing, and closing the app left Ventoy running on, and still writing to, the disk.
+			activeProcess = p;
+			try
 			{
-				try
+				string pctFile = Path.Combine(dir, "cli_percent.txt");
+				while (!p.WaitForExit(400))
 				{
-					if (File.Exists(pctFile) && int.TryParse(File.ReadAllText(pctFile).Trim(), out int pct))
+					if (stopRequested)
 					{
-						int v = Math.Max(0, Math.Min(100, pct));
-						Dispatcher.Invoke(() => ProgressBar.Value = v);
+						try { p.Kill(entireProcessTree: true); } catch { }
+						break;
 					}
+					try
+					{
+						if (File.Exists(pctFile) && int.TryParse(File.ReadAllText(pctFile).Trim(), out int pct))
+						{
+							int v = Math.Max(0, Math.Min(100, pct));
+							Dispatcher.Invoke(() => ProgressBar.Value = v);
+						}
+					}
+					catch { }
 				}
-				catch { }
+				p.WaitForExit();
 			}
-			p.WaitForExit();
+			finally
+			{
+				// Only hand back ownership if it is still ours — a later operation may already have claimed it.
+				if (ReferenceEquals(activeProcess, p)) activeProcess = null;
+			}
 			string done = ""; try { done = File.ReadAllText(Path.Combine(dir, "cli_done.txt")).Trim(); } catch { }
 			string log = ""; try { log = File.ReadAllText(Path.Combine(dir, "cli_log.txt")); } catch { }
 			bool ok = done.StartsWith("0") || (done.Length == 0 && p.ExitCode == 0);
@@ -14535,7 +14569,7 @@ exit 0
 		int exitCode = -1;
 		ProcessStartInfo startInfo = new ProcessStartInfo
 		{
-			FileName = fileName,
+			FileName = ResolveSystemTool(fileName),   // absolute System32 path: a bare name lets CWD win the search
 			Arguments = arguments,
 			WorkingDirectory = GetProcessWorkingDirectory(fileName),
 			UseShellExecute = false,
@@ -14560,7 +14594,7 @@ exit 0
 			}
 			else
 			{
-				output.AppendLine(e.Data);
+				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
 				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
@@ -14578,7 +14612,7 @@ exit 0
 			}
 			else
 			{
-				output.AppendLine(e.Data);
+				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
 				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
@@ -14614,7 +14648,8 @@ exit 0
 				{
 					activeProcess = null;
 				}
-				completion.TrySetResult(new ProcessResult(exitCode, output.ToString()));
+				string captured; lock (output) captured = output.ToString();
+				completion.TrySetResult(new ProcessResult(exitCode, captured));
 				process.Dispose();
 			}
 		}
@@ -14630,7 +14665,7 @@ exit 0
 		int exitCode = -1;
 		ProcessStartInfo processStartInfo = new ProcessStartInfo
 		{
-			FileName = fileName,
+			FileName = ResolveSystemTool(fileName),   // absolute System32 path: a bare name lets CWD win the search
 			WorkingDirectory = GetProcessWorkingDirectory(fileName),
 			UseShellExecute = false,
 			RedirectStandardOutput = true,
@@ -14658,7 +14693,7 @@ exit 0
 			}
 			else
 			{
-				output.AppendLine(e.Data);
+				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
 				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
@@ -14676,7 +14711,7 @@ exit 0
 			}
 			else
 			{
-				output.AppendLine(e.Data);
+				lock (output) output.AppendLine(e.Data);   // stdout and stderr arrive on two different pool threads
 				((DispatcherObject)this).Dispatcher.Invoke((Action)delegate
 				{
 					lastProcessOutputUtc = DateTime.UtcNow;
@@ -14713,7 +14748,8 @@ exit 0
 					activeProcess = null;
 				}
 				process.Dispose();
-				completion.TrySetResult(new ProcessResult(exitCode, output.ToString()));
+				string captured; lock (output) captured = output.ToString();
+				completion.TrySetResult(new ProcessResult(exitCode, captured));
 			}
 		}
 	}
@@ -14736,6 +14772,34 @@ exit 0
 		catch
 		{
 		}
+	}
+
+	// powershell.exe is the one Windows tool that does not live directly in System32.
+	private static readonly Dictionary<string, string> SystemToolSubPath = new(StringComparer.OrdinalIgnoreCase)
+	{
+		["powershell.exe"] = @"WindowsPowerShell\v1.0\powershell.exe",
+	};
+
+	/// <summary>
+	/// Resolves a Windows-shipped tool name to its absolute path under System32.
+	/// </summary>
+	/// <remarks>
+	/// Passing a bare name like "diskpart.exe" makes CreateProcess search for it, and that search reaches the
+	/// process's CURRENT DIRECTORY before %SystemRoot%\System32. DriveForge always runs elevated and its current
+	/// directory is whatever a file dialog last left it as, so a file named diskpart.exe, reg.exe or powershell.exe
+	/// dropped in the wrong folder would be executed WITH ADMINISTRATOR RIGHTS in place of the real tool — by an app
+	/// whose whole job is repartitioning disks. Anything that already carries a directory (wimlib, Ventoy, a
+	/// user-chosen exe) is returned untouched, and an unresolvable name falls back to the original rather than
+	/// breaking a machine where the tool lives somewhere unusual.
+	/// </remarks>
+	private static string ResolveSystemTool(string fileName)
+	{
+		if (string.IsNullOrEmpty(fileName) || fileName.IndexOfAny(new[] { '\\', '/' }) >= 0) return fileName;
+		string systemDir = Environment.SystemDirectory;
+		if (string.IsNullOrEmpty(systemDir)) return fileName;
+		string relative = SystemToolSubPath.TryGetValue(fileName, out string? mapped) ? mapped : fileName;
+		string full = Path.Combine(systemDir, relative);
+		return File.Exists(full) ? full : fileName;
 	}
 
 	private static string GetProcessWorkingDirectory(string fileName)
