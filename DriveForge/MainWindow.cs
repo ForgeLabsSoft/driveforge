@@ -1454,7 +1454,14 @@ public partial class MainWindow : Window, IComponentConnector
 			BypassRequirementsCheck.IsEnabled = installMode;
 			BypassAccountCheck.IsEnabled = installMode;
 			DebloatCheck.IsEnabled = installMode;
+			// Disabling alone left the box CHECKED, and nothing downstream re-checks the mode: switching from Clone to
+			// Restore with BitLocker ticked still prompted for a recovery folder and a password, still listed
+			// "Encrypt with BitLocker (recovery key saved)" in the confirm summary, and still reported a plain
+			// success — but EnableBitLockerAsync is only ever called on the install and clone paths, so the restored
+			// drive was never encrypted. Three separate promises of encryption, no encryption, and nothing telling
+			// the user. Clear the option when it cannot apply, so every downstream read is honest by construction.
 			BitLockerCheck.IsEnabled = installMode || cloneMode;
+			if (!BitLockerCheck.IsEnabled) BitLockerCheck.IsChecked = false;
 
 			BootModeText.Text = L("BootModeText");
 
@@ -5052,6 +5059,16 @@ exit 0
 			Log("VHDX image restored to Disk " + disk.Number + (restoreZeroFilled > 0 ? $" (WITH {restoreZeroFilled} zero-filled unreadable region(s) — NOT byte-faithful)" : " (faithful raw copy)") + " and made bootable (BIOS + UEFI).");
 			if (restoreZeroFilled > 0)
 				MessageBox.Show(string.Format(L("MbRawZeroFilled"), restoreZeroFilled), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);
+			// rawStats.Errors counts files the engine could NOT copy at all — a different failure from the zero-filled
+			// regions above, and the one the winload.efi/SYSTEM spot-check cannot see (it only proves those two files
+			// arrived). The clone path already surfaces this via MbCloneFilesSkipped; restore was silent, so a drive
+			// missing an arbitrary set of files was reported as a plain success.
+			long restoreErrors = rawStats?.Errors ?? 0;
+			if (restoreErrors > 0)
+			{
+				Log($"WARNING: {restoreErrors} file(s) could not be restored (torn source records / write errors) — the drive is INCOMPLETE and may not boot correctly.");
+				MessageBox.Show(string.Format(L("MbCloneFilesSkipped"), restoreErrors).TrimStart(), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);
+			}
 		}
 		finally
 		{
@@ -6037,6 +6054,7 @@ exit 0
 		if (!File.Exists(softwareHive)) { Log("WARNING: could not find the install SOFTWARE hive for debloat."); return; }
 		string hiveRoot = "HKLM\\DriveForgeDebloat" + Guid.NewGuid().ToString("N");
 		bool loaded = false;
+		bool wroteKeys = false;
 		try
 		{
 			await RunProcessAsync("reg.exe", "load " + QuoteArgument(hiveRoot) + " " + QuoteArgument(softwareHive));
@@ -6055,14 +6073,22 @@ exit 0
 			};
 			foreach (var (key, name, data) in keys)
 				await RunProcessAsync("reg.exe", $"add \"{key}\" /v {name} /t REG_DWORD /d {data} /f", allowFailure: true);
-			_lastDebloatApplied = true;
+			wroteKeys = true;
 			Log("Debloat policy keys applied to the install image.");
 		}
 		catch (Exception ex) { Log("Debloat step failed (non-fatal): " + ex.Message); }
 		finally
 		{
+			// The edits live in an offline hive and only reach the image when it UNLOADS. Setting the "applied" flag
+			// before the unload meant a failed unload — which the line below already knows discards the settings —
+			// still put "Debloat applied" in the completion summary. Claim it only once the hive is committed.
+			bool unloaded = true;
 			if (loaded && !await UnloadRegistryHiveRobustAsync(hiveRoot))
+			{
+				unloaded = false;
 				Log("WARNING: debloat registry hive did not unload cleanly; some settings may not have been committed: " + hiveRoot);
+			}
+			_lastDebloatApplied = wroteKeys && unloaded;
 		}
 	}
 
@@ -11564,15 +11590,21 @@ exit 0
 			RecoverStopButton.IsEnabled = true;
 			SetBusy(busy: true, string.Format(L("RfImgBusy"), letter, Path.GetFileName(dest)));
 			ProgressBar.Value = 0.0;
-			await Task.Run(() => CreateDiskImage(letter, dest, total, p => Dispatcher.Invoke(() => ProgressBar.Value = p)));
+			long badSectors = await Task.Run(() => CreateDiskImage(letter, dest, total, p => Dispatcher.Invoke(() => ProgressBar.Value = p)));
 			operationTimer.Stop(); operationStopwatch.Stop();
 			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
 			UpdateProgressStats();   // refresh the stats LINE too — the timer has stopped, so nothing else will
 			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
+			// Unreadable sectors are now skipped rather than aborting the image, but the user must be told how much
+			// of the copy is zeros — recovery run against it will silently come up short in exactly those regions.
+			if (badSectors > 0)
+				Log($"WARNING: {badSectors} sector(s) could not be read and were written to the image as zeros — the image is INCOMPLETE in those regions.");
 			MessageBox.Show(stopRequested
 				? string.Format(L("RfImgStopped"), dest)
-				: string.Format(L("RfImgDone"), dest),
-				L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Information);
+				: string.Format(L("RfImgDone"), dest)
+					+ (badSectors > 0 ? "\n\n" + string.Format(L("RfImgBadSectors"), badSectors) : ""),
+				L("RfImgTitle"), MessageBoxButton.OK,
+				badSectors > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("RfImgFailed"), ex); }
 		finally { _progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop(); RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
@@ -12953,7 +12985,7 @@ exit 0
 		long totalBytes = 0;
 		foreach (var f in files) { try { totalBytes += new FileInfo(f).Length; } catch { } }
 
-		bool failed = false; int done = 0, fail = 0;
+		bool failed = false; int done = 0, fail = 0, noReach = 0;
 		try
 		{
 			// _progressFixedTotal: the total is the measured size of the selected files x passes — real, not a
@@ -12970,7 +13002,13 @@ exit 0
 				foreach (var f in files)
 				{
 					if (stopRequested) break;
-					try { if (ShredOne(f, fills, acc)) done++; } catch { fail++; }   // only count a file that was fully overwritten + deleted
+					// NTFS relocates compressed, sparse and EFS-encrypted files on write, so the passes land on NEW
+					// clusters and the original data stays on the platter untouched. The single-file flow already
+					// knows this (CleanSecureDelete_Click shows SecureDelNoReachNote); the folder shredder counted
+					// them as "securely erased" like everything else. Still delete them — the user asked to erase the
+					// folder — but count them apart so the summary does not claim an erasure that did not happen.
+					bool unreachable = OverwriteCannotReachClusters(f);
+					try { if (ShredOne(f, fills, acc)) { if (unreachable) noReach++; else done++; } } catch { fail++; }
 				}
 				if (baseFolder != null && !stopRequested)
 				{
@@ -13019,10 +13057,15 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false); NotifyOperationDone(true);
-			MessageBox.Show(stopRequested
-				? $"Stopped. {done} file(s) shredded so far."
-				: $"Done. {done} file(s) securely erased." + (fail > 0 ? $"\n\n{fail} could not be erased (in use or protected)." : ""),
-				"DriveForge — secure shred", MessageBoxButton.OK, MessageBoxImage.Information);
+			// Three separate outcomes, reported separately: overwritten and deleted, deleted but NOT overwritten
+			// (compressed / sparse / EFS — the original clusters could not be reached), and not erased at all.
+			// Folding the middle group into "securely erased" is what made the summary dishonest. These were also
+			// the last hardcoded English strings in this flow.
+			string shredMsg = (stopRequested ? string.Format(L("MbShredStopped"), done) : string.Format(L("MbShredDone"), done))
+				+ (noReach > 0 ? string.Format(L("MbShredNoReach"), noReach) : "")
+				+ (fail > 0 ? string.Format(L("MbShredFailed"), fail) : "");
+			MessageBox.Show(shredMsg, L("MbShredTitle"), MessageBoxButton.OK,
+				(noReach > 0 || fail > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrShred"), ex); }
 		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward

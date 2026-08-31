@@ -1225,21 +1225,58 @@ public partial class MainWindow
 
 	// Creates a raw sector-by-sector image (.img) of a volume so recovery can be run on the copy, protecting a
 	// failing drive (read once). Returns when done; honours Stop.
-	private void CreateDiskImage(char letter, string destPath, long totalSize, Action<int> progress)
+	/// <returns>The number of 4 KiB sectors that could not be read and were written to the image as zeros.</returns>
+	/// <remarks>
+	/// Bad-sector tolerance is the whole point of this feature: it exists to get one read off a DYING drive so the
+	/// recovery work can happen on the copy. It used to call vr.Read(pos, want) and write the buffer blind — so an
+	/// unreadable sector either threw and aborted the imaging outright, or came back silently zero-padded and was
+	/// written as if it were real data. Both are wrong on exactly the drives this is for: one gives up at the first
+	/// bad sector, the other hides how much of the image is fiction. Now a block that does not read in full is
+	/// retried sector by sector, only the sectors that genuinely fail are zero-filled, and the count comes back so
+	/// the caller can tell the user how much of the image is missing.
+	/// </remarks>
+	private long CreateDiskImage(char letter, string destPath, long totalSize, Action<int> progress)
 	{
 		using var vr = OpenVolume(letter);
 		using var outFs = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
 		const int block = 8 << 20;
+		const int sector = 4096;
 		long pos = 0;
+		long badSectors = 0;
 		while (pos < totalSize && !stopRequested)
 		{
 			int want = (int)Math.Min(block, totalSize - pos);
-			byte[] data = vr.Read(pos, want);
+			byte[] data;
+			int got;
+			try { data = vr.Read(pos, want, out got); }
+			catch { data = new byte[want]; got = 0; }
+
+			if (got < want)
+			{
+				// Something in this block is unreadable. Narrow it down instead of losing the whole 8 MiB: the bad
+				// area is usually a handful of sectors, and everything around them is still perfectly good data.
+				for (int off = 0; off < want; off += sector)
+				{
+					int len = Math.Min(sector, want - off);
+					byte[] one;
+					int oneGot;
+					try { one = vr.Read(pos + off, len, out oneGot); }
+					catch { one = new byte[len]; oneGot = 0; }
+					if (oneGot < len)
+					{
+						Array.Clear(one, oneGot, len - oneGot);   // zero-fill ONLY the part that could not be read
+						badSectors++;
+					}
+					Array.Copy(one, 0, data, off, len);
+				}
+			}
+
 			outFs.Write(data, 0, want);
 			pos += want;
 			if (totalSize > 0) progress((int)Math.Min(100, pos * 100 / totalSize));
 		}
 		outFs.Flush();
+		return badSectors;
 	}
 
 	// Computes a carved file's length from header fields (RIFF size, BMP size), validating the structure so a
