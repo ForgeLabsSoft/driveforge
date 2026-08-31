@@ -8,7 +8,28 @@
 
 Free • Portable (no install) • No ads • No telemetry • Works offline
 
+[**forgelabssoft.com**](https://forgelabssoft.com) · [Download](https://github.com/ForgeLabsSoft/driveforge/releases/latest) · [Report a problem](https://github.com/ForgeLabsSoft/driveforge/issues)
+
 </div>
+
+---
+
+<div align="center">
+
+<img src="docs/screenshots/01-create-usb.png" width="90%" alt="DriveForge: creating a bootable Windows USB from an ISO">
+
+</div>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/02-clone.png" alt="Cloning this PC to a portable drive"><br><sub><b>Clone this PC</b> to a drive that boots anywhere.</sub></td>
+<td width="50%"><img src="docs/screenshots/03-drive-tools.png" alt="Drive Diagnostic Center"><br><sub><b>Drive Diagnostic Center</b> — health, SMART, speed, surface scan.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/04-recover.png" alt="Recovering deleted files"><br><sub><b>Recover deleted files</b> — undelete or deep-scan.</sub></td>
+<td width="50%"><img src="docs/screenshots/05-backup.png" alt="Backing up this PC to an image file"><br><sub><b>Back up this PC</b> to a single image file.</sub></td>
+</tr>
+</table>
 
 ---
 
@@ -26,7 +47,7 @@ a drive doctor, in one portable exe** — free, offline, in 17 languages.
 - **Recover deleted files** — undelete on NTFS / exFAT / FAT, plus a deep-scan "carving" mode that finds files even after the filesystem entry is gone.
 - **Bootable USB from any ISO** — write Linux or any disk-image ISO straight to a stick.
 - **Multi-boot USB** — put many ISOs on one stick and pick at boot (Ventoy).
-- **Securely erase a drive**, wipe free space, or clean usage traces — with a wipe certificate.
+- **Securely erase a drive**, wipe free space, shred individual files, or clean usage traces.
 - **Partition tools** — create, delete, resize, move, convert (MBR ↔ GPT), set active, find lost partitions.
 - **Drive Diagnostic Center** — health, SMART, speed test, file-system scan, repair, and a portable tool kit.
 

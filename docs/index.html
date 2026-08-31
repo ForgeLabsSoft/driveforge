@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DriveForge — free Windows USB, PC clone, backup &amp; drive-health tool</title>
+<meta name="description" content="Free, portable, open-source Windows tool: create bootable USB drives, clone or back up your PC, recover deleted files, securely wipe drives and check drive health. No ads, no telemetry, works offline.">
+<link rel="icon" href="logo-256.png" type="image/png">
+
+<meta property="og:title" content="DriveForge — free Windows USB, PC clone, backup &amp; drive-health tool">
+<meta property="og:description" content="Create bootable USB drives, clone this PC, back it up, recover deleted files and check drive health. Free, portable, open source. No ads, no telemetry.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://forgelabssoft.com/">
+<meta property="og:image" content="https://forgelabssoft.com/driveforge-github-banner.png">
+<meta name="twitter:card" content="summary_large_image">
+
+<!-- No analytics, no fonts from a CDN, no third-party requests of any kind. The app promises no telemetry;
+     it would be odd for its website to track you. Everything here is served from this domain. -->
+<style>
+:root{
+  --bg:#0b1220; --panel:#111827; --panel-2:#172033; --line:#1e3a5f; --line-2:#334155;
+  --text:#f8fafc; --muted:#cbd5e1; --dim:#94a3b8;
+  --accent:#2563eb; --accent-hi:#3b82f6; --good:#16a34a; --warn:#d97706;
+  --radius:12px; --maxw:1080px;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#eef2f7; --panel:#ffffff; --panel-2:#f1f5f9; --line:#cbd5e1; --line-2:#d1d5db;
+    --text:#0f172a; --muted:#475569; --dim:#64748b;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent-hi); text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 20px}
+h1,h2,h3{line-height:1.25; margin:0 0 .5em}
+h2{font-size:clamp(1.4rem,3vw,1.9rem); margin-top:0}
+h3{font-size:1.05rem}
+p{margin:0 0 1em}
+section{padding:64px 0; border-top:1px solid var(--line)}
+section:first-of-type{border-top:0}
+
+/* ---------- header ---------- */
+header{padding:56px 0 8px; text-align:center}
+.logo{width:88px;height:88px;margin-bottom:18px}
+.title{font-size:clamp(2.2rem,6vw,3.4rem); font-weight:700; letter-spacing:-.02em; margin:0}
+.tagline{font-size:clamp(1.05rem,2.4vw,1.3rem); color:var(--muted); max-width:44ch; margin:.6em auto 1.4em}
+.badges{display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-bottom:28px}
+.badge{
+  font-size:.82rem; color:var(--muted); background:var(--panel-2);
+  border:1px solid var(--line); border-radius:999px; padding:5px 13px; white-space:nowrap;
+}
+.cta{display:flex; flex-wrap:wrap; gap:12px; justify-content:center; align-items:center}
+.btn{
+  display:inline-block; padding:13px 26px; border-radius:10px; font-weight:600;
+  border:1px solid transparent; cursor:pointer; font-size:1rem;
+}
+.btn-primary{background:var(--accent); color:#fff}
+.btn-primary:hover{background:var(--accent-hi); text-decoration:none}
+.btn-ghost{background:transparent; color:var(--text); border-color:var(--line-2)}
+.btn-ghost:hover{background:var(--panel-2); text-decoration:none}
+.sub-cta{font-size:.86rem; color:var(--dim); margin-top:12px}
+
+/* ---------- shots ---------- */
+figure{margin:0}
+.shot{
+  width:100%; height:auto; display:block; border-radius:var(--radius);
+  border:1px solid var(--line); background:var(--panel);
+}
+.hero-shot{margin:40px 0 0; box-shadow:0 24px 60px rgba(0,0,0,.35)}
+@media (prefers-color-scheme: light){ .hero-shot{box-shadow:0 24px 60px rgba(15,23,42,.14)} }
+.gallery{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:26px}
+.gallery figcaption{color:var(--dim); font-size:.88rem; margin-top:10px}
+
+/* ---------- features ---------- */
+.grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:18px}
+.card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px}
+.card h3{margin-bottom:.35em}
+.card p{color:var(--muted); font-size:.94rem; margin:0}
+
+/* ---------- misc ---------- */
+.lead{font-size:1.08rem; color:var(--muted); max-width:66ch}
+code,kbd{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.9em;
+  background:var(--panel-2); border:1px solid var(--line); border-radius:5px; padding:1px 6px;
+}
+pre{
+  background:var(--panel); border:1px solid var(--line); border-radius:10px;
+  padding:16px 18px; overflow-x:auto; font-size:.88rem; line-height:1.55;
+}
+pre code{background:none; border:0; padding:0}
+.note{
+  background:var(--panel); border:1px solid var(--line);
+  border-left:3px solid var(--warn); border-radius:8px; padding:16px 20px; margin:0 0 20px;
+}
+.note.privacy{border-left-color:var(--good)}
+.note h3{margin-top:0}
+.note p:last-child{margin-bottom:0}
+ul.clean{list-style:none; padding:0; margin:0}
+ul.clean li{padding:9px 0 9px 26px; position:relative; color:var(--muted); border-bottom:1px solid var(--line)}
+ul.clean li:last-child{border-bottom:0}
+ul.clean li::before{content:"✓"; position:absolute; left:0; color:var(--good); font-weight:700}
+details{border:1px solid var(--line); border-radius:10px; padding:0 18px; margin-bottom:10px; background:var(--panel)}
+details[open]{padding-bottom:6px}
+summary{cursor:pointer; font-weight:600; padding:15px 0; list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"▸ "; color:var(--dim)}
+details[open] summary::before{content:"▾ "}
+footer{padding:40px 0 60px; border-top:1px solid var(--line); color:var(--dim); font-size:.9rem}
+footer a{color:var(--muted)}
+.foot-row{display:flex; flex-wrap:wrap; gap:10px 22px; justify-content:space-between; align-items:center}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <img class="logo" src="logo-256.png" alt="DriveForge logo" width="88" height="88">
+    <h1 class="title">DriveForge</h1>
+    <p class="tagline">Create Windows USB drives, clone this PC, back it up, and check drive health — in one portable app.</p>
+
+    <div class="badges">
+      <span class="badge">Free &amp; open source (GPL-3.0)</span>
+      <span class="badge">Portable — no install</span>
+      <span class="badge">No ads, no telemetry</span>
+      <span class="badge">Works offline</span>
+      <span class="badge">17 languages</span>
+      <span class="badge">Windows 10 / 11 (x64)</span>
+    </div>
+
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/ForgeLabsSoft/driveforge/releases/latest">Download for Windows</a>
+      <a class="btn btn-ghost" href="https://github.com/ForgeLabsSoft/driveforge">View source on GitHub</a>
+    </div>
+    <p class="sub-cta">One <code>.exe</code>, about 80&nbsp;MB. Nothing to install. <a href="#verify">Verify what you downloaded →</a></p>
+
+    <figure class="hero-shot">
+      <img class="shot" src="screenshots/01-create-usb.png" alt="DriveForge main window: creating a bootable Windows USB from an ISO file" loading="eager">
+    </figure>
+  </div>
+</header>
+
+<section id="what">
+  <div class="wrap">
+    <h2>What it does</h2>
+    <p class="lead">A bootable-USB maker, a PC-clone tool, an undeleter and a drive doctor — in a single file you can carry on a stick.</p>
+    <div class="grid" style="margin-top:28px">
+      <div class="card">
+        <h3>Create a Windows USB</h3>
+        <p>From an ISO, WIM or ESD. Boots on both BIOS and UEFI. Optionally bypass the Windows 11 hardware and Microsoft-account requirements, and add this PC's drivers.</p>
+      </div>
+      <div class="card">
+        <h3>Clone this PC</h3>
+        <p>To a portable USB or external drive that boots on any PC with your apps and settings, or to an internal disk as a normal Windows install.</p>
+      </div>
+      <div class="card">
+        <h3>Back up and restore</h3>
+        <p>Save the whole PC to an image file with incremental restore points, and write it back later. Scheduled unattended backups when the drive is connected.</p>
+      </div>
+      <div class="card">
+        <h3>Recover deleted files</h3>
+        <p>Undelete on NTFS, exFAT and FAT — plus a deep scan that carves files out of raw sectors even after the filesystem entry is gone.</p>
+      </div>
+      <div class="card">
+        <h3>Securely erase</h3>
+        <p>Overwrite a whole drive, wipe only the free space, shred individual files, or clean usage traces. SSD-aware, and honest about what TRIM can and cannot guarantee.</p>
+      </div>
+      <div class="card">
+        <h3>Drive Diagnostic Center</h3>
+        <p>Health and SMART with a plain-language verdict, temperature trend, speed test, surface scan for bad blocks, file-system check and repair.</p>
+      </div>
+      <div class="card">
+        <h3>Bootable USB from any ISO</h3>
+        <p>Write Linux or any disk image straight to a stick — or build a multi-boot stick that holds many ISOs and lets you pick at boot.</p>
+      </div>
+      <div class="card">
+        <h3>Partition tools</h3>
+        <p>Create, delete, resize, move, convert between MBR and GPT, set the active partition, and find lost partitions — with a table backup taken before risky moves.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots">
+  <div class="wrap">
+    <h2>A look inside</h2>
+    <p class="lead">Every destructive action asks first, defaults to Cancel, and tells you exactly which disk it is about to touch.</p>
+    <div class="gallery" style="margin-top:30px">
+      <figure>
+        <img class="shot" src="screenshots/02-clone.png" alt="Cloning this PC to a portable USB or external drive" loading="lazy">
+        <figcaption>Clone this PC to a drive that boots anywhere.</figcaption>
+      </figure>
+      <figure>
+        <img class="shot" src="screenshots/03-drive-tools.png" alt="Drive Diagnostic Center showing health, temperature and a partition map" loading="lazy">
+        <figcaption>Health, SMART, speed and surface scan in one place.</figcaption>
+      </figure>
+      <figure>
+        <img class="shot" src="screenshots/04-recover.png" alt="Recovering deleted files with undelete and deep scan" loading="lazy">
+        <figcaption>Undelete, or deep-scan for files the filesystem forgot.</figcaption>
+      </figure>
+      <figure>
+        <img class="shot" src="screenshots/05-backup.png" alt="Backing up this PC to a .wim image file" loading="lazy">
+        <figcaption>Full and incremental backups to a single image file.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="verify">
+  <div class="wrap">
+    <h2>Download and verify</h2>
+    <p class="lead">Every release is built from public source by GitHub Actions — not on a developer's laptop — and carries a cryptographic record of exactly which commit produced it.</p>
+
+    <p style="margin-top:24px">
+      <a class="btn btn-primary" href="https://github.com/ForgeLabsSoft/driveforge/releases/latest">Get the latest release</a>
+    </p>
+
+    <h3 style="margin-top:34px">Check the file is the one that was published</h3>
+    <p>Compare the SHA-256 in <code>SHA256SUMS.txt</code> with the file you downloaded:</p>
+    <pre><code>Get-FileHash DriveForge.exe -Algorithm SHA256</code></pre>
+
+    <h3>Or verify it cryptographically</h3>
+    <p>With the <a href="https://cli.github.com/">GitHub CLI</a>, confirm the binary really was produced by this repository's build pipeline:</p>
+    <pre><code>gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge</code></pre>
+    <p style="color:var(--dim); font-size:.92rem">This proves the exe came from a specific commit through a public, auditable build — a stronger guarantee than a signature alone, and one most small Windows tools do not offer.</p>
+
+    <div class="note" style="margin-top:30px">
+      <h3>Windows will warn you on first run — here is why</h3>
+      <p>DriveForge is not yet code-signed, so Windows SmartScreen shows <em>“Windows protected your PC”</em> the first time you run it. Click <strong>More info → Run anyway</strong>.</p>
+      <p>Code-signing certificates cost money that this project does not make, and the free programme for open-source projects requires a level of public recognition DriveForge has not reached yet. Rather than ask you to simply trust it, the source is public, the build is reproducible on GitHub's servers, and both checks above let you confirm the download yourself.</p>
+      <p style="margin-bottom:0">Some antivirus tools also flag it. A tool that writes raw disk sectors and creates bootable drives looks, to a scanner, a lot like something that shouldn't. <a href="https://github.com/ForgeLabsSoft/driveforge/issues">Report a false positive</a> if you hit one.</p>
+    </div>
+  </div>
+</section>
+
+<section id="privacy">
+  <div class="wrap">
+    <h2>Privacy</h2>
+    <div class="note privacy">
+      <p><strong>Nothing about you is collected or sent anywhere.</strong> There is no crash reporter, no usage counter and no “phone home”. The app never contacts anyone on its own.</p>
+      <p style="margin-bottom:0">Reporting a problem is entirely manual: the button opens either a bug form or a pre-addressed email, and nothing is submitted until you send it yourself. The link to the public bug tracker carries only your DriveForge version and Windows build — never error text, because error messages contain file paths and on Windows those contain your account name.</p>
+    </div>
+    <ul class="clean">
+      <li>No accounts, no sign-in, no licence keys.</li>
+      <li>Works fully offline — only downloading an ISO or the multi-boot engine uses the network.</li>
+      <li>Your files never leave your PC.</li>
+      <li>This website has no analytics, no cookies and no third-party requests.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <h2>Questions</h2>
+
+    <details>
+      <summary>Is it really free? What is the catch?</summary>
+      <p>It is free and open source under the GPL-3.0 licence. There is no paid tier, no ads and no bundled software. If it saved you a job you would have paid for, there is a <a href="https://ko-fi.com/driveforge">Ko-fi page</a> — entirely optional.</p>
+    </details>
+
+    <details>
+      <summary>Do I need to install it?</summary>
+      <p>No. It is a single self-contained <code>.exe</code>. Put it on a USB stick and run it anywhere. It does need to run as Administrator, because creating and cloning drives requires direct disk access.</p>
+    </details>
+
+    <details>
+      <summary>Will it erase the wrong disk?</summary>
+      <p>Your system disk is hidden from the target list so it cannot be picked by mistake. Every destructive action shows exactly which disk and what is on it, defaults to Cancel so pressing Enter never erases anything, and re-checks the disk's identity by serial number immediately before writing — because Windows can renumber disks if you unplug something at the wrong moment.</p>
+    </details>
+
+    <details>
+      <summary>Can I clone a PC that is currently running?</summary>
+      <p>Yes. DriveForge takes a snapshot of the live Windows installation and copies from that, so you do not need to boot from anything else. The result keeps your apps, settings, permissions and file layout.</p>
+    </details>
+
+    <details>
+      <summary>What is the difference between the clone engines?</summary>
+      <p><strong>Fast Clone</strong> reads the file table straight off the snapshot and writes files directly to the target — fast, no temporary image, and it preserves permissions, hardlinks, reparse points and alternate data streams. <strong>The Microsoft engine (DISM)</strong> writes a temporary image to your system drive first and takes two passes, but is the more conservative choice. Fast Clone is the default.</p>
+    </details>
+
+    <details>
+      <summary>How do I report a problem?</summary>
+      <p>From inside the app: <em>Settings → Report a problem</em>. Or open an issue on <a href="https://github.com/ForgeLabsSoft/driveforge/issues">GitHub</a>, or email <a href="mailto:support@forgelabssoft.com">support@forgelabssoft.com</a>. Attaching the log file helps a lot — the app saves it to your Desktop.</p>
+    </details>
+
+    <details>
+      <summary>Which languages does it speak?</summary>
+      <p>English, Romanian, Spanish, French, German, Italian, Portuguese, Dutch, Russian, Polish, Turkish, Ukrainian, Chinese, Japanese, Hindi, Indonesian and Arabic. It picks your Windows language on first run.</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-row">
+    <div>
+      <strong style="color:var(--muted)">DriveForge</strong> — free software under the
+      <a href="https://github.com/ForgeLabsSoft/driveforge/blob/main/LICENSE.txt">GPL-3.0</a>.
+      Built by ForgeLabsSoft.
+    </div>
+    <div>
+      <a href="https://github.com/ForgeLabsSoft/driveforge">GitHub</a> ·
+      <a href="https://github.com/ForgeLabsSoft/driveforge/issues">Report a problem</a> ·
+      <a href="mailto:support@forgelabssoft.com">support@forgelabssoft.com</a> ·
+      <a href="https://ko-fi.com/driveforge">Ko-fi</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
