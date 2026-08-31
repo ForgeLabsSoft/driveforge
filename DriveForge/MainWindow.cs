@@ -8052,10 +8052,18 @@ exit 0
 			SetBusy(busy: false);
 			NotifyOperationDone(true);
 			await RefreshDisksAsync();
+			// Quick (sel 0) passes an EMPTY fills array: it runs diskpart clean and overwrites nothing at all. The
+			// confirm dialog shown before the method was chosen promises "Every sector will be OVERWRITTEN. Data will
+			// NOT be recoverable", so telling the user afterwards that the disk "was wiped" turns that promise into a
+			// false assurance — someone selling or donating the drive believes it is unreadable when every file is
+			// still there for any undelete tool. Say plainly which of the two actually happened.
+			// (These messages were also the last hardcoded English left in this flow.)
+			bool overwrote = fills.Length > 0;
 			MessageBox.Show(stopRequested
-				? $"Wipe stopped. Disk {disk.Number} was partially overwritten."
-				: $"Done. Disk {disk.Number} was wiped ({label}).\n\nUse Format to make it usable again.",
-				"DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+				? string.Format(L("MbWipeStopped"), disk.Number)
+				: string.Format(L(overwrote ? "MbWipeDoneOverwrite" : "MbWipeDoneQuick"), disk.Number, label),
+				"DriveForge", MessageBoxButton.OK,
+				overwrote || stopRequested ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex)
 		{
@@ -12943,6 +12951,20 @@ exit 0
 						while (dstack.Count > 0)
 						{
 							string cur = dstack.Pop();
+							// File symlinks were deliberately NOT shredded (overwriting one would have written onto its
+							// target, possibly on another drive), but the link itself is inside the folder the user asked
+							// to erase — and a leftover entry also blocks the non-recursive Directory.Delete below.
+							// Deleting a link removes only the link.
+							try
+							{
+								foreach (var lf in Directory.GetFiles(cur))
+								{
+									bool linkFile = false;
+									try { linkFile = (File.GetAttributes(lf) & FileAttributes.ReparsePoint) != 0; } catch { }
+									if (linkFile) { try { File.Delete(lf); } catch { } }
+								}
+							}
+							catch { }
 							string[] subs;
 							try { subs = Directory.GetDirectories(cur); } catch { subs = Array.Empty<string>(); }
 							foreach (var s in subs)
@@ -12977,6 +12999,10 @@ exit 0
 	// Overwrites one file in place with the given passes (0=zeros, 1=ones, 2=random), then renames + deletes it.
 	private bool ShredOne(string path, int[] fills, long[] acc)
 	{
+		// Second line of defence behind EnumerateFilesReparseSafe. Overwriting through a link writes the passes onto
+		// its target, which may be on another drive entirely — irreversibly destroying a file the user never selected.
+		// Anything reaching here that is still a link is refused outright rather than shredded in the wrong place.
+		try { if (File.ResolveLinkTarget(path, returnFinalTarget: false) != null) return false; } catch { }
 		try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
 		int[] passes = fills.Length == 0 ? new[] { 0 } : fills;
 		// Overwrite the default $DATA stream AND every alternate data stream (ADS). An ADS (file:stream) keeps its data
@@ -13017,7 +13043,17 @@ exit 0
 			string cur = stack.Pop();
 			string[] files;
 			try { files = Directory.GetFiles(cur); } catch { files = Array.Empty<string>(); }
-			foreach (var f in files) yield return f;
+			foreach (var f in files)
+			{
+				// A FILE symlink carries ReparsePoint but not Directory, so Directory.GetFiles returns it like any
+				// ordinary file and the directory check below never sees it. OverwriteStream opens by path with no
+				// FILE_FLAG_OPEN_REPARSE_POINT, so Windows follows the link and the passes land on the TARGET — which
+				// can sit on a completely different drive, outside the folder the user chose. Skip links here; the
+				// cleanup pass in ShredFiles_Click removes the link itself without touching what it points at.
+				bool reparse = false;
+				try { reparse = (File.GetAttributes(f) & FileAttributes.ReparsePoint) != 0; } catch { }
+				if (!reparse) yield return f;
+			}
 			string[] subs;
 			try { subs = Directory.GetDirectories(cur); } catch { subs = Array.Empty<string>(); }
 			foreach (var s in subs)
@@ -15162,6 +15198,18 @@ exit 0
 		public IntPtr InheritedFromUniqueProcessId;
 	}
 
+	// A BitLocker recovery password: eight groups of six digits. `manage-bde -protectors -add -RecoveryPassword`
+	// PRINTS the key it just created, and every line of a child process's output goes through LogProcessLine into
+	// the log — so the one secret that decrypts the volume outright was landing in a file the app then offers to
+	// the user as "Open the log folder" for attaching to a PUBLIC GitHub issue. It cannot be rotated without
+	// re-encrypting, so a single disclosure is permanent. The key is still written to the recovery-key FILE the
+	// user chose; only the log copy is masked.
+	private static readonly Regex RecoveryKeyPattern = new(@"\b\d{6}(?:-\d{6}){7}\b", RegexOptions.Compiled);
+
+	/// <summary>Masks secrets that must never reach the log. Applied at the single choke point every log line passes.</summary>
+	private static string RedactForLog(string message) =>
+		string.IsNullOrEmpty(message) ? message : RecoveryKeyPattern.Replace(message, "<recovery key hidden>");
+
 	private void Log(string message)
 	{
 		// Marshal to the UI thread — Log is called from background copy/verify/poll tasks too.
@@ -15170,7 +15218,7 @@ exit 0
 			Dispatcher.BeginInvoke((Action)(() => Log(message)));
 			return;
 		}
-		LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+		LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {RedactForLog(message)}{Environment.NewLine}");
 		LogBox.ScrollToEnd();
 	}
 
