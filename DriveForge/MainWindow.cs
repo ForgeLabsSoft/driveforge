@@ -1377,6 +1377,25 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	/// <summary>
+	/// The header title for the currently selected task, in the current language.
+	/// </summary>
+	/// <remarks>
+	/// Extracted so the two callers cannot drift: ModeBox_SelectionChanged sets it when the task changes, and
+	/// RefreshLocalizedDynamicText sets it when the LANGUAGE changes. The second caller was missing, and the
+	/// generic FindName loop in ApplyLanguage cannot cover it — that loop matches a control's x:Name against a
+	/// string key, and this one is `TaskTitleText` holding `TaskTitleClonePortable`. So the header kept whatever
+	/// language was active the last time the task was selected: start in English, switch to German, and the whole
+	/// window turned German except this line.
+	/// </remarks>
+	private string LocalizedTaskTitle() =>
+		ModeBox.SelectedIndex == ModeInstallFromImage ? L("TaskTitleInstall")
+			: ModeBox.SelectedIndex == ModeCloneCurrentWindows ? L("TaskTitleClonePortable")
+			: ModeBox.SelectedIndex == ModeCloneInternal ? L("TaskTitleCloneInternal")
+			: ModeBox.SelectedIndex == ModeBackupImage ? L("TaskTitleBackup")
+			: ModeBox.SelectedIndex == ModeWriteIsoImage ? L("TaskTitleIsoWrite")
+			: L("TaskTitleRestore");
+
 	private void ModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
 	{
 		if (SourceHelpText != null && EditionBox != null && StartButton != null && SourcePathBox != null)
@@ -1406,12 +1425,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// Backup writes a single file — the disk Diagnostic Center (and the step that points to it) are
 			// irrelevant there, so hide them and let the task panel use the full width.
 			// Header title for the current task (the sidebar is the task selector now).
-			TaskTitleText.Text = installMode ? L("TaskTitleInstall")
-				: ModeBox.SelectedIndex == ModeCloneCurrentWindows ? L("TaskTitleClonePortable")
-				: ModeBox.SelectedIndex == ModeCloneInternal ? L("TaskTitleCloneInternal")
-				: backupMode ? L("TaskTitleBackup")
-				: isoWriteMode ? L("TaskTitleIsoWrite")
-				: L("TaskTitleRestore");
+			TaskTitleText.Text = LocalizedTaskTitle();
 			StartButton.Content = isoWriteMode ? L("StartWriteIso") : StartButton.Content;
 			VerifyIsoButton.Visibility = (installMode || isoWriteMode) ? Visibility.Visible : Visibility.Collapsed;
 			// The "extra data partition" option makes no sense for the whole-disk internal clone.

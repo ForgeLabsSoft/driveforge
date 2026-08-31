@@ -128,7 +128,7 @@
     <Grid.RowDefinitions>
       <RowDefinition Height="62" />
       <RowDefinition Height="*" />
-      <RowDefinition Height="78" />
+      <RowDefinition Height="Auto" MinHeight="86" />
     </Grid.RowDefinitions>
     <Border Grid.Row="0" Background="{DynamicResource NavyBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="0,0,0,1">
       <Grid Margin="24,0">
@@ -319,7 +319,7 @@
             </Grid>
             <TextBlock Name="EditionLabel" Text="Windows edition" Margin="0,4,0,2" FontWeight="SemiBold" />
             <ComboBox Name="EditionBox" Height="30" />
-            <Button Name="VerifyIsoButton" Content="Verify ISO checksum" Margin="0,6,0,0" HorizontalAlignment="Left" Width="170" Style="{StaticResource GhostButtonStyle}" Click="VerifyIsoButton_Click" ToolTip="Compute the SHA-256 of the selected ISO so you can compare it with the value on the official download page — confirms the file is genuine and not corrupted." />
+            <Button Padding="10,0" Name="VerifyIsoButton" Content="Verify ISO checksum" Margin="0,6,0,0" HorizontalAlignment="Left" MinWidth="170" Style="{StaticResource GhostButtonStyle}" Click="VerifyIsoButton_Click" ToolTip="Compute the SHA-256 of the selected ISO so you can compare it with the value on the official download page — confirms the file is genuine and not corrupted." />
           </StackPanel>
         </Border>
         <Border Name="TargetSection" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
@@ -331,9 +331,9 @@
               <TextBlock Name="DriveVerdictText" TextWrapping="Wrap" FontWeight="SemiBold" Foreground="White" />
             </Border>
             <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-              <Button Name="RefreshDisksButton" Content="Refresh disks" Width="112" Click="RefreshDisks_Click" />
-              <Button Name="CheckDriveButton" Content="Check drive" Width="104" Margin="8,0,0,0" Click="SpeedTest_Click" />
-              <Button Name="EjectDriveButton" Content="Safely remove" Width="116" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="EjectDrive_Click" ToolTip="Flush and eject the selected drive so you can unplug it safely (for USB / external drives)." />
+              <Button Name="RefreshDisksButton" Content="Refresh disks" MinWidth="112" Padding="10,0" Click="RefreshDisks_Click" />
+              <Button Name="CheckDriveButton" Content="Check drive" MinWidth="104" Padding="10,0" Margin="8,0,0,0" Click="SpeedTest_Click" />
+              <Button Name="EjectDriveButton" Content="Safely remove" MinWidth="116" Padding="10,0" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="EjectDrive_Click" ToolTip="Flush and eject the selected drive so you can unplug it safely (for USB / external drives)." />
             </StackPanel>
           </StackPanel>
         </Border>
@@ -435,7 +435,7 @@
                       <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <ComboBox Name="DiagDiskBox" Height="30" SelectionChanged="DiagDiskBox_SelectionChanged" ToolTip="Choose which disk to run the diagnostic on (includes your system disk — diagnostics never format or write to it)." />
-                    <Button Name="DiagRefreshButton" Grid.Column="1" Content="Refresh" Width="84" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RefreshDisks_Click" />
+                    <Button Padding="10,0" Name="DiagRefreshButton" Grid.Column="1" Content="Refresh" MinWidth="84" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RefreshDisks_Click" />
                   </Grid>
                 </StackPanel>
                 <!-- tool buttons moved to the left rail -->
@@ -704,14 +704,14 @@
             <Grid MaxWidth="660" HorizontalAlignment="Left">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
               <TextBox Name="IsoUrlBox" Height="34" MinWidth="532" VerticalContentAlignment="Center" Padding="8,0,0,0" />
-              <Button Name="DownloadIsoButton" Grid.Column="1" Content="Download" Width="120" Margin="8,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="DownloadIsoButton_Click" />
+              <Button Padding="10,0" Name="DownloadIsoButton" Grid.Column="1" Content="Download" MinWidth="120" Margin="8,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="DownloadIsoButton_Click" />
             </Grid>
             <Border Height="1" Background="{DynamicResource DividerBrush}" Margin="0,14,0,14" MaxWidth="660" HorizontalAlignment="Left" />
             <TextBlock Name="DlAutoLabel" Text="Or fetch the latest version automatically:" Foreground="{DynamicResource MutedBrush}" FontSize="13" Margin="0,0,0,6" />
             <Grid MaxWidth="660" HorizontalAlignment="Left">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
               <ComboBox Name="DistroBox" Height="32" VerticalContentAlignment="Center" />
-              <Button Name="FetchLatestIsoButton" Grid.Column="1" Content="Get latest" Width="120" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="FetchLatestIso_Click" />
+              <Button Padding="10,0" Name="FetchLatestIsoButton" Grid.Column="1" Content="Get latest" MinWidth="120" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="FetchLatestIso_Click" />
             </Grid>
             <TextBlock Name="DlSaveHint" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap" MaxWidth="660" HorizontalAlignment="Left" />
           </StackPanel>
@@ -747,11 +747,11 @@
                   </Grid.ColumnDefinitions>
                   <TextBlock Name="RecVolumeLabel" Text="Drive to scan" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="2,0,10,0" />
                   <ComboBox Name="RecoverVolumeBox" Grid.Column="1" Height="32" VerticalAlignment="Center" DropDownOpened="RecoverVolumeBox_DropDownOpened" />
-                  <Button Name="RecoverScanButton" Grid.Column="2" Content="Scan" Width="92" Height="32" Margin="10,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="RecoverScanButton_Click" />
+                  <Button Padding="10,0" Name="RecoverScanButton" Grid.Column="2" Content="Scan" MinWidth="92" Height="32" Margin="10,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="RecoverScanButton_Click" />
                   <Button Name="RecoverDeepScanButton" Grid.Column="3" Content="Deep scan" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverDeepScan_Click" ToolTip="Find files by their content signature (header/footer) across the whole drive, even when the file system has no record of them. Best for photos and documents; carved files have no original name." />
                   <Button Name="RecoverRecycleButton" Grid.Column="4" Content="Recycle Bin" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverRecycle_Click" ToolTip="List files still in the Recycle Bin — original name, folder and date, recovered with a safe copy." />
-                  <Button Name="RecoverPauseButton" Grid.Column="5" Content="Pause" Width="80" Height="32" Margin="8,0,0,0" IsEnabled="False" Style="{StaticResource GhostButtonStyle}" Click="RecoverPause_Click" ToolTip="Pause a long deep scan; press again to resume. Save a session while stopped to continue it later." />
-                  <Button Name="RecoverStopButton" Grid.Column="6" Content="Stop" Width="74" Height="32" Margin="8,0,0,0" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="RecoverStopButton_Click" />
+                  <Button Padding="10,0" Name="RecoverPauseButton" Grid.Column="5" Content="Pause" MinWidth="80" Height="32" Margin="8,0,0,0" IsEnabled="False" Style="{StaticResource GhostButtonStyle}" Click="RecoverPause_Click" ToolTip="Pause a long deep scan; press again to resume. Save a session while stopped to continue it later." />
+                  <Button Padding="10,0" Name="RecoverStopButton" Grid.Column="6" Content="Stop" MinWidth="74" Height="32" Margin="8,0,0,0" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="RecoverStopButton_Click" />
                   <Button Name="RecoverMoreButton" Grid.Column="7" Content="&#x22EF;" FontSize="16" Width="40" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverMore_Click" ToolTip="More: disk image &amp; sessions">
                     <Button.ContextMenu>
                       <ContextMenu>
@@ -871,7 +871,7 @@
               <TextBlock Name="RecPanelNote" Text="Tip: recover to a DIFFERENT drive than the one you are scanning, so you don't overwrite the very files you're rescuing. On SSDs, TRIM may have already erased recently deleted data." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
               <Button Grid.Column="1" Name="RecoverGalleryButton" Content="Gallery" Height="32" Margin="0,0,8,0" Style="{StaticResource GhostButtonStyle}" Click="RecoverGallery_Click" ToolTip="See the found photos as thumbnails — tick the ones you want, then Recover." />
               <Button Grid.Column="2" Name="RecoverZipButton" Content="Recover to ZIP…" Height="32" Style="{StaticResource GhostButtonStyle}" Click="RecoverZip_Click" ToolTip="Recover the ticked files straight into a single .zip archive." />
-              <Button Grid.Column="3" Name="RecoverButton" Content="Recover selected" Width="150" Height="32" Margin="8,0,0,0" IsEnabled="False" Style="{StaticResource OrangeButtonStyle}" Click="RecoverButton_Click" />
+              <Button Padding="10,0" Grid.Column="3" Name="RecoverButton" Content="Recover selected" MinWidth="150" Height="32" Margin="8,0,0,0" IsEnabled="False" Style="{StaticResource OrangeButtonStyle}" Click="RecoverButton_Click" />
             </Grid>
           </Grid>
         </Border>
@@ -963,9 +963,9 @@
               </StackPanel>
             </Border>
             <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
-              <Button Name="CleanAnalyzeButton" Content="Analyze" Width="120" Height="32" Style="{StaticResource GhostButtonStyle}" Click="CleanAnalyze_Click" />
+              <Button Padding="10,0" Name="CleanAnalyzeButton" Content="Analyze" MinWidth="120" Height="32" Style="{StaticResource GhostButtonStyle}" Click="CleanAnalyze_Click" />
               <Button Name="CleanRunButton" Content="Clean now" MinWidth="140" Height="32" Margin="8,0,0,0" Padding="14,0" Style="{StaticResource OrangeButtonStyle}" Click="CleanRun_Click" />
-              <Button Name="CleanSelectAllButton" Content="Select all" Width="100" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="CleanSelectAll_Click" />
+              <Button Padding="10,0" Name="CleanSelectAllButton" Content="Select all" MinWidth="100" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="CleanSelectAll_Click" />
               <Button Name="CleanSecureDeleteButton" Content="Secure delete…" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="CleanSecureDelete_Click" />
               <TextBlock Name="CleanStatusText" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="13" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap" />
             </StackPanel>
@@ -995,8 +995,8 @@
                   <TextBlock Name="AnalyzeFolderLabel" Text="Folder to scan" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Margin="0,0,10,0" />
                   <TextBox Name="AnalyzePathBox" Grid.Column="1" Height="30" VerticalContentAlignment="Center" IsReadOnly="True" />
                   <Button Name="AnalyzeBrowseButton" Grid.Column="2" Content="Browse…" Height="32" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="AnalyzeBrowse_Click" />
-                  <Button Name="AnalyzeScanButton" Grid.Column="3" Content="Scan" Width="96" Height="32" Margin="8,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="AnalyzeScan_Click" />
-                  <Button Name="AnalyzeStopButton" Grid.Column="4" Content="Stop" Width="80" Height="32" Margin="8,0,0,0" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="AnalyzeStop_Click" />
+                  <Button Padding="10,0" Name="AnalyzeScanButton" Grid.Column="3" Content="Scan" MinWidth="96" Height="32" Margin="8,0,0,0" Style="{StaticResource GreenButtonStyle}" Click="AnalyzeScan_Click" />
+                  <Button Padding="10,0" Name="AnalyzeStopButton" Grid.Column="4" Content="Stop" MinWidth="80" Height="32" Margin="8,0,0,0" IsEnabled="False" Background="{StaticResource RedBrush}" BorderBrush="{StaticResource RedBrush}" Foreground="White" Click="AnalyzeStop_Click" />
                 </Grid>
                 <Grid Margin="0,6,0,0">
                   <Grid.ColumnDefinitions>
@@ -1143,7 +1143,7 @@
           <TextBlock Name="StatusText" Text="Ready." FontSize="14" />
           <TextBlock Name="StartHintText" Text="" FontSize="13" FontWeight="SemiBold" Foreground="{StaticResource OrangeBrush}" TextWrapping="Wrap" Visibility="Collapsed" Margin="0,2,0,0" />
           <TextBlock Name="ProgressStatsText" Text="Progress: 0.0% | Elapsed: 00:00:00 | Remaining: --:--:--" FontSize="13" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
-          <Grid Margin="0,8,24,0">
+          <Grid Margin="0,8,24,8">
             <ProgressBar Name="ProgressBar" Height="22" Minimum="0" Maximum="100" />
             <TextBlock Name="ProgressPercentText" Text="0%" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}" />
           </Grid>
@@ -1181,9 +1181,9 @@
               </Expander>
               <TextBlock Name="SettingsAppearanceLabel" Text="Appearance" FontSize="15" FontWeight="SemiBold" Margin="0,4,0,8" />
               <WrapPanel Margin="0,0,0,4">
-                <Button Name="ThemeDarkButton" Content="Dark" Tag="dark" Width="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
-                <Button Name="ThemeLightButton" Content="Light" Tag="light" Width="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
-                <Button Name="ThemeSystemButton" Content="System" Tag="system" Width="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Padding="10,0" Name="ThemeDarkButton" Content="Dark" Tag="dark" MinWidth="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Padding="10,0" Name="ThemeLightButton" Content="Light" Tag="light" MinWidth="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
+                <Button Padding="10,0" Name="ThemeSystemButton" Content="System" Tag="system" MinWidth="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
               </WrapPanel>
               <TextBlock Name="SettingsThemeLabel" Text="Base theme (dark accents)" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,8" />
               <WrapPanel>
@@ -1258,7 +1258,7 @@
                 <ColumnDefinition Width="Auto" />
               </Grid.ColumnDefinitions>
               <Button Grid.Column="0" Name="ResetThemeButton" Content="Reset to default" HorizontalAlignment="Left" Style="{StaticResource GhostButtonStyle}" Click="ResetTheme_Click" />
-              <Button Grid.Column="1" Name="SettingsDoneButton" Content="Done" Width="100" Style="{StaticResource GreenButtonStyle}" Click="SettingsClose_Click" />
+              <Button Padding="10,0" Grid.Column="1" Name="SettingsDoneButton" Content="Done" MinWidth="100" Style="{StaticResource GreenButtonStyle}" Click="SettingsClose_Click" />
             </Grid>
           </Border>
         </Grid>

@@ -277,6 +277,17 @@ public partial class MainWindow
 		}
 		// Step-2 heading: keep the per-mode override alive after a language switch (the generic FindName loop resets it).
 		if (Step2Title != null) Step2Title.Text = isoWriteMode ? L("Step2IsoImage") : restoreMode ? L("Step2ImageFile") : L("Step2Title");
+		// The task header and the admin badge are both control-name-vs-string-key mismatches, so the FindName loop
+		// skips them and they kept the language they were written in at startup — the header stayed English in a
+		// fully German window, and the badge with it.
+		if (TaskTitleText != null) TaskTitleText.Text = LocalizedTaskTitle();
+		UpdateAdminStatus();
+		// The stats row carries an English design-time default from the XAML that nothing overwrites until the first
+		// operation runs, so switching language on a freshly-started app left exactly one English line
+		// ("Progress: 0.0% | Elapsed: ... | Remaining: ...") in an otherwise fully translated window. Only refresh it
+		// while idle — during an operation UpdateProgressStats owns this row and its numbers are live.
+		if (ProgressStatsText != null && !isBusy)
+			ProgressStatsText.Text = string.Format(L("ProgStats"), "0.0", "", "00:00:00", "--:--:--");
 		if (BootModeText != null) BootModeText.Text = L("BootModeText");
 		// Export-to-VHDX panel: its controls have x:Names that don't match string keys, so ApplyLanguage's FindName
 		// loop skips them. Re-localize here so switching language while the panel is open updates it immediately.

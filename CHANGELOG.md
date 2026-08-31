@@ -2,6 +2,31 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## Unreleased
+
+### Fixed
+- **The progress bar along the bottom of the window is no longer cut off by the window edge.** The bottom bar
+  had a fixed height that its own contents outgrew whenever the "pick a drive first" hint was showing, so the
+  bar's lower rounded edge was drawn past the bottom of the window and the percentage sat on what looked like a
+  truncated control. The bar now keeps a small margin below it, and the bottom strip grows instead of clipping
+  when that hint appears or wraps onto a second line in a narrow window. Cosmetic only — nothing about how an
+  operation runs has changed.
+- **A surface test you stop part-way no longer leaves a countdown that never counts down.** The stopped scan
+  keeps its honest partial percentage on screen, as before, but the "Remaining" estimate beside it is now blank
+  instead of frozen at whatever it happened to say when you pressed Stop.
+- **Resuming a deep scan starts the progress bar where the scan actually resumes.** It used to inherit the bar
+  from whatever ran before it, so a resume after any completed operation showed a full bar and "100%" from its
+  first second to its last, with no time estimate at all for the whole scan.
+- **Six pieces of the window stayed in English after switching language.** The task heading at the top of the
+  panel, the administrator badge, and the progress line under the status text kept whatever language was active
+  when the app started; the two clone-engine checkboxes ("Use the Microsoft engine (DISM)" and "Fast Clone") had
+  no translations at all and were English in all 17 languages. All are now translated and follow a language
+  switch immediately.
+- **Buttons no longer clip their own captions in longer languages.** Nineteen buttons had a fixed width chosen
+  for the English text, so German "Laufwerk prüfen" rendered as "Laufwerk prü" and "Sicher entfernen" as
+  "Sicher entferne". They now grow to fit their caption and keep the old width as a minimum, so the layout is
+  unchanged in English.
+
 ## v4.3.1 — 2026-07-26
 
 Safety fixes to confirmation dialogs, a translation fix on the recovery warning, and the project's first

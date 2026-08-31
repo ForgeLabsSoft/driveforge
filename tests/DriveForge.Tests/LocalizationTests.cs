@@ -283,4 +283,54 @@ public class LocalizationTests
 			}
 		Assert.True(bad.Count == 0, "Unbalanced/among-literal braces (runtime FormatException risk):\n" + string.Join("\n", bad));
 	}
+
+	/// <summary>
+	/// Controls that legitimately keep their literal XAML text.
+	///
+	/// AppTitleText and AboutVersionText are the product name — a brand, not a phrase to translate.
+	/// ExPanelNote is a REAL GAP, listed here so the rule can protect everything else while staying honest about
+	/// the one paragraph that has never been translated in any language. Remove it from this list when it gets a key.
+	/// </summary>
+	private static readonly HashSet<string> LiteralTextIsCorrect = new()
+	{
+		"AppTitleText", "AboutVersionText", "ExPanelNote",
+	};
+
+	/// <summary>
+	/// Every named, user-visible control in the window carries text the user can read, so each one must get that
+	/// text from somewhere translatable: either its x:Name is a string key (ApplyLanguage's FindName loop rewrites
+	/// it), or code assigns it from L(...). A control that satisfies neither keeps its English XAML literal in all
+	/// 17 languages, and the only way to notice is to look at the window in another language — which is exactly how
+	/// "Use the Microsoft engine (DISM)" and "Fast Clone" were found, sitting in English in a German UI.
+	/// </summary>
+	[Fact]
+	public void EveryNamedVisibleControlGetsItsTextFromSomewhereTranslatable()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		string code = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"))
+			+ File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "UiCustomization.cs"));
+		HashSet<string> keys = Strings["en"].Keys.ToHashSet();
+
+		var orphans = new List<string>();
+		foreach (Match m in Regex.Matches(xaml, @"<(CheckBox|Button|TextBlock|GroupBox|TabItem|Expander)\b(?:[^<>""]|""[^""]*"")*?>"))
+		{
+			string tag = m.Value;
+			Match name = Regex.Match(tag, @"\bName=""([A-Za-z0-9_]+)""");
+			Match text = Regex.Match(tag, @"\b(?:Content|Text|Header)=""([^""]*)""");
+			if (!name.Success || !text.Success) continue;
+
+			string value = text.Groups[1].Value;
+			// Skip glyph fonts and icon code points — those are symbols, not language.
+			if (tag.Contains("Segoe MDL2") || value.StartsWith("&#x") || !Regex.IsMatch(value, "[A-Za-z]{3}")) continue;
+
+			string id = name.Groups[1].Value;
+			if (keys.Contains(id) || LiteralTextIsCorrect.Contains(id)) continue;
+			if (Regex.IsMatch(code, Regex.Escape(id) + @"\s*\.\s*(?:Content|Text|Header)\s*=")) continue;
+
+			orphans.Add($"{id} ({m.Groups[1].Value}) = \"{value}\" — no string key and never assigned in code");
+		}
+
+		Assert.True(orphans.Count == 0,
+			"Named control whose text can never be translated:\n  " + string.Join("\n  ", orphans));
+	}
 }
