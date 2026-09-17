@@ -224,18 +224,31 @@ public class InvariantTests
 	{
 		var violations = new List<string>();
 
-		foreach (var (file, method, name) in SourceModel.Methods())
-		{
-			bool clearsWindow = method.DescendantNodes().OfType<InvocationExpressionSyntax>()
-				.Any(i => i.Expression is MemberAccessExpressionSyntax ma
-					&& ma.Name.Identifier.Text == "Clear"
-					&& ma.Expression is IdentifierNameSyntax w && w.Identifier.Text == "_speedWindow");
-			if (!clearsWindow) continue;
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (InvocationExpressionSyntax call in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+			{
+				if (call.Expression is not MemberAccessExpressionSyntax ma
+					|| ma.Name.Identifier.Text != "Clear"
+					|| ma.Expression is not IdentifierNameSyntax w || w.Identifier.Text != "_speedWindow") continue;
 
-			if (!SourceModel.AssignmentsTo(method, "progressSpeedMb").Any())
-				violations.Add($"{SourceModel.Where(file, method)}  {name}: clears _speedWindow but never resets " +
-					"progressSpeedMb — its first ETA is computed from the previous operation's throughput");
-		}
+				// Quantified per CLEAR SITE, not per method. Checking "does this method assign progressSpeedMb
+				// anywhere" passes a method that resets once and then clears the window a SECOND time for a later
+				// phase — which is exactly what the clone does when it re-points the bar at the verify pass, and
+				// that second site went unnoticed until a reviewer read it.
+				StatementSyntax? statement = call.FirstAncestorOrSelf<StatementSyntax>();
+				if (statement?.Parent is not BlockSyntax block) continue;
+
+				var statements = block.Statements;
+				int at = statements.IndexOf(statement);
+				const int Window = 3;   // the reset is conventionally on the same line or immediately around it
+				bool resetNearby = Enumerable
+					.Range(Math.Max(0, at - Window), Math.Min(statements.Count, at + Window + 1) - Math.Max(0, at - Window))
+					.Any(k => SourceModel.AssignmentsTo(statements[k], "progressSpeedMb").Any());
+
+				if (!resetNearby)
+					violations.Add($"{SourceModel.Where(file, call)}  clears _speedWindow with no progressSpeedMb reset " +
+						"beside it — this phase's first ETA is computed from the previous phase's throughput");
+			}
 
 		Assert.True(violations.Count == 0,
 			"Speed window cleared without resetting the derived speed:\n  " + string.Join("\n  ", violations));

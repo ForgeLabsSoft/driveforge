@@ -285,8 +285,9 @@ public partial class MainWindow
 		// The stats row carries an English design-time default from the XAML that nothing overwrites until the first
 		// operation runs, so switching language on a freshly-started app left exactly one English line
 		// ("Progress: 0.0% | Elapsed: ... | Remaining: ...") in an otherwise fully translated window. Only refresh it
-		// while idle — during an operation UpdateProgressStats owns this row and its numbers are live.
-		if (ProgressStatsText != null && !isBusy)
+		// only while the row is still that untouched default — once any operation has written it, the numbers there
+		// are real (including the partial verdict a stopped surface test deliberately leaves behind) and must survive.
+		if (ProgressStatsText != null && _progressRowIsXamlDefault)
 			ProgressStatsText.Text = string.Format(L("ProgStats"), "0.0", "", "00:00:00", "--:--:--");
 		if (BootModeText != null) BootModeText.Text = L("BootModeText");
 		// Export-to-VHDX panel: its controls have x:Names that don't match string keys, so ApplyLanguage's FindName

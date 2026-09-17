@@ -274,6 +274,11 @@ public partial class MainWindow : Window, IComponentConnector
 	// throw between set and clear cannot silence the ETA for every later operation.
 	private bool _progressNoEta;
 
+	// False once any operation has written the stats row. ApplyLanguage re-localizes that row only while it is
+	// still the untouched XAML default: doing it on `!isBusy` instead wiped the end-of-run line that SurfaceTest_Click
+	// deliberately restores after a Stop, and skipped the refresh during a background disk rescan.
+	private bool _progressRowIsXamlDefault = true;
+
 	// Previous-tick GiB value — used to compute per-second instant speed instead of average-from-start
 	private double progressPrevGiB;
 
@@ -1452,7 +1457,8 @@ public partial class MainWindow : Window, IComponentConnector
 			// irrelevant there, so hide them and let the task panel use the full width.
 			// Header title for the current task (the sidebar is the task selector now).
 			TaskTitleText.Text = LocalizedTaskTitle();
-			StartButton.Content = isoWriteMode ? L("StartWriteIso") : StartButton.Content;
+			// (the write-image caption is set with the rest of them below; setting it here only to overwrite it was
+			// what let a hardcoded English literal win over the localized key)
 			VerifyIsoButton.Visibility = (installMode || isoWriteMode) ? Visibility.Visible : Visibility.Collapsed;
 			// The "extra data partition" option makes no sense for the whole-disk internal clone.
 			DataPartitionCheck.Visibility = (installMode || ModeBox.SelectedIndex == ModeCloneCurrentWindows) ? Visibility.Visible : Visibility.Collapsed;
@@ -1491,7 +1497,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 			BootModeText.Text = L("BootModeText");
 
-			StartButton.Content = isoWriteMode ? "Write ISO to USB" : backupMode ? L("StartBackup") : cloneMode ? L("StartClone") : restoreMode ? L("StartRestore") : L("StartInstall");
+			StartButton.Content = isoWriteMode ? L("StartWriteIso") : backupMode ? L("StartBackup") : cloneMode ? L("StartClone") : restoreMode ? L("StartRestore") : L("StartInstall");
 
 			SourcePathBox.Text = cloneMode ? "Current Windows on this computer" : backupMode ? "This PC (saved to a file you choose)" : "";
 			sourcePath = null;
@@ -1538,6 +1544,7 @@ public partial class MainWindow : Window, IComponentConnector
 				else
 				{
 					operationStopwatch.Start();
+					lastProcessOutputUtc = DateTime.UtcNow;   // resume: restart the stall clock, or the watchdog fires on the paused gap
 					PauseButton.Content = L("BtnPause");
 					ToolPauseButton.Content = L("BtnPause");
 					StatusText.Text = L("SxResumed");
@@ -1572,6 +1579,7 @@ public partial class MainWindow : Window, IComponentConnector
 				}
 				isPaused = false;
 				operationStopwatch.Start();
+				lastProcessOutputUtc = DateTime.UtcNow;   // resume: restart the stall clock, or the watchdog fires on the paused gap
 				PauseButton.Content = L("BtnPause");
 				ToolPauseButton.Content = L("BtnPause");
 				StatusText.Text = L("SxResumed");
@@ -1617,15 +1625,26 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
-		// Re-check after the modal: the process can exit, and a NEW operation can claim activeProcess, while the
-		// confirmation is on screen. Without this, Yes could arm the sticky stopRequested against an operation
-		// the user never meant to stop, and kill a process tree that is no longer the one they were looking at.
-		if (!isBusy || !ReferenceEquals(activeProcess, process)) return;
+		// Re-check after the modal: both the process and the operation can move on while the confirmation is on
+		// screen. Arming and killing are separated deliberately — requiring BOTH before doing EITHER made Stop
+		// silently do nothing in the common case where the child finishes (or the operation starts its next
+		// child) mid-dialog: the user answers Yes, and the operation keeps running with nothing to show for it.
+		// isBusy is per-operation, so it is the right evidence for "the thing you asked to stop is still going".
+		if (!isBusy) return;
 		stopRequested = true;
 		try
 		{
-			await KillProcessTreeAsync(process.Id);
-			Log("Stop requested. Active process tree terminated.");
+			// Kill only if this is still the same child. If it is not, the flag above is what stops the operation —
+			// killing whatever now holds activeProcess would take down a process the user never looked at.
+			if (ReferenceEquals(activeProcess, process))
+			{
+				await KillProcessTreeAsync(process.Id);
+				Log("Stop requested. Active process tree terminated.");
+			}
+			else
+			{
+				Log("Stop requested. The process that was running has already finished; the operation will stop at its next check.");
+			}
 			StatusText.Text = L("SxStopping");
 			SetToolStatus(L("StStopWaitOp"));
 		}
@@ -3147,6 +3166,10 @@ public partial class MainWindow : Window, IComponentConnector
 		bool optBypassAccount = BypassAccountCheck?.IsChecked == true;
 		bool optBitLocker = BitLockerCheck?.IsChecked == true;
 		bool optEjectWhenDone = EjectWhenDoneCheck?.IsChecked == true;
+		// The engine choice too: it decides which code path writes the disk, so flipping it mid-run is the most
+		// consequential live read of the lot.
+		bool optRawEngine = UseNtfsRawEngineCheck?.IsChecked == true;
+		bool optDismEngine = UseDismEngineCheck?.IsChecked == true;
 		bool optInternalTarget = ModeBox.SelectedIndex == ModeCloneInternal;
 
 		char currentTargetLetter = GetFirstUsableDriveLetter(targetDisk);
@@ -3196,7 +3219,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// recommended fix. Skipped in headless mode, when the DISM engine is already chosen, and when the raw
 			// NTFS engine is selected (that path is a read-only capture dump — it uses neither clone engine, so the
 			// antivirus question is irrelevant and would only block the dump from starting).
-			if (!headlessRun && UseDismEngineCheck?.IsChecked != true && UseNtfsRawEngineCheck?.IsChecked != true)
+			if (!headlessRun && !optDismEngine && !optRawEngine)
 			{
 				string? avRaw = await GetActiveRealtimeAntivirusAsync();
 				if (!string.IsNullOrEmpty(avRaw))
@@ -3253,7 +3276,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// fits a smaller target) and writes files onto the freshly-formatted target. It takes priority over DISM.
 			// The disk-erase warning was already shown and confirmed ONCE, up front, by ConfirmOperationSummary before
 			// this method was even called — no second confirmation here, just an informational log line.
-			bool useRawEngine = UseNtfsRawEngineCheck?.IsChecked == true;
+			bool useRawEngine = optRawEngine;
 			if (useRawEngine && !headlessRun)
 			{
 				Log("Fast Clone (raw NTFS) engine selected — direct copy, not slowed by antivirus, no scratch WIM. Copies files, timestamps, hardlinks, permissions (ACLs/owners), junctions/reparse points, alternate data streams, EFS-encrypted files (raw, via the backup API), and decompresses NTFS-compressed and WOF/CompactOS files.");
@@ -3523,7 +3546,7 @@ public partial class MainWindow : Window, IComponentConnector
 				try { var di = new DriveInfo(realRoot); verifyTotalBytes = Math.Max(0L, di.TotalSize - di.TotalFreeSpace); } catch { }
 				progressDoneGiB = 0.0;
 				progressTotalGiB = Math.Max(0.5, verifyTotalBytes / 1073741824.0);
-				_speedWindow.Clear();
+				progressSpeedMb = 0.0; _speedWindow.Clear();   // verify is a new phase: its first ETA must not come from the copy speed
 				await Task.Run(() => VerifyCloneContent(realRoot, sourceRoot, IsNtfsCloneExcluded, out verifyVerifiedFiles, out verifyVerifiedBytes, out verifyMismatches, out verifyUnverifiable, verifySamples, verifyUnverifiableSamples, useRawEngine));
 				verifyRan = !stopRequested && !internalOperationStopped;
 				Log(verifyRan
@@ -5304,7 +5327,14 @@ exit 0
 			Task<string> capErr = cap.StandardError.ReadToEndAsync();
 			Task<string> appErr = app.StandardError.ReadToEndAsync();
 			try { await cap.StandardOutput.BaseStream.CopyToAsync(app.StandardInput.BaseStream); }
-			catch (IOException) { /* apply may have exited early (broken pipe) — its exit code below tells the real story */ }
+			catch (IOException)
+			{
+				// apply exited early (broken pipe) — its exit code below tells the real story. Kill capture HERE,
+				// not in the finally: nothing drains its stdout once the pump stops, so it blocks on a full pipe
+				// and the WaitForExitAsync just below never returns. That would hang the whole operation on the
+				// one path this most needs to work — the user pressing Stop.
+				try { if (!cap.HasExited) cap.Kill(entireProcessTree: true); } catch { }
+			}
 			finally { try { app.StandardInput.Close(); } catch { } }
 			await cap.WaitForExitAsync();
 			await app.WaitForExitAsync();
@@ -5462,7 +5492,11 @@ exit 0
 					lastAdvanceUtc = now;
 					lastEngineCpuSec = -1.0; // reset the CPU baseline so the next stall window samples fresh
 				}
+				// Not while PAUSED. Registering the pipe clone's apply process made Pause genuinely suspend it, so
+				// written bytes legitimately stop advancing — and this watchdog would then accuse a perfectly
+				// healthy drive of stalling, for as long as the user left it paused.
 				else if (used > 0
+					&& !isPaused
 					&& (now - lastAdvanceUtc).TotalSeconds > 150
 					&& (now - lastProcessOutputUtc).TotalSeconds > 60 // AND the engine has gone silent — a real stall, not a legit long scan that's still emitting progress lines
 					&& (now - lastWarnUtc).TotalSeconds > 180)
@@ -6204,7 +6238,7 @@ exit 0
 			"'PROTECTOR_OK' } catch { 'PROTECTOR_FAIL: ' + $_.Exception.Message }";
 		var psi = new ProcessStartInfo
 		{
-			FileName = "powershell.exe",
+			FileName = ResolveSystemTool("powershell.exe"),   // this one is also handed the user's BitLocker password on stdin
 			Arguments = "-NoProfile -Command " + QuoteArgument(script),
 			UseShellExecute = false,
 			CreateNoWindow = true,
@@ -9766,7 +9800,7 @@ exit 0
 	{
 		try
 		{
-			var psi = new ProcessStartInfo("ipconfig", "/flushdns") { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
+			var psi = new ProcessStartInfo(ResolveSystemTool("ipconfig.exe"), "/flushdns") { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
 			using var p = Process.Start(psi); p?.WaitForExit(8000);
 		}
 		catch { }
@@ -11682,10 +11716,13 @@ exit 0
 			// of the copy is zeros — recovery run against it will silently come up short in exactly those regions.
 			if (badSectors > 0)
 				Log($"WARNING: {badSectors} sector(s) could not be read and were written to the image as zeros — the image is INCOMPLETE in those regions.");
-			MessageBox.Show(stopRequested
+			// The bad-sector note belongs on BOTH endings. Hanging it off the completed branch only meant a run the
+			// user STOPPED said nothing about the regions it had already had to zero-fill, and a partial image is
+			// exactly the case where knowing that matters.
+			string badNote = (badSectors > 0 ? "\n\n" + string.Format(L("RfImgBadSectors"), badSectors) : "");
+			MessageBox.Show((stopRequested
 				? string.Format(L("RfImgStopped"), dest)
-				: string.Format(L("RfImgDone"), dest)
-					+ (badSectors > 0 ? "\n\n" + string.Format(L("RfImgBadSectors"), badSectors) : ""),
+				: string.Format(L("RfImgDone"), dest)) + badNote,
 				L("RfImgTitle"), MessageBoxButton.OK,
 				badSectors > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
@@ -13068,7 +13105,7 @@ exit 0
 		long totalBytes = 0;
 		foreach (var f in files) { try { totalBytes += new FileInfo(f).Length; } catch { } }
 
-		bool failed = false; int done = 0, fail = 0, noReach = 0;
+		bool failed = false; int done = 0, fail = 0, noReach = 0, skippedLinks = 0;
 		try
 		{
 			// _progressFixedTotal: the total is the measured size of the selected files x passes — real, not a
@@ -13090,6 +13127,11 @@ exit 0
 					// knows this (CleanSecureDelete_Click shows SecureDelNoReachNote); the folder shredder counted
 					// them as "securely erased" like everything else. Still delete them — the user asked to erase the
 					// folder — but count them apart so the summary does not claim an erasure that did not happen.
+					// A link reaching this loop can only come from the "erase specific files" picker — the folder walk
+					// already filters them out. The user named that file explicitly, so it must not silently vanish
+					// from every count: ShredOne refuses it (overwriting would hit the target on another drive) and
+					// it is reported as skipped rather than as erased.
+					if (IsFileLink(f)) { skippedLinks++; continue; }
 					bool unreachable = OverwriteCannotReachClusters(f);
 					try { if (ShredOne(f, fills, acc)) { if (unreachable) noReach++; else done++; } } catch { fail++; }
 				}
@@ -13112,12 +13154,11 @@ exit 0
 							// Deleting a link removes only the link.
 							try
 							{
+								// IsFileLink, not the ReparsePoint attribute: deleting on the attribute would also have
+								// removed OneDrive placeholders, deduplicated files and CompactOS-compressed files —
+								// real files, deleted without ever being overwritten, and counted in nothing.
 								foreach (var lf in Directory.GetFiles(cur))
-								{
-									bool linkFile = false;
-									try { linkFile = (File.GetAttributes(lf) & FileAttributes.ReparsePoint) != 0; } catch { }
-									if (linkFile) { try { File.Delete(lf); } catch { } }
-								}
+									if (IsFileLink(lf)) { try { File.Delete(lf); } catch { } }
 							}
 							catch { }
 							string[] subs;
@@ -13146,9 +13187,10 @@ exit 0
 			// the last hardcoded English strings in this flow.
 			string shredMsg = (stopRequested ? string.Format(L("MbShredStopped"), done) : string.Format(L("MbShredDone"), done))
 				+ (noReach > 0 ? string.Format(L("MbShredNoReach"), noReach) : "")
-				+ (fail > 0 ? string.Format(L("MbShredFailed"), fail) : "");
+				+ (fail > 0 ? string.Format(L("MbShredFailed"), fail) : "")
+				+ (skippedLinks > 0 ? string.Format(L("MbShredLinks"), skippedLinks) : "");
 			MessageBox.Show(shredMsg, L("MbShredTitle"), MessageBoxButton.OK,
-				(noReach > 0 || fail > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
+				(noReach > 0 || fail > 0 || skippedLinks > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrShred"), ex); }
 		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
@@ -13157,12 +13199,28 @@ exit 0
 	}
 
 	// Overwrites one file in place with the given passes (0=zeros, 1=ones, 2=random), then renames + deletes it.
+	/// <summary>True only for a real symbolic link or junction — never for other kinds of reparse point.</summary>
+	/// <remarks>
+	/// FileAttributes.ReparsePoint is a FAMILY marker, not a link marker. It is also set on OneDrive Files
+	/// On-Demand placeholders, on NTFS-deduplicated files, and on WOF/CompactOS-compressed files — all of which
+	/// are ordinary files holding ordinary data. This file already knows that elsewhere: NtfsRawClone.cs branches
+	/// on ReparseTag == ReparseTagWof precisely because those are real files. Testing the attribute made the
+	/// shredder skip an entire common class of file and then plain-delete it, uncounted and unshredded, while
+	/// reporting the folder securely erased. ResolveLinkTarget resolves only IO_REPARSE_TAG_SYMLINK and
+	/// IO_REPARSE_TAG_MOUNT_POINT, which is exactly the set that can lead out of the chosen folder.
+	/// </remarks>
+	private static bool IsFileLink(string path)
+	{
+		try { return File.ResolveLinkTarget(path, returnFinalTarget: false) != null; }
+		catch { return false; }
+	}
+
 	private bool ShredOne(string path, int[] fills, long[] acc)
 	{
 		// Second line of defence behind EnumerateFilesReparseSafe. Overwriting through a link writes the passes onto
 		// its target, which may be on another drive entirely — irreversibly destroying a file the user never selected.
 		// Anything reaching here that is still a link is refused outright rather than shredded in the wrong place.
-		try { if (File.ResolveLinkTarget(path, returnFinalTarget: false) != null) return false; } catch { }
+		if (IsFileLink(path)) return false;
 		try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
 		int[] passes = fills.Length == 0 ? new[] { 0 } : fills;
 		// Overwrite the default $DATA stream AND every alternate data stream (ADS). An ADS (file:stream) keeps its data
@@ -13210,9 +13268,10 @@ exit 0
 				// FILE_FLAG_OPEN_REPARSE_POINT, so Windows follows the link and the passes land on the TARGET — which
 				// can sit on a completely different drive, outside the folder the user chose. Skip links here; the
 				// cleanup pass in ShredFiles_Click removes the link itself without touching what it points at.
-				bool reparse = false;
-				try { reparse = (File.GetAttributes(f) & FileAttributes.ReparsePoint) != 0; } catch { }
-				if (!reparse) yield return f;
+				// IsFileLink, NOT the ReparsePoint attribute: that attribute is also set on OneDrive placeholders,
+				// deduplicated files and CompactOS-compressed files, which are ordinary files that must still be
+				// shredded normally.
+				if (!IsFileLink(f)) yield return f;
 			}
 			string[] subs;
 			try { subs = Directory.GetDirectories(cur); } catch { subs = Array.Empty<string>(); }
@@ -15057,6 +15116,7 @@ exit 0
 
 	private void UpdateProgressStats()
 	{
+		_progressRowIsXamlDefault = false;
 		TimeSpan elapsed = operationStopwatch.Elapsed;
 		// Indeterminate operations (no measurable %, e.g. file-system scan or FFU apply): show a ticking
 		// Elapsed clock with "—%" instead of a misleading fixed percentage, and skip the byte/ETA maths.
@@ -15269,7 +15329,7 @@ exit 0
 		{
 			using Process process = Process.Start(new ProcessStartInfo
 			{
-				FileName = "taskkill.exe",
+				FileName = ResolveSystemTool("taskkill.exe"),   // Stop's own kill path — the last place that should run an impostor
 				Arguments = $"/PID {pid} /T /F",
 				CreateNoWindow = true,
 				UseShellExecute = false
