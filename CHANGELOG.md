@@ -2,7 +2,24 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## v4.3.2 — 2026-09-17
+
+### Fixed — a regression in v4.3.1
+- **Secure shred stopped erasing OneDrive, deduplicated and CompactOS-compressed files.** The v4.3.1 fix that
+  stopped shred following symbolic links tested the wrong thing: the "reparse point" attribute marks a whole
+  family of files, not just links, and OneDrive Files On-Demand placeholders, NTFS-deduplicated files and
+  CompactOS-compressed files all carry it while being perfectly ordinary files. Shredding a folder of them
+  reported "Nothing selected"; in a mixed folder they were left out of every count and then deleted without
+  being overwritten, while the summary said the folder had been securely erased. Only genuine symbolic links
+  and junctions are skipped now, and one picked directly is reported as skipped rather than silently dropped.
+- **Stop no longer hangs the streaming clone.** Stopping it broke the pipe between the two copy processes and
+  left one of them waiting forever, so the operation never ended.
+- **Stop works when the step it was going to interrupt has just finished.** It previously did nothing at all in
+  that case — the operation carried on with no sign the button had been pressed.
+- Pausing the clone no longer makes the app warn that the drive has stalled.
+- A disk image you stop part-way now tells you if it also had to skip unreadable sectors.
+- The progress bar during a FAT32 / exFAT recovery scan no longer jumps to 100% on the first folder.
+- Switching language no longer wipes the result line left by a stopped surface test.
 
 ### New
 - **The "bootable USB from an image" task now accepts raw disk images**, not just ISOs: `.img`, `.bin`,
