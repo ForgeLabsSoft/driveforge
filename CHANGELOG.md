@@ -2,6 +2,16 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## Unreleased
+
+### New
+- **The "bootable USB from an image" task now accepts raw disk images**, not just ISOs: `.img`, `.bin`,
+  `.raw` and `.dd` can be selected in the file picker or dropped onto the window, and dropping one switches
+  to that task automatically. The write engine always could do this — it copies bytes straight to the drive
+  without looking at the file — the file picker simply never offered them. Suggested by a user.
+- The same picker no longer offers `.wim` / `.esd` for that task. They are file-level archives: written to a
+  drive raw they produce nothing bootable, so offering them there could only waste someone's time.
+
 ## v4.3.1 — 2026-08-31
 
 Re-cut on 2026-08-31. The build first tagged v4.3.1 on 2026-08-30 was replaced before anyone had

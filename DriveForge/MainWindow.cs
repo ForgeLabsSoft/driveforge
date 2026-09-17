@@ -513,16 +513,25 @@ public partial class MainWindow : Window, IComponentConnector
 		string? file = files?.FirstOrDefault(f =>
 		{
 			string ext = Path.GetExtension(f).ToLowerInvariant();
-			return ext is ".iso" or ".wim" or ".esd" or ".ffu" or ".vhdx" or ".vhd";
+			// Raw disk images (.img/.bin/.raw/.dd) belong here too: the write-image task copies bytes straight to
+			// the drive and has never cared what the container is. Without them, dropping the very file the task
+			// is for was silently ignored.
+			return ext is ".iso" or ".wim" or ".esd" or ".ffu" or ".vhdx" or ".vhd"
+				or ".img" or ".bin" or ".raw" or ".dd";
 		});
 		if (file == null)
 		{
-			Log("Dropped item ignored — drop a Windows .iso / .wim / .esd (or .ffu) file.");
+			Log("Dropped item ignored — drop a Windows .iso / .wim / .esd (or .ffu), or a raw disk image (.img / .bin / .raw / .dd).");
 			return;
 		}
 		// Switch to a matching mode automatically.
-		if (Path.GetExtension(file).ToLowerInvariant() is ".ffu" or ".vhdx" or ".vhd")
+		string dropped = Path.GetExtension(file).ToLowerInvariant();
+		if (dropped is ".ffu" or ".vhdx" or ".vhd")
 			ModeBox.SelectedIndex = ModeRestoreSavedClone;
+		// A raw image can only be written raw — there is no install/clone path for it, so send it to the task
+		// that can actually use it rather than leaving it on whatever was selected.
+		else if (dropped is ".img" or ".bin" or ".raw" or ".dd")
+			ModeBox.SelectedIndex = ModeWriteIsoImage;
 		else if (ModeBox.SelectedIndex == ModeCloneCurrentWindows)
 			ModeBox.SelectedIndex = ModeInstallFromImage;
 		sourcePath = file;
@@ -1634,7 +1643,14 @@ public partial class MainWindow : Window, IComponentConnector
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		OpenFileDialog openFileDialog = new OpenFileDialog
 		{
-			Filter = (ModeBox.SelectedIndex == ModeRestoreSavedClone ? L("FltRestoreImage") : L("FltInstallImage")),
+			// The raw-write task gets its own filter. FltInstallImage was wrong for it in both directions: it offered
+			// .wim/.esd, which are file-level archives and produce nothing bootable when written to a drive raw, and
+			// it excluded the raw formats that DO work — .img/.bin/.raw/.dd, which this engine has always been able
+			// to write (it copies bytes to \\.\PhysicalDriveN without looking at the file at all). The app already
+			// reads those same extensions on the recovery side.
+			Filter = ModeBox.SelectedIndex == ModeRestoreSavedClone ? L("FltRestoreImage")
+				: ModeBox.SelectedIndex == ModeWriteIsoImage ? L("FltRawDiskImage")
+				: L("FltInstallImage"),
 			Title = L("DlgSelectSource")
 		};
 		if (openFileDialog.ShowDialog() == true)
@@ -8254,8 +8270,11 @@ exit 0
 		{ MessageBox.Show(L("MbSrcOnTarget"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Stop); return; }
 
 		// A Windows / WinPE ISO is not "isohybrid" — writing it raw usually won't boot. Warn and point to the
-		// proper task.
-		if (await LooksLikeWindowsIsoAsync(sourcePath))
+		// proper task. Only meaningful for an actual ISO: the probe works by mounting the file with
+		// Mount-DiskImage, which cannot open a raw .img/.bin/.raw/.dd, so on those it would spend a PowerShell
+		// launch to always answer "no". Skip it rather than pay for an answer we already know.
+		bool sourceIsIso = string.Equals(Path.GetExtension(sourcePath), ".iso", StringComparison.OrdinalIgnoreCase);
+		if (sourceIsIso && await LooksLikeWindowsIsoAsync(sourcePath))
 		{
 			if (MessageBox.Show(L("Mb025"),
 					"DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
