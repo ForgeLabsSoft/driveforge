@@ -2,6 +2,18 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.3.3 — 2026-09-27
+
+### Under the hood
+- **Every build warning is gone — 299 of them, down to zero, with nothing about the app changed.** Most (288)
+  were nullable annotations sitting in files that had no nullable context; the project now switches that context on
+  without switching on the nullable warnings, which makes the existing annotations legal without moving a single line
+  of code. The rest were genuine leftovers: the WindowsDesktop SDK reference that has not been needed for years, two
+  failure flags that were set and then never read, a progress-throttle field that had lost its reader, an always-zero
+  addend in the file-carving size table, and a deliberately fire-and-forget screen update that now says so out loud.
+  Each site was first examined for a missing check hiding behind the warning, rather than simply silenced — and the two
+  real defects that search turned up are left for their own fix, since they change behaviour.
+
 ## v4.3.2 — 2026-09-17
 
 ### Fixed — a regression in v4.3.1
