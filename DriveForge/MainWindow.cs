@@ -282,8 +282,6 @@ public partial class MainWindow : Window, IComponentConnector
 	// Previous-tick GiB value — used to compute per-second instant speed instead of average-from-start
 	private double progressPrevGiB;
 
-	private long progressLastReportedBytes;
-
 	// Sliding-window speed samples: each entry is (timestamp, cumulativeGiB) pushed every timer tick.
 	// Speed is derived from the oldest surviving sample in the window, giving a stable 30-second average
 	// that reacts to real speed changes (e.g. USB throttling) without EWA lag.
@@ -2257,7 +2255,6 @@ public partial class MainWindow : Window, IComponentConnector
 						progressTotalGiB = Math.Max(1.0, GetCurrentWindowsUsedBytes() / 1024.0 / 1024.0 / 1024.0 * 1.25);
 						progressDoneGiB = 0.0;
 						progressPrevGiB = 0.0;
-						progressLastReportedBytes = 0;
 						progressSpeedMb = 0.0;
 						_speedWindow.Clear();
 						lastProcessOutputUtc = DateTime.UtcNow;
@@ -2343,7 +2340,6 @@ public partial class MainWindow : Window, IComponentConnector
 				progressTotalGiB = Math.Max(1.0, GetCurrentWindowsUsedBytes() / 1024.0 / 1024.0 / 1024.0 * 1.25);
 				progressDoneGiB = 0.0;
 				progressPrevGiB = 0.0;
-				progressLastReportedBytes = 0;
 				progressSpeedMb = 0.0;
 				_speedWindow.Clear();
 				lastProcessOutputUtc = DateTime.UtcNow;
@@ -5521,7 +5517,7 @@ exit 0
 						onScreen = $"⚠ Stalled: no new data for {stalledMin} min (~{mbPerSec:F0} MB/s). The target may be too slow/full, or the source is hard to read — see the log. Keep waiting or press Stop.";
 					}
 					// Surface it ON SCREEN too — otherwise the frozen 'Scanning…/indexed' line looks like a dead app.
-					Dispatcher.BeginInvoke((Action)(() => { if (isBusy) StatusText.Text = onScreen; }));
+					_ = Dispatcher.BeginInvoke((Action)(() => { if (isBusy) StatusText.Text = onScreen; }));
 				}
 			}
 			catch { }
@@ -12108,7 +12104,6 @@ exit 0
 		if (string.IsNullOrWhiteSpace(outDir)) return;
 		if (BlocksSamePhysicalDisk(outDir)) return; // warn (with override) if the destination is the same physical disk
 
-		bool failed = false;
 		int ok = 0, fail = 0;
 		try
 		{
@@ -12136,7 +12131,7 @@ exit 0
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo(outDir) { UseShellExecute = true }); } catch { }
 		}
-		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("RfRecFailed"), ex); }
+		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("RfRecFailed"), ex); }
 		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
 	}
 
@@ -12674,7 +12669,6 @@ exit 0
 		catch (Exception ex) { ShowError(L("ErrVentoy"), ex); return; }
 		if (exe == null) return; // user declined the download
 
-		bool failed = false;
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
@@ -12709,7 +12703,7 @@ exit 0
 			MessageBox.Show(string.Format(L("MbMultiBootDone"), disk.Number),
 				L("MbMultiBootTitle"), MessageBoxButton.OK, MessageBoxImage.Information);
 		}
-		catch (Exception ex) { failed = true; NotifyOperationDone(false); SaveLogToDesktop(); ShowError(L("ErrMultiBoot"), ex); }
+		catch (Exception ex) { NotifyOperationDone(false); SaveLogToDesktop(); ShowError(L("ErrMultiBoot"), ex); }
 		finally
 		{
 			_progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop();

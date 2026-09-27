@@ -177,7 +177,7 @@ public class PureLogicTests
 	[InlineData("Warning", false)]
 	[InlineData("", false)]
 	[InlineData(null, false)]
-	public void IsHealthy_Regression_UnhealthyIsNotHealthy(string status, bool expected) =>
+	public void IsHealthy_Regression_UnhealthyIsNotHealthy(string? status, bool expected) =>
 		Assert.Equal(expected, Mw.Call<bool>("IsHealthy", status));
 
 	// ---------------------------------------------------------------- Process-argument quoting

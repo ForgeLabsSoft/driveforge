@@ -4,7 +4,7 @@
     <!-- -windows because it ProjectReferences the WPF app. The tests themselves need no display, no STA and no
          elevation: they only touch private *static* members, which never construct a Window. -->
     <TargetFramework>net10.0-windows</TargetFramework>
-    <Nullable>disable</Nullable>
+    <Nullable>annotations</Nullable>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>

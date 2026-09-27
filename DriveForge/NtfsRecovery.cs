@@ -1022,7 +1022,7 @@ public partial class MainWindow
 		public byte[] Header = Array.Empty<byte>();
 		public byte[] Footer = Array.Empty<byte>();
 		public long MaxLen; public int FooterTail;
-		public int SizeAt = -1; public int SizeBytes; public long SizeAdd; // size-from-header carving
+		public int SizeAt = -1; public int SizeBytes; // size-from-header carving (BMP bfSize is the whole file, so no addend)
 		public bool Riff;                                                  // RIFF container (WAV/AVI/WEBP)
 		public bool Mp4;                                                   // ISO-BMFF container (MP4/MOV/M4V/HEIC) — length by box-walk
 		public bool Sqlite;                                               // SQLite database — length from page-size x page-count
@@ -1311,7 +1311,7 @@ public partial class MainWindow
 			if (!(dib == 12 || dib == 40 || dib == 52 || dib == 56 || dib == 64 || dib == 108 || dib == 124)) return 0;
 			long val = 0;
 			for (int k = 0; k < hit.SizeBytes; k++) val |= (long)chunk[i + hit.SizeAt + k] << (8 * k);
-			return val >= 54 ? val + hit.SizeAdd : 0;
+			return val >= 54 ? val : 0;
 		}
 		return 0;
 	}

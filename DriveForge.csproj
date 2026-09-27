@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <AssemblyName>DriveForge</AssemblyName>
     <RootNamespace>DriveForge</RootNamespace>
@@ -7,6 +7,11 @@
     <UseWPF>True</UseWPF>
     <UseWindowsForms>True</UseWindowsForms>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- annotations, NOT enable: the source already carries ~288 nullable annotations (the ? suffix), which are
+         legal only inside a nullable ANNOTATION context - hence CS8632 x288. This turns that context on project-
+         wide and leaves the nullable WARNING context OFF, so no flow-analysis diagnostic (CS8600/8602/8603/8604/
+         8618/8620/8625...) is introduced and not one line of code changes. Moving to 'enable' is a separate job. -->
+    <Nullable>annotations</Nullable>
     <!-- This .csproj sits at the repo ROOT with no explicit Compile items, so it globs **/*.cs (and **/*.xaml as
          Page). Without this exclusion, adding tests/ silently pulls the test sources — and the test project's own
          generated obj/**/*.cs — into the APP build, which then fails on 'Xunit not found' and duplicate assembly
