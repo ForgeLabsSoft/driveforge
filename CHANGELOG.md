@@ -16,6 +16,14 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
 - **A failed multi-boot setup no longer leaves "Setting up multi-boot engine on Disk N..." on screen** — including
   when it stops for a reason that is not an error at all: the target disk changing identity while the engine is
   still downloading.
+- **An operation that keeps its progress bar after a failure no longer quotes a "Remaining" time beside it.**
+  Wiping, shredding, backing up, writing an image and the capacity test deliberately leave the bar where the
+  failure found it — on a destructive operation that number is the only thing on screen saying how far the write
+  got — but the estimate next to it was still being calculated, and froze into a countdown that would never move.
+  The bar stays; the estimate goes.
+- **Two exits that are not errors no longer leave the app saying it is working.** Writing an image and formatting
+  both stop before they start if the target drive turns out to have changed identity in the meantime; the status
+  line survived that, and for formatting it survived a completed run too.
 
 ### Under the hood
 - **Every build warning is gone — 299 of them, down to zero, with nothing about the app changed.** Most (288)

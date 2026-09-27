@@ -3096,7 +3096,10 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			operationTimer.Stop();
 			operationStopwatch.Stop();
+			// Dead run: keep the partial bar, drop the phantom countdown (see the wipe flow).
+			_progressNoEta = true;
 			if (failed) UpdateProgressStats();
+			_progressNoEta = false;
 			if (!string.IsNullOrWhiteSpace(shadowDosTarget)) UnmapSnapshotDrive(shadowLetter, shadowDosTarget);
 			if (shadowCopy != null) await DeleteShadowCopyAsync(shadowCopy.Id);
 			SetBusy(busy: false);
@@ -7734,7 +7737,7 @@ exit 0
 				L("MbWipeFreeTitle"), MessageBoxButton.OK, MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrFreeWipe"), ex); }
-		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
+		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressNoEta = true; if (failed) UpdateProgressStats(); _progressNoEta = false; _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
 	}
 
 	[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
@@ -8217,7 +8220,13 @@ exit 0
 			// Refresh BEFORE clearing the flags: UpdateProgressStats reads them, and with _progressFullRange already
 			// false it switches to the 40..82 banded formula — which, since the bar only ever advances, JUMPS a run
 			// that failed at 50% up to 61% at the exact moment the error is reported.
+			// The operation is dead and both clocks are already stopped, so the Remaining estimate below can only quote
+			// a countdown that will never move - its elapsed/percent branch needs no live byte counters. Keep the partial
+			// bar, which is the only figure on screen that says how far the write got, and suppress just the estimate,
+			// the way the surface test does for its stopped ending.
+			_progressNoEta = true;
 			if (failed) UpdateProgressStats();
+			_progressNoEta = false;
 			// Clear BOTH — leaking _progressFixedTotal=true into a later clone/install would disable the inflation
 			// heuristic that flow genuinely relies on.
 			_progressFullRange = false; _progressFixedTotal = false;
@@ -8316,12 +8325,20 @@ exit 0
 				L("MbWriteIsoTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
+		// Re-confirm identity BEFORE the busy window. This bail is not an exception, so the catch never sees it and
+		// the finally cannot tell it from a clean run: it used to leave "Writing the image to Disk N..." on screen
+		// for an operation that never started. Checked here it leaves the UI exactly as the cancel returns above do,
+		// and it is still the last thing before the write - nothing between here and RawWriteImageToDiskAsync awaits,
+		// so no disk can renumber in the gap.
+		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
+
 		bool failed = false;
 		bool ejected = false; // set when we deliberately eject on the success path, so the finally net does not re-online (undo) the eject
-		// Set only once this flow is committed to touching the disk. The finally below onlines and clears read-only on
-		// disk.Number, and the identity check can bail BEFORE anything was taken offline — at which point that number
-		// may already refer to a DIFFERENT physical drive (the check failing is precisely the signal that the disk
-		// list moved underneath us). Recovering a disk we never disturbed meant changing someone else's drive state.
+		// Set only once this flow is committed to touching the disk. The finally below onlines and clears read-only
+		// on disk.Number, and an early exit can happen before anything was taken offline - at which point that
+		// number may already refer to a DIFFERENT physical drive. Recovering a disk we never disturbed meant
+		// changing someone else's drive state. (The identity check that used to bail here runs above the try now,
+		// so it never reaches this finally at all.)
 		bool tookOffline = false;
 		try
 		{
@@ -8336,9 +8353,8 @@ exit 0
 			operationStopwatch.Restart(); operationTimer.Start();
 			SetBusy(busy: true, string.Format(L("BzWriteIso"), disk.Number));
 			ProgressBar.Value = 0.0;
-			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
-				tookOffline = true;   // from here on the disk really is ours to put back
-				await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
+			tookOffline = true;   // from here on the disk really is ours to put back
+			await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
 			bool writeCompleted = !stopRequested; // capture BEFORE the optional verify below reuses stopRequested
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
@@ -8383,7 +8399,10 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			// Refresh BEFORE clearing the flags (see the wipe flow): clearing first switches the bar to the banded
 			// formula and jumps a failed run forward instead of leaving it where it stopped.
+			// Dead run: keep the partial bar, drop the phantom countdown (see the wipe flow).
+			_progressNoEta = true;
 			if (failed) UpdateProgressStats();
+			_progressNoEta = false;
 			// Clear BOTH: leaking _progressFixedTotal=true into a later clone/install would disable the inflation
 			// heuristic that flow genuinely relies on.
 			_progressFullRange = false; _progressFixedTotal = false;
@@ -8559,7 +8578,10 @@ exit 0
 		finally
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
+			// Dead run: keep the partial bar, drop the phantom countdown (see the wipe flow).
+			_progressNoEta = true;
 			if (failed) UpdateProgressStats();                       // refresh BEFORE clearing the flags (see the wipe flow)
+			_progressNoEta = false;
 			_progressFullRange = false; _progressFixedTotal = false; // clear BOTH — must not leak into a later clone/install
 			try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
 			SetBusy(busy: false);
@@ -13246,7 +13268,7 @@ exit 0
 				(noReach > 0 || fail > 0 || skippedLinks > 0) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrShred"), ex); }
-		finally { operationTimer.Stop(); operationStopwatch.Stop(); if (failed) UpdateProgressStats(); _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
+		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressNoEta = true; if (failed) UpdateProgressStats(); _progressNoEta = false; _progressFullRange = false; _progressFixedTotal = false; SetBusy(busy: false); } // refresh BEFORE clearing the flags — clearing first jumps a failed run's bar forward
 		}
 		finally { _toolOpStarting = false; }
 	}
@@ -13410,6 +13432,7 @@ exit 0
 		// run before SetBusy sets isBusy), so a second destructive tool can't start concurrently in that window.
 		_toolOpStarting = true;
 		string scriptPath = "";
+		bool busyRaised = false;   // true once SetBusy(true) has written the "Formatting Disk N..." status line
 		try
 		{
 			string contents = await GetDiskContentsAsync(disk.Number);
@@ -13433,6 +13456,7 @@ exit 0
 
 			scriptPath = Path.Combine(Path.GetTempPath(), $"winforge-format-{Guid.NewGuid():N}.txt");
 			SetBusy(busy: true, string.Format(L("BzFormat"), disk.Number, fs.ToUpperInvariant()));
+			busyRaised = true;
 			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 			string script = $"select disk {disk.Number}\r\nclean\r\ncreate partition primary\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n";
 			await File.WriteAllTextAsync(scriptPath, script, Encoding.ASCII);
@@ -13450,7 +13474,11 @@ exit 0
 		{
 			_toolOpStarting = false;   // clear FIRST, so an (unlikely) throw from the cleanup below can't strand the guard
 			TryDeleteFile(scriptPath);
-			SetBusy(busy: false);
+			// Pass a status out, like the multi-boot install: SetBusy(false) leaves StatusText alone and nothing else
+			// here rewrites it, so the disk-changed return (which throws nothing) - and even a completed format - left
+			// "Formatting Disk N as NTFS..." on screen. Exits taken before the status was written pass null, so
+			// cancelling the confirm cannot overwrite the previous operation's line.
+			SetBusy(busy: false, busyRaised ? L("SxReady") : null);
 		}
 	}
 
