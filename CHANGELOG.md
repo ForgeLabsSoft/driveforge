@@ -4,6 +4,17 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
 
 ## v4.3.3 — 2026-09-27
 
+### Fixed
+- **A failed recovery no longer leaves the progress row claiming it is still working.** When a recovery ended with
+  an error, the bar kept its last percentage and the line beneath it went on advertising a "Remaining" time that
+  would never move again — directly above the dialog saying the recovery had failed, with the Windows taskbar still
+  showing a green progress bar underneath. The row is now cleared the moment the failure is known, before the
+  dialog appears, and the elapsed time it reports is how long the recovery actually ran rather than how long the
+  dialog was left on screen.
+- **A failed multi-boot setup no longer leaves "Setting up multi-boot engine on Disk N..." on screen.** It had the
+  same stale progress row, and its status line survived even when the setup stopped for a reason that is not an
+  error at all — the target disk changing identity while the engine was still downloading.
+
 ### Under the hood
 - **Every build warning is gone — 299 of them, down to zero, with nothing about the app changed.** Most (288)
   were nullable annotations sitting in files that had no nullable context; the project now switches that context on

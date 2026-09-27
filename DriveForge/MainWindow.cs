@@ -12131,7 +12131,20 @@ exit 0
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo(outDir) { UseShellExecute = true }); } catch { }
 		}
-		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("RfRecFailed"), ex); }
+		// Tidy the row HERE, not in the finally. A failure ends the run abnormally, exactly like the Stop that
+		// SetBusy already resets for (14682) - but ShowError is modal TWICE (the error, then the report offer) and
+		// both pump messages, so anything left to the finally happens after the user has read them: the timer keeps
+		// repainting a Remaining derived from elapsed and the bar percentage alone (15198) behind the dialogs, and
+		// the Elapsed the reset would render ends up inflated by however long they stayed open. Clearing StatusText
+		// as well is what the checksum flow does (837); without it "Recovering N files..." sits directly above a
+		// zeroed bar - the three-widget contradiction SetBusy's own comment condemns.
+		catch (Exception ex)
+		{
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
+			NotifyOperationDone(false); ShowError(L("RfRecFailed"), ex);
+		}
 		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
 	}
 
@@ -12669,6 +12682,9 @@ exit 0
 		catch (Exception ex) { ShowError(L("ErrVentoy"), ex); return; }
 		if (exe == null) return; // user declined the download
 
+		// Not a failure flag: the disk-changed guard below returns from inside the try WITHOUT throwing, so the
+		// catch never sees it. Only a confirmed install sets this, and everything else is treated as a bad end.
+		bool success = false;
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
@@ -12696,6 +12712,7 @@ exit 0
 			// keep whatever the last tick sampled (e.g. "60%" beside a full bar on a short install).
 			if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
 			UpdateProgressStats();
+			success = true;
 			SetBusy(busy: false);
 			NotifyOperationDone(true);
 			await RefreshDisksAsync();
@@ -12703,11 +12720,26 @@ exit 0
 			MessageBox.Show(string.Format(L("MbMultiBootDone"), disk.Number),
 				L("MbMultiBootTitle"), MessageBoxButton.OK, MessageBoxImage.Information);
 		}
-		catch (Exception ex) { NotifyOperationDone(false); SaveLogToDesktop(); ShowError(L("ErrMultiBoot"), ex); }
+		// Stop the clocks before the modal, the way the success path does at 12693. ShowError blocks but the pump
+		// keeps running, so a live timer spends the whole dialog advertising an install that RunVentoyAsync has
+		// already disowned - the bar frozen at Ventoy's last percentage while 15198 derives a Remaining that counts
+		// UP once a second - and it poisons the Elapsed the finally then renders. The row itself is cleared in the
+		// finally, which also covers the disk-changed return that never reaches this catch.
+		catch (Exception ex)
+		{
+			operationTimer.Stop(); operationStopwatch.Stop();
+			NotifyOperationDone(false); SaveLogToDesktop(); ShowError(L("ErrMultiBoot"), ex);
+		}
 		finally
 		{
 			_progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop();
-			SetBusy(busy: false);
+			// Pass a status on the way out, like the ISO download at 12617: nothing else here writes StatusText when
+			// the flow ends badly, so a failed install - or the disk-changed return, which throws nothing - left
+			// "Setting up multi-boot engine on Disk N..." on screen with the operation long gone. Clear the row too: the
+			// bar still holds whatever percentage Ventoy last wrote. Only a completed install passes null and keeps
+			// its row - RefreshDisksAsync has written its own status and the 100% is pinned on purpose.
+			SetBusy(busy: false, success ? null : L("SxReady"));
+			if (!success) ResetProgressWidgets();
 		}
 		}
 		finally { _toolOpStarting = false; }
