@@ -8935,6 +8935,12 @@ exit 0
 		}
 		catch (Exception ex)
 		{
+			// A failed export otherwise sits at its last stage percentage (88 / 95), still captioned as an export in
+			// progress, with an ETA the stats line invents from the bar alone. Deliberately no SetBusy here: the
+			// core leaves busy raised so the report offer still appears, and the caller's finally lowers it.
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
 			ShowError(L("ErrExportVhdx"), ex);
 		}
 		finally
@@ -11722,7 +11728,15 @@ exit 0
 				L("RfImgTitle"), MessageBoxButton.OK,
 				badSectors > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
-		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("RfImgFailed"), ex); }
+		// Same ending as a failed recovery: a dead imaging run should not keep a partial bar and a countdown
+		// while the dialog explains that it failed.
+		catch (Exception ex)
+		{
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
+			NotifyOperationDone(false); ShowError(L("RfImgFailed"), ex);
+		}
 		finally { _progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop(); RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
 	}
 
@@ -12257,6 +12271,11 @@ exit 0
 		}
 		catch (Exception ex)
 			{
+				// Row first, before the modal - the zip step can fail long after the bar last moved. The keepTemp rescue
+				// below is untouched: those files are the only recovered copies.
+				operationTimer.Stop(); operationStopwatch.Stop();
+				ResetProgressWidgets();
+				StatusText.Text = L("SxReady");
 				NotifyOperationDone(false);
 				// The files were already recovered into temp; only the ZIP step failed (usually a full disk). Deleting
 				// temp in the finally would destroy the ONLY recovered copies — keep it and open it for the user.
@@ -13014,7 +13033,15 @@ exit 0
 			MessageBox.Show(verdict, "DriveForge — surface test", MessageBoxButton.OK,
 				(res.bad > 0 || (!covered && !res.stopped && disk.Size > 0)) ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
-		catch (Exception ex) { NotifyOperationDone(false); ShowError(L("ErrSurface"), ex); }
+		// The STOPPED ending already suppresses its countdown (_progressNoEta above); the failed one never did,
+		// so a scan that died kept a partial bar and a live ETA. There is no verdict to preserve here, so clear it.
+		catch (Exception ex)
+		{
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
+			NotifyOperationDone(false); ShowError(L("ErrSurface"), ex);
+		}
 		finally
 		{
 			// Must clear BOTH: leaking _progressFixedTotal=true into a later clone/install would disable the inflation
@@ -13860,6 +13887,12 @@ exit 0
 		catch (Exception ex)
 		{
 			SetBusy(busy: false);
+			// Stop the clocks and clear the row here, before the disk is put back online and before the dialog: both
+			// await or block while the pump keeps running, and the bar would spend that time frozen mid-move with an
+			// invented countdown under it. The SetBusy above is pre-existing and already suppresses the report offer.
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
 			try { await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n"); } catch { }
 			ShowError(L("ErrMoveMbr"), ex);
 		}
@@ -14134,6 +14167,10 @@ exit 0
 		catch (Exception ex)
 		{
 			SetBusy(busy: false);
+			// GPT twin of the MBR move: same ending, same reason.
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
 			try { await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n"); } catch { }
 			ShowError(L("ErrMovePhase") + _lastMovePhase + "]", ex);
 		}
@@ -14347,7 +14384,16 @@ exit 0
 			SetToolOutput("Find lost partitions — Disk " + disk.Number + "\r\n\r\n" + sb);
 			MessageBox.Show(string.Format(L("PtLostFound"), found.Count, disk.Number) + "\r\n\r\n" + sb + "\r\n" + L("PtLostHint"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
 		}
-		catch (Exception ex) { SetBusy(busy: false); ShowError(L("ErrFindLost"), ex); }
+		// Clear the row before the dialog, like the other failure paths: the scan bar otherwise stays where the
+		// scan died, captioned with the disk it was scanning.
+		catch (Exception ex)
+		{
+			SetBusy(busy: false);
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
+			ShowError(L("ErrFindLost"), ex);
+		}
 		finally { operationTimer.Stop(); operationStopwatch.Stop(); _progressFullRange = false; SetBusy(busy: false); }
 	}
 
