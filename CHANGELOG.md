@@ -2,7 +2,7 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## v4.3.3 — 2026-09-27
+## v4.3.3 — 2026-09-28
 
 ### Fixed
 - **A failed operation no longer leaves the progress bar claiming it is still working.** When one ended with an
