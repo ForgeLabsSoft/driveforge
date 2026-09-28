@@ -95,11 +95,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Lead the notes with the banner, pinned to THIS tag: an older release then keeps the artwork it
-          # shipped with instead of silently picking up a later one. Markdown rather than <img>, because a
-          # release body cannot be previewed before the tag exists and markdown is certain to render.
-          $banner = "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/driveforge-github-banner.png"
-          $header = "![DriveForge]($banner)`r`n`r`n"
+          # Lead the notes with the logo, pinned to THIS tag: an older release then keeps the artwork it
+          # shipped with instead of silently picking up a later one. The square logo, not the wide banner:
+          # the banner renders about 310px on a phone, where its inner captions become unreadable. Markdown
+          # rather than <img>, because markdown is certain to render wherever the body is shown.
+          $logo = "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/logo-256.png"
+          $header = "![DriveForge]($logo)`r`n`r`n"
           # Only this version's section goes in the notes - the whole file made every release page repeat the
           # entire history below the part anyone came to read. The regex runs from this tag's heading to the next
           # '## v' heading. If it does not match (a heading renamed, a tag cut before its section was written) the
