@@ -599,9 +599,9 @@ public partial class MainWindow : Window, IComponentConnector
 			mbps = sr.SequentialWriteMb;
 		if (mbps <= 1) mbps = 60; // conservative default when no speed test yet
 		double minutes = (bytes / 1024.0 / 1024.0) / mbps / 60.0 * 1.25; // +25% for overhead/verification
-		if (minutes < 1) return "about a minute";
-		if (minutes < 90) return $"about {Math.Ceiling(minutes)} minutes";
-		return $"about {Math.Round(minutes / 60.0, 1)} hours";
+		if (minutes < 1) return L("EstMinute");
+		if (minutes < 90) return string.Format(L("EstMinutes"), Math.Ceiling(minutes));
+		return string.Format(L("EstHours"), Math.Round(minutes / 60.0, 1));
 	}
 
 	// One clear "here is what will happen" confirmation instead of several pop-ups.
@@ -615,33 +615,26 @@ public partial class MainWindow : Window, IComponentConnector
 		// Show what is currently ON the target disk so the user can be 100% sure they picked the right one.
 		string contents = await GetDiskContentsAsync(disk.Number);
 
-		var sb = new StringBuilder();
-		sb.AppendLine(isClone ? "Clone THIS PC's Windows to:" : isFfu ? "Restore a saved disk image to:" : "Create a Windows USB on:");
-		sb.AppendLine("    Disk " + disk.Number + " — " + disk.FriendlyName + " — " + FormatBytes(disk.Size));
-		sb.AppendLine();
-		sb.AppendLine("This disk currently contains:");
-		sb.AppendLine(contents);
-		sb.AppendLine();
-		sb.AppendLine("⚠ ALL of the above will be ERASED.");
-		sb.AppendLine();
-
 		var opts = new List<string>();
-		if (BitLockerCheck.IsChecked == true) opts.Add("Encrypt with BitLocker (recovery key saved)");
-		if (BypassAccountCheck.IsChecked == true && !isClone) opts.Add("Skip Microsoft account (create a local account)");
-		if (BypassRequirementsCheck.IsChecked == true && !isClone) opts.Add("Bypass Windows 11 requirements");
-		if (ModeBox.SelectedIndex == ModeCloneInternal) opts.Add("Clone the whole disk (Windows + all data partitions)");
-		else if (CloneOtherPartitionsCheck.IsChecked == true && isClone) opts.Add("Also clone other data partitions");
-		else if (DataPartitionCheck.IsChecked == true) opts.Add("Create an extra data partition");
-		if (VerifyContentCheck.IsChecked == true && isClone) opts.Add("Verify cloned data afterwards");
-		if (CompactImageCheck.IsChecked == true && !isClone && !isFfu) opts.Add("Compact (space-saving) image");
-		sb.AppendLine(opts.Count > 0 ? "Options: " + string.Join(", ", opts) + "." : "Options: defaults.");
-		sb.AppendLine();
-		sb.AppendLine("Estimated time: " + EstimateOperationTime(disk, bytes) + " (depends on the drive).");
-		if (NeedsStrongPerformanceWarning(disk) && ModeBox.SelectedIndex != ModeCloneInternal)
-			sb.AppendLine("\nNote: this drive may be slow for Windows To Go.");
-		sb.AppendLine("\nContinue?");
+		if (BitLockerCheck.IsChecked == true) opts.Add(L("CoOptBitLocker"));
+		if (BypassAccountCheck.IsChecked == true && !isClone) opts.Add(L("CoOptLocalAcct"));
+		if (BypassRequirementsCheck.IsChecked == true && !isClone) opts.Add(L("CoOptBypassReq"));
+		if (ModeBox.SelectedIndex == ModeCloneInternal) opts.Add(L("CoOptWholeDisk"));
+		else if (CloneOtherPartitionsCheck.IsChecked == true && isClone) opts.Add(L("CoOptOtherParts"));
+		else if (DataPartitionCheck.IsChecked == true) opts.Add(L("CoOptDataPart"));
+		if (VerifyContentCheck.IsChecked == true && isClone) opts.Add(L("CoOptVerify"));
+		if (CompactImageCheck.IsChecked == true && !isClone && !isFfu) opts.Add(L("CoOptCompact"));
 
-		if (MessageBox.Show(sb.ToString(), "Confirm — please review", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+		// One composite key per confirmation, like MbFormatConfirm and MbWipeConfirm next door: the moving parts
+		// are placeholders so a translator sees the whole sentence. This dialog gates Clone, Create USB and
+		// Restore - the three flows that erase the disk - and it was the last of them still speaking only English.
+		string action = isClone ? L("CoActClone") : isFfu ? L("CoActRestore") : L("CoActCreate");
+		string options = opts.Count > 0 ? string.Format(L("CoOptions"), string.Join(", ", opts)) : L("CoOptionsNone");
+		string slow = (NeedsStrongPerformanceWarning(disk) && ModeBox.SelectedIndex != ModeCloneInternal) ? L("CoSlowNote") : "";
+		string body = string.Format(L("MbConfirmSummary"), action, string.Format(L("DkRow"), disk.Number),
+			disk.FriendlyName, FormatBytes(disk.Size), contents, options, EstimateOperationTime(disk, bytes), slow);
+
+		if (MessageBox.Show(body, L("CoTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
 			return false;
 		// Last line of defence: make sure the drive at this number is still the exact one the user reviewed.
 		return await VerifyTargetDiskUnchangedAsync(disk);
