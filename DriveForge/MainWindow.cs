@@ -8296,24 +8296,28 @@ exit 0
 	// Write a bootable ISO (Linux or any isohybrid image) to the USB as a raw disk image (dd-style).
 	private async Task WriteIsoImageFlowAsync(DiskItem disk)
 	{
-		if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+		// Capture the source ONCE. sourcePath is a live field - the drop handler and the file picker both
+		// reassign it - and two modal dialogs run between the size check and the write. Read live, the confirm
+		// could name one image while the drive received another, whose size was never checked against it.
+		string src = sourcePath;
+		if (string.IsNullOrWhiteSpace(src) || !File.Exists(src))
 		{ MessageBox.Show(L("Mb024"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		long isoSize = new FileInfo(sourcePath).Length;
+		long isoSize = new FileInfo(src).Length;
 		// The raw writer sector-pads the final chunk (up to +4095 bytes; 4096 covers 4Kn disks too), so reject
 		// anything whose padded size would run past the device end — else the last write throws after diskpart wiped it.
 		if ((isoSize + 4095) / 4096 * 4096 > disk.Size)
 		{ MessageBox.Show(string.Format(L("MbIsoTooBig"), FormatBytes(isoSize), FormatBytes(disk.Size)), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		// The source ISO must not live on the disk we're about to wipe, or we'd destroy the very file we're writing.
-		if (PhysicalDiskOfPath(sourcePath) == disk.Number)
+		if (PhysicalDiskOfPath(src) == disk.Number)
 		{ MessageBox.Show(L("MbSrcOnTarget"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Stop); return; }
 
 		// A Windows / WinPE ISO is not "isohybrid" — writing it raw usually won't boot. Warn and point to the
 		// proper task. Only meaningful for an actual ISO: the probe works by mounting the file with
 		// Mount-DiskImage, which cannot open a raw .img/.bin/.raw/.dd, so on those it would spend a PowerShell
 		// launch to always answer "no". Skip it rather than pay for an answer we already know.
-		bool sourceIsIso = string.Equals(Path.GetExtension(sourcePath), ".iso", StringComparison.OrdinalIgnoreCase);
-		if (sourceIsIso && await LooksLikeWindowsIsoAsync(sourcePath))
+		bool sourceIsIso = string.Equals(Path.GetExtension(src), ".iso", StringComparison.OrdinalIgnoreCase);
+		if (sourceIsIso && await LooksLikeWindowsIsoAsync(src))
 		{
 			if (MessageBox.Show(L("Mb025"),
 					"DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
@@ -8321,7 +8325,7 @@ exit 0
 		}
 
 		string contents = await GetDiskContentsAsync(disk.Number);
-		if (MessageBox.Show(string.Format(L("MbWriteIsoConfirm"), Path.GetFileName(sourcePath), FormatBytes(isoSize), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
+		if (MessageBox.Show(string.Format(L("MbWriteIsoConfirm"), Path.GetFileName(src), FormatBytes(isoSize), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
 				L("MbWriteIsoTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
@@ -8354,7 +8358,7 @@ exit 0
 			SetBusy(busy: true, string.Format(L("BzWriteIso"), disk.Number));
 			ProgressBar.Value = 0.0;
 			tookOffline = true;   // from here on the disk really is ours to put back
-			await RawWriteImageToDiskAsync(disk, sourcePath, isoSize);
+			await RawWriteImageToDiskAsync(disk, src, isoSize);
 			bool writeCompleted = !stopRequested; // capture BEFORE the optional verify below reuses stopRequested
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
@@ -8371,7 +8375,7 @@ exit 0
 					operationStopwatch.Restart(); operationTimer.Start();
 					SetBusy(busy: true, string.Format(L("BzVerify"), disk.Number));
 					ProgressBar.Value = 0.0;
-					var (vok, mismatchAt) = await Task.Run(() => VerifyRawWrite(disk, sourcePath, isoSize));
+					var (vok, mismatchAt) = await Task.Run(() => VerifyRawWrite(disk, src, isoSize));
 					operationTimer.Stop(); operationStopwatch.Stop();
 					progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 					SetBusy(busy: false);
@@ -8474,6 +8478,12 @@ exit 0
 			dst.Flush();
 			// push the OS cache to the actual media; a failure here means the image may not be fully written to flash
 			if (!FlushFileBuffers(h)) throw new IOException("Flushing the write to the drive failed (error " + Marshal.GetLastWin32Error() + "). The image may not be fully on the media.");
+			// The loop above ends on a short read as well as at EOF, and the caller's only completeness test is
+			// whether the user pressed Stop - so a truncated or half-readable source wrote part of an image and the
+			// run still finished green, with the bar pinned to 100%. The drive would simply not boot, for no stated
+			// reason. Say it here, where the byte count is known.
+			if (!stopRequested && done < isoSize)
+				throw new IOException($"Only {FormatBytes(done)} of {FormatBytes(isoSize)} reached the drive - the image on it is incomplete.");
 		});
 	}
 
