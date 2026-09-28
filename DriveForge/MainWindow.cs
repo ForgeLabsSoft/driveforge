@@ -101,17 +101,17 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				if (!string.Equals(HealthStatus, "Healthy", StringComparison.OrdinalIgnoreCase))
 				{
-					return ("Health: " + HealthStatus + "/" + OperationalStatus).TrimEnd('/');
+					return string.Format(L("DkHealth"), (HealthStatus + "/" + OperationalStatus).TrimEnd('/'));
 				}
-				return "Health: OK";
+				return L("DkHealthOk");
 			}
 		}
 
 		public override string ToString()
 		{
-			string value = ((DriveLetters.Count == 0) ? "no letter" : string.Join(", ", DriveLetters.Select((char letter) => letter + ":")));
-			string value2 = (IsSystem ? " - RUNNING WINDOWS (no format/erase)" : "");
-			return $"Disk {Number} - {FriendlyName} - {FormatBytes(Size)} - {BusType}/{MediaType} - {HealthText} - {value}{value2}";
+			string value = ((DriveLetters.Count == 0) ? L("DkNoLetter") : string.Join(", ", DriveLetters.Select((char letter) => letter + ":")));
+			string value2 = (IsSystem ? " - " + L("DkSystemDisk") : "");
+			return $"{string.Format(L("DkRow"), Number)} - {FriendlyName} - {FormatBytes(Size)} - {BusType}/{MediaType} - {HealthText} - {value}{value2}";
 		}
 	}
 

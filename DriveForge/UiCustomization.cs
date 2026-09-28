@@ -45,7 +45,7 @@ public partial class MainWindow
 		("Emerald", "059669"), ("Teal", "0D9488"), ("Cyan", "0891B2"), ("Sky", "0284C7"),
 	};
 
-	private string currentLanguage = "en";
+	private static string currentLanguage = "en";   // static so the nested DiskItem can localise its own row
 	private bool uiCustomizationReady;
 
 	private string SettingsFilePath => Path.Combine(
@@ -155,7 +155,7 @@ public partial class MainWindow
 	}
 
 	// Looks up a localized string for the current language, falling back to English then the key itself.
-	private string L(string key)
+	private static string L(string key)
 	{
 		if (Strings.TryGetValue(currentLanguage, out Dictionary<string, string>? d) && d.TryGetValue(key, out string? v))
 			return v;
