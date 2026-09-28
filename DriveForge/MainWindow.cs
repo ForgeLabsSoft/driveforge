@@ -13188,12 +13188,20 @@ exit 0
 		if (sel == null) return;
 		int[] fills = sel.Value switch { 1 => new[] { 2 }, 2 => new[] { 0, 2, 0 }, 3 => new[] { 0, 1, 2, 0, 1, 2, 2 }, _ => new[] { 0 } };
 
-		if (MessageBox.Show(string.Format(L("MbShredConfirm"), files.Count, fills.Length),
+		// Name what is about to be destroyed. This is the only irreversible action in the app whose confirmation
+		// showed a bare count: every disk-level gate prints the disk, its size and its contents, while the shredder
+		// - overwrite then delete, no Recycle Bin, nothing for a recovery tool to find - said only "4,812 file(s)".
+		// A plausible number is not a warning when the folder above the intended one yields one just as plausible.
+		long totalBytes = 0;
+		foreach (var f in files) { try { totalBytes += new FileInfo(f).Length; } catch { } }
+		string shredRoot = baseFolder ?? (Path.GetDirectoryName(files[0]) ?? "");
+		string shredSample = string.Join(Environment.NewLine, files.Take(4).Select(f => "  " + Path.GetFileName(f)))
+			+ (files.Count > 4 ? Environment.NewLine + "  ..." : "");
+		if (MessageBox.Show(string.Format(L("MbShredWhat"), shredRoot, FormatBytes(totalBytes), files.Count, shredSample)
+			+ string.Format(L("MbShredConfirm"), files.Count, fills.Length),
 				L("MbShredTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
 			return;
 
-		long totalBytes = 0;
-		foreach (var f in files) { try { totalBytes += new FileInfo(f).Length; } catch { } }
 
 		bool failed = false; int done = 0, fail = 0, noReach = 0, skippedLinks = 0;
 		try
