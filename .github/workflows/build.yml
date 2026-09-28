@@ -95,5 +95,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = if (Test-Path CHANGELOG.md) { @("--notes-file","CHANGELOG.md") } else { @("--notes","Automated build from source on GitHub Actions. Verify the SHA-256 in SHA256SUMS.txt, and the build provenance with 'gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge'.") }
-          gh release create ${{ github.ref_name }} dist/DriveForge.exe dist/SHA256SUMS.txt --title "DriveForge ${{ github.ref_name }}" @notes
+          # Lead the notes with the banner, pinned to THIS tag: an older release then keeps the artwork it
+          # shipped with instead of silently picking up a later one. Markdown rather than <img>, because a
+          # release body cannot be previewed before the tag exists and markdown is certain to render.
+          $banner = "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/driveforge-github-banner.png"
+          $header = "![DriveForge]($banner)`r`n`r`n"
+          $body = if (Test-Path CHANGELOG.md) { $header + (Get-Content CHANGELOG.md -Raw) } else { $header + "Automated build from source on GitHub Actions. Verify the SHA-256 in SHA256SUMS.txt, and the build provenance with 'gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge'." }
+          Set-Content -Path release-notes.md -Value $body -Encoding utf8
+          gh release create ${{ github.ref_name }} dist/DriveForge.exe dist/SHA256SUMS.txt --title "DriveForge ${{ github.ref_name }}" --notes-file release-notes.md
