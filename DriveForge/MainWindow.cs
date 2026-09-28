@@ -8545,7 +8545,6 @@ exit 0
 			return;
 
 		string dir = letter + ":\\__driveforge_captest__";
-		bool failed = false;
 		try
 		{
 			stopRequested = false; isPaused = false; bitLockerEncrypting = false;
@@ -8574,14 +8573,20 @@ exit 0
 			SetToolOutput($"Capacity test on {letter}: — claimed {FormatBytes(disk.Size)}\r\nWritten: {FormatBytes(written)}\r\nVerified OK: {FormatBytes(verifiedOk)}\r\nResult: {(fake ? "FAKE/FAULTY" : "GENUINE")}");
 			MessageBox.Show(verdict, "DriveForge — capacity test", MessageBoxButton.OK, fake ? MessageBoxImage.Warning : MessageBoxImage.Information);
 		}
-		catch (Exception ex) { failed = true; NotifyOperationDone(false); ShowError(L("ErrCapacity"), ex); }
+		// Unlike the wipe and shred flows, this bar says nothing about the drive once the run has failed: it
+		// measures a write-then-read pass against free space, and the finally below deletes the very directory it
+		// was measuring. So clear the row rather than keep a percentage that now refers to nothing - and do it
+		// here, before the modal, so the elapsed time it leaves is the test's own.
+		catch (Exception ex)
+		{
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
+			NotifyOperationDone(false); ShowError(L("ErrCapacity"), ex);
+		}
 		finally
 		{
 			operationTimer.Stop(); operationStopwatch.Stop();
-			// Dead run: keep the partial bar, drop the phantom countdown (see the wipe flow).
-			_progressNoEta = true;
-			if (failed) UpdateProgressStats();                       // refresh BEFORE clearing the flags (see the wipe flow)
-			_progressNoEta = false;
 			_progressFullRange = false; _progressFixedTotal = false; // clear BOTH — must not leak into a later clone/install
 			try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
 			SetBusy(busy: false);
