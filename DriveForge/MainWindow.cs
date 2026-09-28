@@ -7725,7 +7725,7 @@ exit 0
 			await Task.Run(() => WipeFreeSpaceCore(letter, fills, cap));
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
-			SetBusy(busy: false); NotifyOperationDone(true);
+			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
 			await RefreshDisksAsync();
 			// Honesty: on flash the app already warned that overwriting free space does NOT reliably erase old data
 			// (wear-levelling keeps copies the OS can't reach). Claiming "can no longer be recovered" here retracted
@@ -8195,7 +8195,7 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false);
-			NotifyOperationDone(true);
+			NotifyOperationDone(!stopRequested);
 			await RefreshDisksAsync();
 			// Quick (sel 0) passes an EMPTY fills array: it runs diskpart clean and overwrites nothing at all. The
 			// confirm dialog shown before the method was chosen promises "Every sector will be OVERWRITTEN. Data will
@@ -13260,7 +13260,7 @@ exit 0
 			});
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
-			SetBusy(busy: false); NotifyOperationDone(true);
+			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
 			// Three separate outcomes, reported separately: overwritten and deleted, deleted but NOT overwritten
 			// (compressed / sparse / EFS — the original clusters could not be reached), and not erased at all.
 			// Folding the middle group into "securely erased" is what made the summary dishonest. These were also
