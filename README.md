@@ -60,7 +60,7 @@ unattended backup that runs when the drive is connected).
 
 Grab the latest **`DriveForge.exe`** from the [**Releases**](https://github.com/ForgeLabsSoft/driveforge/releases/latest) page — a single self-contained file, no install.
 
-> **Code signing:** DriveForge has applied to the [SignPath Foundation](https://signpath.org) free code-signing program for open-source projects. Until a signed build is published, Windows SmartScreen may warn on first run — click **More info → Run anyway**. Builds are produced from source by GitHub Actions; verify the SHA-256 in `SHA256SUMS.txt`, and verify the build provenance cryptographically with:
+> **Code signing:** DriveForge is not code-signed. The free programme for open-source projects ([SignPath Foundation](https://signpath.org)) turned the application down in July 2026, because it asks for a level of public recognition the project has not reached yet, and a commercial certificate costs money this project does not make. Until a signed build exists, Windows SmartScreen will warn on first run — click **More info → Run anyway**. Builds are produced from source by GitHub Actions; verify the SHA-256 in `SHA256SUMS.txt`, and verify the build provenance cryptographically with:
 >
 > ```
 > gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge
