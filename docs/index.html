@@ -232,10 +232,52 @@ footer a{color:var(--muted)}
 
     <div class="note" style="margin-top:30px">
       <h3>Windows will warn you on first run — here is why</h3>
-      <p>DriveForge is not yet code-signed, so Windows SmartScreen shows <em>“Windows protected your PC”</em> the first time you run it. Click <strong>More info → Run anyway</strong>.</p>
-      <p>Code-signing certificates cost money that this project does not make, and the free programme for open-source projects requires a level of public recognition DriveForge has not reached yet. Rather than ask you to simply trust it, the source is public, the build is reproducible on GitHub's servers, and both checks above let you confirm the download yourself.</p>
+      <p>DriveForge is not code-signed, so Windows SmartScreen shows <em>“Windows protected your PC”</em> the first time you run it. Click <strong>More info → Run anyway</strong>. The full position is set out in the <a href="#code-signing">code signing policy</a> below.</p>
       <p style="margin-bottom:0">Some antivirus tools also flag it. A tool that writes raw disk sectors and creates bootable drives looks, to a scanner, a lot like something that shouldn't. <a href="https://github.com/ForgeLabsSoft/driveforge/issues">Report a false positive</a> if you hit one.</p>
     </div>
+  </div>
+</section>
+
+<section id="code-signing">
+  <div class="wrap">
+    <h2>Code signing policy</h2>
+    <p class="lead">DriveForge is <strong>not code-signed today</strong>. A page about trust should not be vague, so here is exactly where things stand, and what the policy is for when that changes.</p>
+
+    <h3 style="margin-top:34px">Today</h3>
+    <p>Releases are unsigned, and Windows will warn you the first time you run one. In place of a signature, every release is built from public source by GitHub Actions rather than on a developer's machine, and carries a cryptographic build-provenance attestation tying the binary to the exact commit it came from. <a href="#verify">The checks above</a> let you confirm that yourself — something a signature alone would not give you.</p>
+
+    <h3>When DriveForge is signed</h3>
+    <p>The intended arrangement is: <em>Free code signing provided by SignPath.io, certificate by SignPath Foundation.</em> &nbsp;<span style="color:var(--dim); font-size:.92rem">(<a href="https://signpath.io" rel="noopener">signpath.io</a> · <a href="https://signpath.org" rel="noopener">signpath.org</a>)</span></p>
+    <p>That is a statement of policy, not of fact. The application was submitted in June 2026 and declined in July 2026, on the grounds that the project had not yet reached the level of public recognition the programme asks for. It will be submitted again. This page will say otherwise on the day it is true, and not before.</p>
+
+    <h3>Roles</h3>
+    <p>DriveForge is written by one person, so one party holds every role in the signing process — <strong>Author</strong>, <strong>Reviewer</strong> and <strong>Approver</strong>: ForgeLabsSoft, <a href="mailto:support@forgelabssoft.com">support@forgelabssoft.com</a>. Every release would be approved by hand; nothing would be signed automatically.</p>
+
+    <h3>Privacy statement</h3>
+    <p>This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.</p>
+    <p style="color:var(--dim); font-size:.92rem; margin-bottom:0">What that means in practice is set out in <a href="#privacy">Privacy</a> below.</p>
+  </div>
+</section>
+
+<section id="uninstall">
+  <div class="wrap">
+    <h2>Removing it</h2>
+    <p class="lead">There is no installer, so there is nothing to uninstall — but here is everything DriveForge can leave behind, so you can be certain none of it stays.</p>
+
+    <h3 style="margin-top:34px">The program</h3>
+    <p>Delete <code>DriveForge.exe</code>. That is the whole thing: one file, never copied into Program Files, never registered with Windows. If you installed it with the Windows Package Manager instead:</p>
+    <pre><code>winget uninstall ForgeLabsSoft.DriveForge</code></pre>
+
+    <h3>Settings and logs</h3>
+    <p>Settings, drive-health history and logs live in one folder. Delete it and nothing of the app remains:</p>
+    <pre><code>%LocalAppData%\DriveForge</code></pre>
+    <p style="color:var(--dim); font-size:.92rem">It contains <code>settings.json</code>, <code>health-history.json</code>, <code>crash.log</code> and <code>dism.log</code> — nothing else, and nothing about you.</p>
+
+    <h3>A scheduled clone, if you created one</h3>
+    <p>Only if you set up an automatic clone. It is an ordinary Windows scheduled task named <strong>DriveForge Auto Clone</strong>; remove it from Task Scheduler, or run:</p>
+    <pre><code>schtasks /Delete /TN "DriveForge Auto Clone" /F</code></pre>
+
+    <p style="margin-bottom:0"><strong>There is nothing else.</strong> DriveForge writes no registry entries of its own, installs no service and no driver, and adds nothing to startup.</p>
   </div>
 </section>
 

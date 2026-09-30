@@ -66,12 +66,52 @@ Or with the Windows Package Manager:
 winget install ForgeLabsSoft.DriveForge
 ```
 
-> **Code signing:** DriveForge is not code-signed. The free programme for open-source projects ([SignPath Foundation](https://signpath.org)) turned the application down in July 2026, because it asks for a level of public recognition the project has not reached yet, and a commercial certificate costs money this project does not make. Until a signed build exists, Windows SmartScreen will warn on first run — click **More info → Run anyway**. Builds are produced from source by GitHub Actions; verify the SHA-256 in `SHA256SUMS.txt`, and verify the build provenance cryptographically with:
->
-> ```
-> gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge
-> ```
+> **Not code-signed.** Windows SmartScreen warns on first run — click **More info → Run anyway**. Why, and
+> what is offered instead, is in [Code signing policy](#code-signing-policy) below.
 
+## Code signing policy
+
+DriveForge is **not code-signed today**, and this section says plainly where that stands.
+
+**Today.** Releases are unsigned. In place of a signature, every release is built from public source by
+GitHub Actions rather than on a developer's machine, and carries a build-provenance attestation tying the
+binary to the exact commit that produced it. Both are checkable by anyone:
+
+```
+Get-FileHash DriveForge.exe -Algorithm SHA256        # compare with SHA256SUMS.txt
+gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge
+```
+
+**When DriveForge is signed.** The intended arrangement is: *Free code signing provided by SignPath.io,
+certificate by SignPath Foundation.* That is policy, not fact — the application was submitted in June 2026
+and declined in July 2026, because the project had not reached the level of public recognition the
+programme asks for. It will be submitted again, and this text will change on the day it is true, not before.
+
+**Roles.** One person writes DriveForge, so one party holds every role: **Author**, **Reviewer** and
+**Approver** — ForgeLabsSoft, <support@forgelabssoft.com>. Every release would be approved by hand; nothing
+would be signed automatically.
+
+**Privacy statement.** This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it.
+
+Some antivirus tools also flag the binary. A program that writes raw disk sectors and makes bootable drives
+looks, to a scanner, a lot like something that should not.
+[Report a false positive](https://github.com/ForgeLabsSoft/driveforge/issues) if you hit one.
+
+## Uninstalling
+
+There is no installer, so there is nothing to uninstall — but everything DriveForge can leave behind is
+listed here, so none of it has to stay.
+
+1. **The program.** Delete `DriveForge.exe`. It is never copied to Program Files and never registered with
+   Windows. Installed through the Windows Package Manager instead? `winget uninstall ForgeLabsSoft.DriveForge`
+2. **Settings and logs.** Delete `%LocalAppData%\DriveForge` — it holds `settings.json`,
+   `health-history.json`, `crash.log` and `dism.log`, and nothing else.
+3. **A scheduled clone, only if you made one.** An ordinary Windows scheduled task named
+   `DriveForge Auto Clone`: remove it in Task Scheduler, or
+   `schtasks /Delete /TN "DriveForge Auto Clone" /F`
+
+Nothing else exists: no registry entries of its own, no service, no driver, nothing added to startup.
 ## Privacy
 
 - **No ads, no telemetry, no accounts.** Nothing about you is collected or sent anywhere. There is no crash
