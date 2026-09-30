@@ -68,6 +68,21 @@ installs the package on a clean virtual machine before a human reviews it.
 ## Why this matters beyond convenience
 
 DriveForge is not code-signed: the SignPath Foundation's free programme turned the application down in July
-2026, because the project had not reached the level of public recognition it asks for. winget publishes install
-counts, which is the kind of evidence that question is decided on — so keeping the package current is part of
-the case for being able to sign, not only a nicer way to install.
+2026, because the project had not reached the level of public recognition it asks for. That question is decided
+on evidence of use, so it is worth being exact about what can actually be counted.
+
+winget does **not** publish per-package install counts. Microsoft collects telemetry, but its maintainers have
+said it has never been vetted for publication, and the acquisition figures a publisher can see in Partner Center
+are Microsoft Store figures rather than CLI ones. Third-party sites that show a number next to a winget package
+are counting page views of their own listing, not installations.
+
+What can be counted is the GitHub release download count — and because DriveForge is a *portable* package,
+winget fetches the exe straight from the release URL, so every winget install is one of those downloads:
+
+```
+gh api repos/ForgeLabsSoft/driveforge/releases --jq '.[] | "\(.tag_name) \(.assets[0].download_count)"'
+```
+
+It undercounts nothing and overcounts a little: CI, mirrors and our own verification runs land in the same
+total. Keeping the package current is still part of the case for being able to sign, not only a nicer way to
+install.
