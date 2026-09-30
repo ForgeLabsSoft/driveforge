@@ -2,7 +2,7 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## v4.4.0 — 2026-09-28
+## v4.4.0 — 2026-09-30
 
 ### Added
 - **Write one image to several drives, one after another.** Tick *Write this image to several drives* under

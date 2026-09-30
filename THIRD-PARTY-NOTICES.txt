@@ -46,6 +46,13 @@ Obtaining the corresponding source:
   the corresponding source code for exactly this version is available from
   the wimlib project at https://wimlib.net/ (look for wimlib 1.14.4).
 
+Component bundled inside wimlib:
+  The wimlib archive itself includes libdivsufsort-lite
+  (Copyright (c) 2003-2008 Yuta Mori), licensed under the MIT License. Because
+  DriveForge redistributes the wimlib archive unchanged, it redistributes this
+  component too. Its full license text travels with the binaries as
+  COPYING.libdivsufsort-lite.txt and is extracted into the folder above.
+
 ----------------------------------------------------------------------------
 2) Ventoy
 ----------------------------------------------------------------------------
