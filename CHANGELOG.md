@@ -223,6 +223,18 @@ survived, and they reduce to these. Three of them were defects introduced by the
   disk, its size and its contents before anything is erased. What was missing was any way to tell, *in the list
   itself*, that one of those lines is an internal disk. Each one that is not removable now says so.
 
+### Added
+
+- **The app can point at its own source.** DriveForge is GPLv3 and had exactly two outbound links, Ko-fi
+  and the bug form; neither led to the code. *Settings → About & support* now offers **View the source on
+  GitHub**, so anyone running it can reach the repository, the licence and every release without being
+  told where to look. Translated into all seventeen languages, like every other button.
+- **A winget manifest**, kept in `packaging/winget/` beside the code it describes, so DriveForge can be
+  installed with `winget install ForgeLabsSoft.DriveForge` once Microsoft accepts it. It is a *portable*
+  package: winget checks the published SHA-256 and puts a shim on PATH — nothing is installed, and
+  nothing is written to Program Files. The manifest validates cleanly against the 1.6.0 schema, and its
+  hash was checked against the binary actually published by the release build, not a local one.
+
 ### Under the hood
 - The write, verify, re-online and eject sequence now exists in exactly one place, and the parts that must
   happen once per run rather than once per drive — the busy state, the stopwatch, the progress total, the

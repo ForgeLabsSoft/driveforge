@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# DriveForge ships as ONE self-contained .exe with no installer, so the winget type is "portable":
+# winget downloads the exe, verifies the SHA-256 below, and puts a shim on PATH. Nothing is installed
+# and nothing is written to Program Files.
+#
+# ElevationRequirement is elevatesSelf, not requiresAdministrator: the exe's own manifest asks for
+# administrator (app.manifest, requestedExecutionLevel=requireAdministrator), so Windows raises the UAC
+# prompt when it starts. winget itself does not need to run elevated to place the shim.
+#
+# The SHA-256 is the one published in SHA256SUMS.txt beside the release asset, which is produced by the
+# GitHub Actions build from the tagged source - not from a local build. The same binary carries a Sigstore
+# build-provenance attestation: gh attestation verify DriveForge.exe --repo ForgeLabsSoft/driveforge
+
+PackageIdentifier: ForgeLabsSoft.DriveForge
+PackageVersion: 4.4.0
+MinimumOSVersion: 10.0.17763.0
+InstallerType: portable
+ReleaseDate: 2026-09-30
+Commands:
+  - driveforge
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.4.0/DriveForge.exe
+    InstallerSha256: 016EC91199A489CEDB8108D950B0A04AEB54198090951046BC3FB4B8FA9F2BD3
+    ElevationRequirement: elevatesSelf
+ManifestType: installer
+ManifestVersion: 1.6.0

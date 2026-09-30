@@ -7929,6 +7929,9 @@ exit 0
 	}
 
 	private const string DonateUrl = "https://ko-fi.com/driveforge";
+	// The app is GPLv3 and had no way to reach its own source: two outbound links, Ko-fi and the bug form,
+	// and neither led to the code or the licence.
+	private const string RepositoryUrl = "https://github.com/ForgeLabsSoft/driveforge";
 
 	// ---------- Reporting a problem ----------
 	// Nothing is ever sent automatically. The app promises "no telemetry, no data collection", and that promise is
@@ -8018,6 +8021,12 @@ exit 0
 	private int _successCount;
 
 	private void OpenDonate_Click(object sender, RoutedEventArgs e) => OpenDonatePage();
+
+	private void OpenSource_Click(object sender, RoutedEventArgs e)
+	{
+		try { Process.Start(new ProcessStartInfo(RepositoryUrl) { UseShellExecute = true }); }
+		catch (Exception ex) { ShowError(L("ErrOpenSource"), ex); }
+	}
 
 	private void OpenDonatePage()
 	{

@@ -12,6 +12,9 @@ public partial class MainWindow
 		["en"] = new()
 		{
 			["ReportProblemButton"] = "Report a problem",
+			["SourceButton"] = "View the source on GitHub",
+			["SourceButtonTip"] = "Opens the DriveForge repository on GitHub, where the full source code, the licence and every release are published. DriveForge is free and open source under the GPLv3.",
+			["ErrOpenSource"] = "Could not open the repository page",
 			["ReportProblemButtonTip"] = "Opens the bug form on GitHub, or an email to support, with your app and Windows versions filled in.",
 			["RepPrompt"] = "Choose how to report. Your app and Windows versions are filled in for you. Nothing is posted until you send it yourself.",
 			["RepGitHub"] = "Report on GitHub",
@@ -913,6 +916,9 @@ public partial class MainWindow
 		["ro"] = new()
 		{
 			["ReportProblemButton"] = "Raportează o problemă",
+			["SourceButton"] = "Vezi sursa pe GitHub",
+			["SourceButtonTip"] = "Deschide depozitul DriveForge pe GitHub, unde sunt publicate codul sursă complet, licența și toate versiunile. DriveForge este liber și open source sub GPLv3.",
+			["ErrOpenSource"] = "Nu am putut deschide pagina depozitului",
 			["ReportProblemButtonTip"] = "Deschide formularul de raportare de pe GitHub sau un email către suport, cu versiunea aplicației și a Windows-ului completate.",
 			["RepPrompt"] = "Alege cum vrei să raportezi. Versiunea aplicației și cea a Windows-ului sunt completate deja. Nu se trimite nimic până nu trimiți tu.",
 			["RepGitHub"] = "Raportează pe GitHub",
@@ -1802,6 +1808,9 @@ public partial class MainWindow
 		["es"] = new()
 		{
 			["ReportProblemButton"] = "Informar de un problema",
+			["SourceButton"] = "Ver el código fuente en GitHub",
+			["SourceButtonTip"] = "Abre el repositorio de DriveForge en GitHub, donde se publican el código fuente completo, la licencia y todas las versiones. DriveForge es software libre y de código abierto bajo la GPLv3.",
+			["ErrOpenSource"] = "No se pudo abrir la página del repositorio",
 			["ReportProblemButtonTip"] = "Abre el formulario de errores en GitHub o un correo a soporte, con las versiones de la app y de Windows ya rellenadas.",
 			["RepPrompt"] = "Elige cómo quieres informar. Las versiones de la app y de Windows ya están rellenadas. No se envía nada hasta que lo envíes tú.",
 			["RepGitHub"] = "Informar en GitHub",
@@ -2689,6 +2698,9 @@ public partial class MainWindow
 		["fr"] = new()
 		{
 			["ReportProblemButton"] = "Signaler un problème",
+			["SourceButton"] = "Voir le code source sur GitHub",
+			["SourceButtonTip"] = "Ouvre le dépôt DriveForge sur GitHub, où le code source complet, la licence et toutes les versions sont publiés. DriveForge est un logiciel libre et open source sous GPLv3.",
+			["ErrOpenSource"] = "Impossible d'ouvrir la page du dépôt",
 			["ReportProblemButtonTip"] = "Ouvre le formulaire de bogue sur GitHub, ou un e-mail au support, avec les versions de l'application et de Windows déjà remplies.",
 			["RepPrompt"] = "Choisissez comment signaler. Les versions de l'application et de Windows sont déjà remplies. Rien n'est envoyé tant que vous ne l'envoyez pas vous-même.",
 			["RepGitHub"] = "Signaler sur GitHub",
@@ -3576,6 +3588,9 @@ public partial class MainWindow
 		["de"] = new()
 		{
 			["ReportProblemButton"] = "Problem melden",
+			["SourceButton"] = "Quellcode auf GitHub ansehen",
+			["SourceButtonTip"] = "Öffnet das DriveForge-Repository auf GitHub, wo der vollständige Quellcode, die Lizenz und alle Versionen veröffentlicht sind. DriveForge ist freie und quelloffene Software unter der GPLv3.",
+			["ErrOpenSource"] = "Die Repository-Seite konnte nicht geöffnet werden",
 			["ReportProblemButtonTip"] = "Öffnet das Fehlerformular auf GitHub oder eine E-Mail an den Support, mit bereits eingetragener App- und Windows-Version.",
 			["RepPrompt"] = "Wählen Sie, wie Sie melden möchten. App- und Windows-Version sind bereits eingetragen. Es wird nichts gesendet, bis Sie es selbst senden.",
 			["RepGitHub"] = "Auf GitHub melden",
@@ -4463,6 +4478,9 @@ public partial class MainWindow
 		["it"] = new()
 		{
 			["ReportProblemButton"] = "Segnala un problema",
+			["SourceButton"] = "Vedi il codice sorgente su GitHub",
+			["SourceButtonTip"] = "Apre il repository di DriveForge su GitHub, dove sono pubblicati il codice sorgente completo, la licenza e tutte le versioni. DriveForge è software libero e open source con licenza GPLv3.",
+			["ErrOpenSource"] = "Impossibile aprire la pagina del repository",
 			["ReportProblemButtonTip"] = "Apre il modulo di segnalazione su GitHub o un'email al supporto, con le versioni dell'app e di Windows già compilate.",
 			["RepPrompt"] = "Scegli come segnalare. Le versioni dell'app e di Windows sono già compilate. Non viene inviato nulla finché non lo invii tu.",
 			["RepGitHub"] = "Segnala su GitHub",
@@ -5350,6 +5368,9 @@ public partial class MainWindow
 		["pt"] = new()
 		{
 			["ReportProblemButton"] = "Comunicar um problema",
+			["SourceButton"] = "Ver o código-fonte no GitHub",
+			["SourceButtonTip"] = "Abre o repositório do DriveForge no GitHub, onde estão publicados o código-fonte completo, a licença e todas as versões. O DriveForge é software livre e de código aberto sob a GPLv3.",
+			["ErrOpenSource"] = "Não foi possível abrir a página do repositório",
 			["ReportProblemButtonTip"] = "Abre o formulário de erros no GitHub ou um email para o suporte, com as versões da app e do Windows preenchidas.",
 			["RepPrompt"] = "Escolha como quer comunicar. As versões da app e do Windows já estão preenchidas. Nada é enviado até que o envie.",
 			["RepGitHub"] = "Comunicar no GitHub",
@@ -6237,6 +6258,9 @@ public partial class MainWindow
 		["nl"] = new()
 		{
 			["ReportProblemButton"] = "Een probleem melden",
+			["SourceButton"] = "Bekijk de broncode op GitHub",
+			["SourceButtonTip"] = "Opent de DriveForge-repository op GitHub, waar de volledige broncode, de licentie en alle versies zijn gepubliceerd. DriveForge is vrije en opensourcesoftware onder de GPLv3.",
+			["ErrOpenSource"] = "Kon de repositorypagina niet openen",
 			["ReportProblemButtonTip"] = "Opent het bugformulier op GitHub of een e-mail aan support, met je app- en Windows-versie al ingevuld.",
 			["RepPrompt"] = "Kies hoe je wilt melden. Je app- en Windows-versie zijn al ingevuld. Er wordt niets verzonden tot je het zelf verstuurt.",
 			["RepGitHub"] = "Melden op GitHub",
@@ -7124,6 +7148,9 @@ public partial class MainWindow
 		["ru"] = new()
 		{
 			["ReportProblemButton"] = "Сообщить о проблеме",
+			["SourceButton"] = "Исходный код на GitHub",
+			["SourceButtonTip"] = "Открывает репозиторий DriveForge на GitHub, где опубликованы полный исходный код, лицензия и все выпуски. DriveForge — свободное программное обеспечение с открытым исходным кодом под GPLv3.",
+			["ErrOpenSource"] = "Не удалось открыть страницу репозитория",
 			["ReportProblemButtonTip"] = "Открывает форму отчёта на GitHub или письмо в поддержку с уже заполненными версиями приложения и Windows.",
 			["RepPrompt"] = "Выберите способ отправки. Версии приложения и Windows уже заполнены. Ничего не отправляется, пока вы не отправите сами.",
 			["RepGitHub"] = "Сообщить на GitHub",
@@ -8011,6 +8038,9 @@ public partial class MainWindow
 		["pl"] = new()
 		{
 			["ReportProblemButton"] = "Zgłoś problem",
+			["SourceButton"] = "Zobacz kod źródłowy na GitHubie",
+			["SourceButtonTip"] = "Otwiera repozytorium DriveForge na GitHubie, gdzie opublikowano pełny kod źródłowy, licencję i wszystkie wydania. DriveForge to wolne oprogramowanie o otwartym kodzie na licencji GPLv3.",
+			["ErrOpenSource"] = "Nie udało się otworzyć strony repozytorium",
 			["ReportProblemButtonTip"] = "Otwiera formularz błędu na GitHubie lub e-mail do wsparcia z już wypełnionymi wersjami aplikacji i Windows.",
 			["RepPrompt"] = "Wybierz sposób zgłoszenia. Wersje aplikacji i Windows są już wypełnione. Nic nie jest wysyłane, dopóki sam tego nie wyślesz.",
 			["RepGitHub"] = "Zgłoś na GitHub",
@@ -8898,6 +8928,9 @@ public partial class MainWindow
 		["tr"] = new()
 		{
 			["ReportProblemButton"] = "Sorun bildir",
+			["SourceButton"] = "Kaynak kodu GitHub'da görüntüle",
+			["SourceButtonTip"] = "DriveForge deposunu GitHub'da açar; kaynak kodun tamamı, lisans ve tüm sürümler orada yayımlanır. DriveForge, GPLv3 altında özgür ve açık kaynaklı bir yazılımdır.",
+			["ErrOpenSource"] = "Depo sayfası açılamadı",
 			["ReportProblemButtonTip"] = "GitHub üzerindeki hata formunu veya desteğe bir e-postayı, uygulama ve Windows sürümleri doldurulmuş olarak açar.",
 			["RepPrompt"] = "Nasıl bildirmek istediğinizi seçin. Uygulama ve Windows sürümleri sizin için dolduruldu. Siz göndermeden hiçbir şey gönderilmez.",
 			["RepGitHub"] = "GitHub üzerinden bildir",
@@ -9785,6 +9818,9 @@ public partial class MainWindow
 		["uk"] = new()
 		{
 			["ReportProblemButton"] = "Повідомити про проблему",
+			["SourceButton"] = "Переглянути вихідний код на GitHub",
+			["SourceButtonTip"] = "Відкриває репозиторій DriveForge на GitHub, де опубліковано повний вихідний код, ліцензію та всі випуски. DriveForge — вільне програмне забезпечення з відкритим кодом на умовах GPLv3.",
+			["ErrOpenSource"] = "Не вдалося відкрити сторінку репозиторію",
 			["ReportProblemButtonTip"] = "Відкриває форму звіту на GitHub або лист до підтримки з уже заповненими версіями програми та Windows.",
 			["RepPrompt"] = "Виберіть спосіб надсилання. Версії програми та Windows уже заповнені. Нічого не надсилається, доки ви не надішлете самі.",
 			["RepGitHub"] = "Повідомити на GitHub",
@@ -10672,6 +10708,9 @@ public partial class MainWindow
 		["zh"] = new()
 		{
 			["ReportProblemButton"] = "报告问题",
+			["SourceButton"] = "在 GitHub 上查看源代码",
+			["SourceButtonTip"] = "在 GitHub 上打开 DriveForge 仓库，那里发布了完整的源代码、许可证和所有版本。DriveForge 是基于 GPLv3 的自由开源软件。",
+			["ErrOpenSource"] = "无法打开仓库页面",
 			["ReportProblemButtonTip"] = "打开 GitHub 上的错误报告表单，或发给支持的邮件，其中已填好应用和 Windows 版本。",
 			["RepPrompt"] = "请选择报告方式。应用和 Windows 版本已为你填好。在你亲自发送之前，不会提交任何内容。",
 			["RepGitHub"] = "在 GitHub 上报告",
@@ -11559,6 +11598,9 @@ public partial class MainWindow
 		["ja"] = new()
 		{
 			["ReportProblemButton"] = "問題を報告",
+			["SourceButton"] = "GitHub でソースコードを見る",
+			["SourceButtonTip"] = "GitHub の DriveForge リポジトリを開きます。完全なソースコード、ライセンス、すべてのリリースが公開されています。DriveForge は GPLv3 のもとで公開されている自由なオープンソースソフトウェアです。",
+			["ErrOpenSource"] = "リポジトリのページを開けませんでした",
 			["ReportProblemButtonTip"] = "GitHub の不具合フォーム、またはサポート宛のメールを、アプリと Windows のバージョンを入力済みの状態で開きます。",
 			["RepPrompt"] = "報告方法を選んでください。アプリと Windows のバージョンは入力済みです。ご自身で送信するまで、何も送信されません。",
 			["RepGitHub"] = "GitHub で報告",
@@ -12446,6 +12488,9 @@ public partial class MainWindow
 		["hi"] = new()
 		{
 			["ReportProblemButton"] = "समस्या की रिपोर्ट करें",
+			["SourceButton"] = "GitHub पर सोर्स कोड देखें",
+			["SourceButtonTip"] = "GitHub पर DriveForge रिपॉजिटरी खोलता है, जहाँ पूरा सोर्स कोड, लाइसेंस और सभी रिलीज़ प्रकाशित हैं। DriveForge, GPLv3 के तहत मुफ़्त और ओपन सोर्स सॉफ़्टवेयर है।",
+			["ErrOpenSource"] = "रिपॉजिटरी पेज नहीं खोला जा सका",
 			["ReportProblemButtonTip"] = "GitHub पर बग फ़ॉर्म, या सहायता को ईमेल खोलता है, जिसमें ऐप और Windows के संस्करण पहले से भरे होते हैं।",
 			["RepPrompt"] = "रिपोर्ट करने का तरीका चुनें। ऐप और Windows के संस्करण पहले से भरे हैं। जब तक आप स्वयं न भेजें, कुछ भी नहीं भेजा जाता।",
 			["RepGitHub"] = "GitHub पर रिपोर्ट करें",
@@ -13333,6 +13378,9 @@ public partial class MainWindow
 		["id"] = new()
 		{
 			["ReportProblemButton"] = "Laporkan masalah",
+			["SourceButton"] = "Lihat kode sumber di GitHub",
+			["SourceButtonTip"] = "Membuka repositori DriveForge di GitHub, tempat kode sumber lengkap, lisensi, dan semua rilis diterbitkan. DriveForge adalah perangkat lunak bebas dan sumber terbuka di bawah GPLv3.",
+			["ErrOpenSource"] = "Tidak dapat membuka halaman repositori",
 			["ReportProblemButtonTip"] = "Membuka formulir bug di GitHub, atau email ke dukungan, dengan versi aplikasi dan Windows sudah terisi.",
 			["RepPrompt"] = "Pilih cara melaporkan. Versi aplikasi dan Windows sudah diisikan. Tidak ada yang dikirim sampai Anda sendiri mengirimnya.",
 			["RepGitHub"] = "Laporkan di GitHub",
@@ -14220,6 +14268,9 @@ public partial class MainWindow
 		["ar"] = new()
 		{
 			["ReportProblemButton"] = "الإبلاغ عن مشكلة",
+			["SourceButton"] = "عرض الشيفرة المصدرية على GitHub",
+			["SourceButtonTip"] = "يفتح مستودع DriveForge على GitHub، حيث تُنشر الشيفرة المصدرية الكاملة والرخصة وكل الإصدارات. DriveForge برنامج حر ومفتوح المصدر بموجب GPLv3.",
+			["ErrOpenSource"] = "تعذّر فتح صفحة المستودع",
 			["ReportProblemButtonTip"] = "يفتح نموذج الأخطاء على GitHub أو رسالة إلى الدعم، مع تعبئة إصداري التطبيق وويندوز.",
 			["RepPrompt"] = "اختر طريقة الإبلاغ. إصدارا التطبيق وويندوز مُعبأان مسبقًا. لا يُرسل أي شيء حتى ترسله بنفسك.",
 			["RepGitHub"] = "الإبلاغ على GitHub",
