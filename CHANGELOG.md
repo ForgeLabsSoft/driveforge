@@ -229,11 +229,11 @@ survived, and they reduce to these. Three of them were defects introduced by the
   and the bug form; neither led to the code. *Settings → About & support* now offers **View the source on
   GitHub**, so anyone running it can reach the repository, the licence and every release without being
   told where to look. Translated into all seventeen languages, like every other button.
-- **A winget manifest**, kept in `packaging/winget/` beside the code it describes, so DriveForge can be
-  installed with `winget install ForgeLabsSoft.DriveForge` once Microsoft accepts it. It is a *portable*
-  package: winget checks the published SHA-256 and puts a shim on PATH — nothing is installed, and
-  nothing is written to Program Files. The manifest validates cleanly against the 1.6.0 schema, and its
-  hash was checked against the binary actually published by the release build, not a local one.
+- **The winget manifest for this release, kept in `packaging/winget/`** beside the code it describes.
+  DriveForge has been installable with `winget install ForgeLabsSoft.DriveForge` since July 2026; each
+  release is a pull request adding one version folder, and the copy that was submitted now lives in this
+  repository instead of only in Microsoft's. It validates cleanly, and its hash was checked against the
+  binary the release build actually published rather than a local one.
 
 ### Under the hood
 - The write, verify, re-online and eject sequence now exists in exactly one place, and the parts that must

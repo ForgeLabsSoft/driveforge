@@ -60,7 +60,7 @@ unattended backup that runs when the drive is connected).
 
 Grab the latest **`DriveForge.exe`** from the [**Releases**](https://github.com/ForgeLabsSoft/driveforge/releases/latest) page — a single self-contained file, no install.
 
-Or, once the manifest is accepted into the Windows Package Manager:
+Or with the Windows Package Manager:
 
 ```
 winget install ForgeLabsSoft.DriveForge
