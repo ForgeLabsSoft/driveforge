@@ -1,0 +1,8 @@
+# forgelabssoft.com - DriveForge
+# Everything published here is meant to be found. Nothing is hidden, and there is
+# nothing to keep crawlers out of: the site is one page and a handful of images.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://forgelabssoft.com/sitemap.xml
