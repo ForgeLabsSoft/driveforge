@@ -272,4 +272,40 @@ public class PureLogicTests
 		Assert.DoesNotContain("..", result);
 		Assert.False(System.IO.Path.IsPathRooted(result), $"'{result}' is rooted — it would escape the output folder");
 	}
+
+	// ------------------------------------------------- DiskItem.IsLikelyUsbOrExternal
+
+	// The disk pickers are sorted so the DEFAULT selection is a drive it is safe to erase, and this property is
+	// what decides. Reached by reflection because DiskItem is a private nested record - see Mw's note on why the
+	// production code is not widened for tests.
+	private static bool IsExternal(string friendlyName, string busType)
+	{
+		Type t = typeof(DriveForge.MainWindow).GetNestedType("DiskItem",
+			System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+			?? throw new MissingMemberException("MainWindow.DiskItem not found");
+		object disk = Activator.CreateInstance(t, 0, friendlyName, busType, "SSD", "Healthy", "Online",
+			1_000_000_000L, "GPT", false, new System.Collections.Generic.List<char>())!;
+		return (bool)t.GetProperty("IsLikelyUsbOrExternal")!.GetValue(disk)!;
+	}
+
+	/// <summary>
+	/// REGRESSION: the machine's own internal drive must never rank as "external".
+	///
+	/// The test used to answer yes for anything on SATA and for any model name containing "SSD" - which is how
+	/// internal drives describe themselves. On the machine this was found on, that put the internal 954 GB NVMe
+	/// at the top of the list and pre-selected it for Create Windows USB, Clone, Restore, Format and Wipe.
+	/// </summary>
+	[Theory]
+	[InlineData("INTEL SSDPEKNU010TZ", "NVMe", false)]          // the measured case
+	[InlineData("Samsung SSD 970 EVO Plus", "NVMe", false)]
+	[InlineData("CT500MX500SSD1", "SATA", false)]
+	[InlineData("WDC WDS100T2B0A", "SATA", false)]
+	[InlineData("Msft Virtual Disk", "File Backed Virtual", false)]
+	[InlineData("SanDisk Extreme 55DD", "USB", true)]
+	[InlineData("SSK Port able SSD 256", "USB", true)]
+	[InlineData("Generic MassStorageClass", "SD", true)]
+	[InlineData("WD My Passport 25E2", "USB", true)]
+	[InlineData("Seagate External Drive", "SATA", true)]        // the name says so for itself
+	public void IsLikelyUsbOrExternal_OnlyCountsDrivesAttachedByCable(string name, string bus, bool expected) =>
+		Assert.Equal(expected, IsExternal(name, bus));
 }

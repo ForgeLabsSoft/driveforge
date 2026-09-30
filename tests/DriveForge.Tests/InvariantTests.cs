@@ -138,6 +138,9 @@ public class InvariantTests
 			"Window_Closing",
 			// Enter here runs chkdsk /r /x, which force-dismounts the volume and can relocate data into found.000.
 			"RunChkdskForSelectedDriveAsync",
+			// The raw image write erases the whole target, and until the duplicator was built NONE of its confirms
+			// was covered here - not even the one that names the disk it is about to wipe.
+			"WriteIsoImageFlowAsync", "WriteIsoImageToManyFlowAsync", "RunImageWriteQueueAsync",
 		};
 
 		var violations = new List<string>();
@@ -266,7 +269,9 @@ public class InvariantTests
 	[Fact]
 	public void DirectlyEnteredProgressFlowsZeroTheBar()
 	{
-		string[] directlyEntered = { "ResumeDeepScanAsync" };
+		// RunImageWriteQueueAsync is entered straight from two front ends and owns the bar for a whole run of
+		// drives; inheriting the previous operation's position would leave a batch of twenty starting at 100%.
+		string[] directlyEntered = { "ResumeDeepScanAsync", "RunImageWriteQueueAsync" };
 		var violations = new List<string>();
 
 		foreach (string target in directlyEntered)
@@ -334,5 +339,42 @@ public class InvariantTests
 			Diagnostic[] errors = root.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();
 			Assert.True(errors.Length == 0, $"{System.IO.Path.GetFileName(file)} failed to parse: {errors.FirstOrDefault()}");
 		}
+	}
+
+	/// <summary>
+	/// RULE 6 — nothing may run bcdboot.exe except the one helper that turns its failure into a sentence.
+	///
+	/// bcdboot reports failure as an exit code plus sixty lines of BFSVC trace. Five flows called it and only
+	/// ONE translated that: the other four — including BOTH restore paths, which is what someone runs standing in
+	/// front of a PC that no longer starts — surfaced "bcdboot.exe exited with code 1". The failure is not
+	/// hypothetical: on a machine whose antivirus refuses to mount a new boot store, bcdboot fails this way every
+	/// time, against a freshly formatted partition. The next flow that needs a bootloader will copy whichever
+	/// line it finds first, so make the wrong line impossible instead of hoping.
+	/// </summary>
+	[Fact]
+	public void BcdbootIsOnlyEverRunThroughTheHelperThatExplainsItsFailure()
+	{
+		var offenders = new List<string>();
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (InvocationExpressionSyntax call in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+			{
+				// A process launch naming bcdboot.exe as its executable argument.
+				bool launchesBcdboot = call.ArgumentList.Arguments.Any(a =>
+					a.Expression is LiteralExpressionSyntax lit
+					&& lit.Token.ValueText.Equals("bcdboot.exe", StringComparison.OrdinalIgnoreCase));
+				if (!launchesBcdboot) continue;
+				string owner = call.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault()?.Identifier.Text ?? "<none>";
+				if (owner != "RunBcdbootAsync")
+					offenders.Add($"{SourceModel.Where(file, call)} in {owner}()");
+			}
+
+		Assert.True(offenders.Count == 0,
+			"bcdboot.exe is launched outside RunBcdbootAsync, so this flow will report its failure as a raw exit "
+			+ "code and a BFSVC trace instead of saying the drive will not boot and why:" + Environment.NewLine
+			+ string.Join(Environment.NewLine, offenders));
+
+		// And the helper itself must still be there to route them through.
+		Assert.True(SourceModel.Methods().Any(m => m.Name == "RunBcdbootAsync"),
+			"RunBcdbootAsync is gone — every bootloader flow just lost its one explained failure path.");
 	}
 }

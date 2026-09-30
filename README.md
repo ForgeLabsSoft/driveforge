@@ -45,7 +45,7 @@ a drive doctor, in one portable exe** — free, offline, in 17 languages.
 - **Back up this PC to an image file (.wim)** — full or incremental restore points.
 - **Restore a saved image** back onto a drive.
 - **Recover deleted files** — undelete on NTFS / exFAT / FAT, plus a deep-scan "carving" mode that finds files even after the filesystem entry is gone.
-- **Bootable USB from any ISO** — write Linux or any disk-image ISO straight to a stick.
+- **Bootable USB from any ISO** — write Linux or any disk-image ISO straight to a stick, to one drive or to several in a row.
 - **Multi-boot USB** — put many ISOs on one stick and pick at boot (Ventoy).
 - **Securely erase a drive**, wipe free space, shred individual files, or clean usage traces.
 - **Partition tools** — create, delete, resize, move, convert (MBR ↔ GPT), set active, find lost partitions.
@@ -89,9 +89,9 @@ Grab the latest **`DriveForge.exe`** from the [**Releases**](https://github.com/
 
 ## How to use
 
-1. **Choose a task** (top-left dropdown).
+1. **Choose a task** from the list down the left-hand side.
 2. **Pick the source** (an ISO for installs; "this PC" for clones/backups).
-3. **Pick the target drive** — the colored verdict tells you if it's suitable. Your system disk is hidden so you can't pick it by mistake.
+3. **Pick the target drive** — the colored verdict tells you if it's suitable. The drive you are running Windows from is listed last and marked *RUNNING WINDOWS (no format/erase)*; every task that would erase a disk refuses it.
 4. (Optional) tick options in step 4 — hover any option for an explanation.
 5. Press the green button. When it finishes, boot the target PC and pick the drive from the boot menu (usually F12 / F9 / Esc / F2).
 
@@ -106,6 +106,14 @@ so you can turn protection back on — or reinstall it — afterward.
 
 This only happens on the clone path when a first-boot repair is needed (a *faithful* clone
 skips it), it is reversible, and **Windows Defender is left untouched**.
+
+There is a second, unrelated case: some security suites block Windows from mounting a registry
+hive out of an image at all. Everything that personalises a drive after it is written needs
+that — the portable-Windows flags, the Windows 11 requirement bypass, the local-account
+bypass, bloatware removal — and `bcdboot` needs it to create the boot record. DriveForge
+checks before it erases anything and tells you what will be missing if you carry on. If a
+drive comes out without those settings, or without a boot record, pausing that protection for
+a few minutes and running the task again is usually all it takes.
 
 ## License
 

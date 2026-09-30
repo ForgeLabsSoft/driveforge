@@ -205,7 +205,7 @@ public partial class MainWindow
 		"HelpButton", "SettingsButton", "VerifyIsoButton", "DiskBox", "EjectDriveButton",
 		"BypassRequirementsCheck", "BypassAccountCheck", "DebloatCheck", "AddNetworkDriversCheck",
 		"AddAllDriversCheck", "BitLockerCheck", "BitLockerResumeCheck", "DataPartitionCheck",
-		"CloneOtherPartitionsCheck", "VerifyContentCheck", "CompactImageCheck", "EjectWhenDoneCheck",
+		"CloneOtherPartitionsCheck", "VerifyContentCheck", "VerifyImageWriteCheck", "DuplicateToManyCheck", "CompactImageCheck", "EjectWhenDoneCheck",
 		"ScheduleCloneButton", "HealthToolButton", "SpeedToolButton", "ScanToolButton", "SurfaceToolButton",
 		"CapacityToolButton", "FormatToolButton", "PartitionToolButton", "TestBootToolButton",
 		"WipeToolButton", "ShredToolButton", "DiagDiskBox", "RecoverDeepScanButton", "RecoverMoreButton",
@@ -240,6 +240,7 @@ public partial class MainWindow
 		Set(FindName("NavCreate") as System.Windows.DependencyObject, "SbCreateT");
 		Set(FindName("NavClonePortable") as System.Windows.DependencyObject, "SbClonePT");
 		Set(FindName("NavCloneInternal") as System.Windows.DependencyObject, "SbCloneIT");
+		Set(FindName("NavExportVhdx") as System.Windows.DependencyObject, "TbExportVhdx");
 		Set(FindName("NavBackup") as System.Windows.DependencyObject, "SbBackupT");
 		Set(FindName("NavRestore") as System.Windows.DependencyObject, "SbRestoreT");
 		Set(FindName("NavLinux") as System.Windows.DependencyObject, "SbLinuxT");
@@ -281,6 +282,9 @@ public partial class MainWindow
 		// skips them and they kept the language they were written in at startup — the header stayed English in a
 		// fully German window, and the badge with it.
 		if (TaskTitleText != null) TaskTitleText.Text = LocalizedTaskTitle();
+		// The duplicator's two code-set labels. The button reuses the Recover panel's existing select-all pair
+		// rather than inventing a third translation of the same two words.
+		RefreshDupLabels();
 		UpdateAdminStatus();
 		// The stats row carries an English design-time default from the XAML that nothing overwrites until the first
 		// operation runs, so switching language on a freshly-started app left exactly one English line
@@ -346,6 +350,18 @@ public partial class MainWindow
 			DupesGrid.Columns[4].Header = L("AnModified");
 			DupesGrid.Columns[5].Header = L("AnSize");
 		}
+		// A RUNNING operation's progress row is written from code, so it has to follow the language like every other
+		// dynamic string - measured on screen: switching to Arabic mirrored the whole window and changed every label
+		// around a row still reading "Progress: ... | Elapsed: ... | Remaining: ..." in English.
+		//
+		// An IDLE row is deliberately left alone. The guarded write above already repaints it while it is still the
+		// untouched XAML default, which is the only idle case that needs it; once an operation has written the row,
+		// what is there may be a VERDICT - the clone and the image write put "Failed after hh:mm:ss" there after
+		// SetBusy(false) and clear stopRequested so nothing can wipe it, and a stopped surface test restores its
+		// partial bar so the row agrees with the "not a verdict either way" dialog. Blanking those to "0.0%" turns
+		// a failed run into an idle one, which is worse than a row whose labels are a language behind.
+		if (ProgressBar != null && isBusy) UpdateProgressStats();
+
 		// Recover "⋯ More" overflow menu items (ContextMenu is a separate namescope, so set by index).
 		if (RecoverMoreButton?.ContextMenu != null && RecoverMoreButton.ContextMenu.Items.Count >= 5)
 		{

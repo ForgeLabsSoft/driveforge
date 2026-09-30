@@ -335,6 +335,32 @@
               <Button Name="CheckDriveButton" Content="Check drive" MinWidth="104" Padding="10,0" Margin="8,0,0,0" Click="SpeedTest_Click" />
               <Button Name="EjectDriveButton" Content="Safely remove" MinWidth="116" Padding="10,0" Margin="8,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="EjectDrive_Click" ToolTip="Flush and eject the selected drive so you can unplug it safely (for USB / external drives)." />
             </StackPanel>
+            <CheckBox Name="VerifyImageWriteCheck" IsChecked="True" Visibility="Collapsed" Content="Check the drive after writing (slower, safer)" Foreground="{DynamicResource TextBrush}" Margin="0,6,0,0" ToolTip="Reads the image back off the drive and compares it byte for byte, to catch a bad or counterfeit stick. Roughly doubles the time." />
+            <CheckBox Name="EjectWhenDoneCheck" Content="Eject the drive when finished" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="When the operation completes, safely flush and eject the drive so you can unplug it right away. Skipped if BitLocker is still encrypting." />
+            <CheckBox Name="DuplicateToManyCheck" Content="Write this image to several drives, one after another" Foreground="{DynamicResource TextBrush}" Visibility="Collapsed" Margin="0,6,0,0" Checked="DuplicateToMany_Toggled" Unchecked="DuplicateToMany_Toggled" ToolTip="Writes the same image to each ticked drive in turn, off one hub." />
+            <StackPanel Name="DupTargetsBox" Visibility="Collapsed" Margin="0,4,0,0">
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,2">
+                <TextBlock Name="DupTargetsTitle" Text="Drives to write" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <Button Name="DupSelectAllButton" MinWidth="104" Height="26" Padding="10,0" Margin="12,0,0,0" Style="{StaticResource GhostButtonStyle}" Click="DupSelectAll_Click" />
+              </StackPanel>
+              <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl Name="DupTargetItems">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid Margin="0,3">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <CheckBox Grid.Column="0" IsChecked="{Binding IsChecked, Mode=TwoWay}" IsEnabled="{Binding Eligible}" VerticalAlignment="Top" Margin="0,1,8,0" />
+                        <StackPanel Grid.Column="1">
+                          <TextBlock Text="{Binding Row}" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}" />
+                          <TextBlock Text="{Binding Reason}" Visibility="{Binding ReasonVisibility}" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedBrush}" />
+                        </StackPanel>
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+              <TextBlock Name="DupTargetsSummaryText" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0" />
+            </StackPanel>
           </StackPanel>
         </Border>
         <Border Name="OptionsSection" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
@@ -352,7 +378,6 @@
             <CheckBox Name="CloneOtherPartitionsCheck" Content="Also clone the other data partitions from this PC's disk" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="If this PC's disk has other data partitions (e.g. a D: drive), copy them onto the target too, each into its own partition." />
             <CheckBox Name="VerifyContentCheck" Content="Verify cloned data after writing (slower, safer)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="After cloning, re-read every file from the drive and compare it to the original to catch a bad USB stick. Adds time; uncheck only if you trust the drive." />
             <CheckBox Name="CompactImageCheck" Content="Compact image (smaller on disk, slightly slower at runtime)" IsChecked="True" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Store Windows compressed so it takes less space on the drive. Saves space; apps open a hair slower. Good for smaller USB drives." />
-            <CheckBox Name="EjectWhenDoneCheck" Content="Eject the drive when finished" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="When the operation completes, safely flush and eject the drive so you can unplug it right away. Skipped if BitLocker is still encrypting." />
             <CheckBox Name="UseDismEngineCheck" Content="Use the Microsoft engine (DISM)" IsChecked="False" Foreground="{DynamicResource TextBrush}" Margin="0,3,0,0" ToolTip="Clone using Microsoft's own imaging (DISM / WIMGAPI) instead of the built-in engine. Antivirus does not scan its reads, so the clone stays fast even with real-time protection on, and it fits a target smaller than the source. It writes a temporary image to your system drive first (needs some free space) and takes two passes." />
             <CheckBox Name="UseNtfsRawEngineCheck" Content="Fast Clone" IsChecked="True" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" ToolTip="Clone by reading the file table straight off the snapshot (invisible to antivirus, no temporary image, fits a smaller target) and writing files directly to the target — preserving data, timestamps, permissions (ACLs), hardlinks, junctions/reparse points, alternate data streams and decompressing WOF/NTFS-compressed files. This is the default engine: fast and direct, with no temporary file. Uncheck it to clone with the Microsoft (DISM) engine instead." />
           </StackPanel>

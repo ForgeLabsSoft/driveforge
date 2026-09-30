@@ -1632,8 +1632,14 @@ public partial class MainWindow
 		foreach (var sub in Directory.GetDirectories(src)) CopyDirectory(sub, Path.Combine(destDir, Path.GetFileName(sub)));
 	}
 
-	private long RecoverOne(VolumeReader vr, DeletedFile f, NtfsScanResult g, string outPath)
+	// `allZero` is true when every byte that came back was zero. The file name, the size and the path can all
+	// survive in the file system's own records long after the drive has erased what they point at - an SSD does
+	// exactly that, within seconds, on TRIM. The read is faithful; there is simply nothing there. Without this
+	// the caller counted a full-length file of zeros as a clean recovery and told the user so.
+	private long RecoverOne(VolumeReader vr, DeletedFile f, NtfsScanResult g, string outPath, out bool allZero)
 	{
+		allZero = false;   // a real copy (Recycle Bin) and every early return keep this
+		bool sawData = false;
 		// Recycle Bin entry: the data still exists as a real $R file/folder — just copy it. Zero-risk recovery.
 		if (!string.IsNullOrEmpty(f.SourcePath))
 		{
@@ -1659,13 +1665,20 @@ public partial class MainWindow
 				byte[] data = vr.Read(off, chunk, out int got);
 				if (got <= 0) break;
 				outFs.Write(data, 0, got);
+				sawData |= AnyNonZero(data, got);
 				off += got; remaining -= got; wrote += got;
 				if (got < chunk) break; // reached end of source / unreadable region — don't invent zeros
 			}
+			allZero = wrote > 0 && !sawData;
 			return wrote;
 		}
 
-		if (f.Resident && f.ResidentData != null) { outFs.Write(f.ResidentData, 0, f.ResidentData.Length); return f.ResidentData.Length; }
+		if (f.Resident && f.ResidentData != null)
+		{
+			outFs.Write(f.ResidentData, 0, f.ResidentData.Length);
+			allZero = f.ResidentData.Length > 0 && !AnyNonZero(f.ResidentData, f.ResidentData.Length);
+			return f.ResidentData.Length;
+		}
 
 		if (f.ExFat)
 		{
@@ -1679,11 +1692,13 @@ public partial class MainWindow
 				byte[] data = vr.Read(g.DataAreaOffset + (cl - 2) * (long)clusterSize, chunk, out int got);
 				if (got <= 0) break;                 // unreadable / past the end of the volume — stop, never invent zeros
 				outFs.Write(data, 0, got);
+				sawData |= AnyNonZero(data, got);
 				remaining -= got;
 				if (got < chunk) break;              // short read — the rest of this cluster is unreadable
 				if (f.Contiguous) { cl++; }
 				else { long next = BitConverter.ToUInt32(vr.Read(g.FatOffset + cl * 4, 4), 0); if (next >= 0xFFFFFFF8 || next < 2) break; cl = next; }
 			}
+			allZero = (f.Size - remaining) > 0 && !sawData;
 			return f.Size - remaining;   // now reflects what was ACTUALLY written
 		}
 
@@ -1707,10 +1722,16 @@ public partial class MainWindow
 				byte[] data = vr.Read(off + pos, chunk, out int got);
 				if (got <= 0) { left = 0; break; }          // unreadable cluster — stop rather than zero-pad
 				outFs.Write(data, 0, got);
+				sawData |= AnyNonZero(data, got);
 				pos += got; take -= got; written += got; left -= got;
 				if (got < chunk) { left = 0; break; }
 			}
 		}
+		allZero = written > 0 && !sawData;
 		return written;
 	}
+
+	// Vectorised: IndexOfAnyExcept walks the span with SIMD, so this costs a fraction of the read it follows.
+	private static bool AnyNonZero(byte[] buffer, int length) =>
+		length > 0 && buffer.AsSpan(0, length).IndexOfAnyExcept((byte)0) >= 0;
 }

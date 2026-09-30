@@ -330,4 +330,151 @@ public class LocalizationTests
 		Assert.True(orphans.Count == 0,
 			"Named control whose text can never be translated:\n  " + string.Join("\n  ", orphans));
 	}
+
+	/// <summary>
+	/// Every sidebar nav button must have a screen-reader name.
+	///
+	/// Their content is a Grid holding an icon glyph and two TextBlocks, so WPF derives no name from it and a
+	/// screen reader announces a bare "button" - the whole sidebar reads as twelve identical buttons. The only
+	/// thing that names them is ApplyAccessibilityNames, and NavExportVhdx was the one button missing from that
+	/// list: found by reading the live UIA tree, invisible to everything else, and a one-line omission is exactly
+	/// the mistake the next button added to the sidebar will repeat.
+	/// </summary>
+	[Fact]
+	public void EverySidebarNavButtonHasAnAccessibilityName()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		string custom = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "UiCustomization.cs"));
+		HashSet<string> keys = Strings["en"].Keys.ToHashSet();
+
+		var names = Regex.Matches(xaml, @"<Button\s+Name=""(Nav[A-Za-z0-9_]+)""")
+			.Select(m => m.Groups[1].Value).Distinct().ToList();
+		Assert.True(names.Count >= 10, $"Expected the sidebar nav buttons in MainWindow.xaml; found {names.Count}.");
+
+		var unnamed = new List<string>();
+		foreach (string id in names)
+		{
+			Match set = Regex.Match(custom, @"Set\(FindName\(""" + Regex.Escape(id) + @"""\)[^;]*?,\s*""([A-Za-z0-9_]+)""\s*\)");
+			if (!set.Success) { unnamed.Add(id + " - no AutomationProperties.Name is ever set for it"); continue; }
+			if (!keys.Contains(set.Groups[1].Value))
+				unnamed.Add(id + " - named from \"" + set.Groups[1].Value + "\", which is not a string key");
+		}
+
+		Assert.True(unnamed.Count == 0,
+			"Sidebar nav button a screen reader cannot announce:\n  " + string.Join("\n  ", unnamed));
+	}
+
+	/// <summary>
+	/// No button built in code may carry an English caption typed into the source.
+	///
+	/// The three hand-built dialogs - the chooser, the action menu and the text prompt - are used about thirty
+	/// times between them, in front of picking which disk to erase, which partition operation to run and which
+	/// firmware to boot with. Their OK and Cancel were string literals, so in all seventeen languages the two
+	/// buttons that decide whether a drive is destroyed stayed in English. XAML captions are covered by the
+	/// orphan test above; this covers the ones that never appear in the XAML at all.
+	/// </summary>
+	[Fact]
+	public void NoButtonBuiltInCodeHasAHardCodedCaption()
+	{
+		string code = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		var offenders = new List<string>();
+		foreach (Match m in Regex.Matches(code, @"Content\s*=\s*""([^""]{2,})"""))
+		{
+			string text = m.Groups[1].Value;
+			// Glyph code points and single symbols are not language.
+			if (!Regex.IsMatch(text, "[A-Za-z]{2}")) continue;
+			int line = code.Take(m.Index).Count(c => c == '\n') + 1;
+			offenders.Add($"line {line}: Content = \"{text}\"");
+		}
+		Assert.True(offenders.Count == 0,
+			"Button caption typed into the source instead of coming from a string key:\n  " + string.Join("\n  ", offenders));
+	}
+
+	/// <summary>
+	/// No status line may be written in English from the code.
+	///
+	/// The XAML orphan test above only sees text that starts life in the XAML. These are assigned at runtime,
+	/// and five of them had been typed straight in: the whole visible state of the ISO downloader ("Downloading
+	/// x.iso - 1.2 GB / 4.0 GB (30%)", "Downloading to ...", "Saved: ...") and the line a clone shows for its
+	/// first several minutes ("Scanning Windows... 12.3 GiB indexed"). In a Romanian window the body of the
+	/// dialog was Romanian and the line underneath it was not.
+	/// </summary>
+	[Fact]
+	public void NoStatusLineIsWrittenInEnglishFromCode()
+	{
+		string code = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		var offenders = new List<string>();
+		// Any UI element whose name ends in Text or Hint, assigned a literal (plain or interpolated).
+		foreach (Match m in Regex.Matches(code, @"\b([A-Za-z0-9_]*(?:Text|Hint))\s*\.\s*Text\s*=\s*\$?""([^""]*)"""))
+		{
+			string value = m.Groups[2].Value;
+			// Only the LITERAL parts count. An interpolation hole holds C# identifiers - {diskItem.FriendlyName},
+			// {percent:F0} - which are not text anyone reads, and matching them flagged five lines whose visible
+			// output is "25-30 \u00b0C (14)" or "87%".
+			string literal = Regex.Replace(value, @"\{[^}]*\}", " ");
+			// Empty resets and pure punctuation/units are not language.
+			if (!Regex.IsMatch(literal, "[A-Za-z]{3}")) continue;
+			// An interpolation hole that IS a lookup (e.g. $"{L(\"Key\")} ...") is fine; a bare word is not.
+			if (value.Contains("L(\"")) continue;
+			int line = code.Take(m.Index).Count(c => c == '\n') + 1;
+			offenders.Add($"line {line}: {m.Groups[1].Value}.Text = \"{value}\"");
+		}
+		Assert.True(offenders.Count == 0,
+			"UI text typed into the source instead of coming from a string key:\n  " + string.Join("\n  ", offenders));
+	}
+
+	/// <summary>
+	/// Every language must be written in its OWN alphabet.
+	///
+	/// Found by review, then confirmed by sweeping all seventeen blocks: the Polish word <c>rosnąć</c> was
+	/// spelled with a CYRILLIC н (U+043D). It compiles, it passes key parity, it renders as a Polish word and it
+	/// is not one. Romanian had the mirror problem - six strings typed with the Turkish cedilla ş/ţ while the
+	/// other 627 use the comma-below ș/ț Romanian actually takes, several of them mixing both inside one
+	/// sentence. Both arrived through tooling that rewrites characters, which is why this is a rule and not a
+	/// one-off correction.
+	/// </summary>
+	[Fact]
+	public void EveryLanguageIsWrittenInItsOwnAlphabet()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "UiStrings.cs"));
+		var blocks = Regex.Matches(src, "\\[\"(\\w\\w)\"\\] = new\\(\\)").Cast<Match>().ToList();
+		Assert.True(blocks.Count == 17, $"expected 17 language blocks, found {blocks.Count}");
+
+		// Languages written in the Latin alphabet. A Cyrillic or Greek letter in one of these is a homoglyph.
+		var latin = new HashSet<string> { "en", "es", "fr", "de", "it", "pt", "nl", "pl", "tr", "id", "ro" };
+		var offenders = new List<string>();
+
+		for (int i = 0; i < blocks.Count; i++)
+		{
+			string lang = blocks[i].Groups[1].Value;
+			int start = blocks[i].Index;
+			int end = i + 1 < blocks.Count ? blocks[i + 1].Index : src.Length;
+			string block = src.Substring(start, end - start);
+
+			foreach (Match e in Regex.Matches(block, "\\[\"(\\w+)\"\\] = \"([^\"]*)\""))
+			{
+				string key = e.Groups[1].Value;
+				// These values are read from SOURCE, so a C# escape is still two characters. Blank them first:
+				// otherwise the 'n' of a \\n glues itself to the next word and every Cyrillic string in the file
+				// reads as mixed-script. That false positive fired 128 times while this check was being written.
+				string value = Regex.Replace(e.Groups[2].Value, @"\\.", " ");
+
+				if (latin.Contains(lang))
+				{
+					string wrong = new string(value.Where(c => (c >= '\u0400' && c <= '\u04FF')
+													  || (c >= '\u0370' && c <= '\u03FF')).Distinct().ToArray());
+					if (wrong.Length > 0)
+						offenders.Add($"[{lang}] {key}: Cyrillic/Greek letter(s) '{wrong}' inside a Latin-alphabet language");
+				}
+
+				// Romanian takes the comma-below ș/ț, never the Turkish cedilla ş/ţ. They look almost identical
+				// in most fonts, which is exactly why this has to be checked rather than seen.
+				if (lang == "ro" && value.IndexOfAny(new[] { '\u015f', '\u015e', '\u0163', '\u0162' }) >= 0)
+					offenders.Add($"[ro] {key}: Turkish cedilla ş/ţ where Romanian takes comma-below ș/ț");
+			}
+		}
+
+		Assert.True(offenders.Count == 0,
+			"Wrong-alphabet letter(s) in a language block:\n  " + string.Join("\n  ", offenders));
+	}
 }
