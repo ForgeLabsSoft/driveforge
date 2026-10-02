@@ -849,6 +849,11 @@ public partial class MainWindow : Window, IComponentConnector
 		// finding out at 80-86%, with the drive already erased, helps nobody. Ask now, while it is still theirs.
 		if (!await CanLoadOfflineRegistryAsync()) body += "\n\n" + L("HiveBlockedWarn");
 
+		// Same lesson, different feature. BitLocker is turned on at 96%, so a Windows Home owner could tick the box,
+		// wait out an hour of cloning, and only then be told that manage-bde refused with 0x8031005A - the one thing
+		// they asked for being the one thing their edition cannot do. Say it here, before anything is erased.
+		if (BitLockerCheck.IsChecked == true && !HostEditionCanTurnOnBitLocker()) body += "\n\n" + L("BitLockerEditionWarn");
+
 		if (MessageBox.Show(body, L("CoTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
 			return false;
 		// Last line of defence: make sure the drive at this number is still the exact one the user reviewed.
@@ -3891,8 +3896,9 @@ public partial class MainWindow : Window, IComponentConnector
 				catch (Exception blEx)
 				{
 					// A clone without encryption is still bootable, so this is not fatal — but the user asked for BitLocker
-					// and a recovery-key file was already written, so flag it into `ok` and warn in the dialog instead of
-					// reporting a plain success + safe-to-remove on an unencrypted stick.
+					// so flag it into `ok` and warn in the dialog instead of
+					// reporting a plain success. Note a recovery-key file exists only if the run got as far as `-on`: a
+					// failure at `-protectors -add` (what Windows Home does) throws before that file is written.
 					bitLockerRequestedButFailed = true;
 					Log("WARNING: BitLocker step failed on the clone: " + blEx.Message + " (the clone is still usable; encryption was NOT applied).");
 				}
@@ -6629,6 +6635,25 @@ exit 0
 		string combined = (outp + " " + err).Trim();
 		if (!string.IsNullOrWhiteSpace(combined)) Log("BitLocker password protector: " + combined);
 		return combined.Contains("PROTECTOR_OK", StringComparison.OrdinalIgnoreCase);
+	}
+
+	// Windows Home carries no BitLocker management, so manage-bde answers 0x8031005A (FVE_E_NO_FEATURE_LICENSE):
+	// "this version of Windows does not support this feature". Pro, Enterprise and Education do carry it.
+	//
+	// This answers WARN, not BLOCK. The whole test is one registry string, and a string lookup cannot know about
+	// an edition released after it was written; refusing to run on a false negative would be a worse failure than
+	// the late one this exists to prevent. Unreadable or unrecognised therefore means "let it try".
+	private static bool HostEditionCanTurnOnBitLocker()
+	{
+		try
+		{
+			using RegistryKey? key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+			string edition = key?.GetValue("EditionID") as string ?? "";
+			// Core, CoreN, CoreSingleLanguage, CoreCountrySpecific - the Home family, and only the Home family,
+			// starts with "Core". Professional*, Enterprise*, Education* and the server editions all have BitLocker.
+			return edition.Length == 0 || !edition.StartsWith("Core", StringComparison.OrdinalIgnoreCase);
+		}
+		catch { return true; }
 	}
 
 	private async Task EnableBitLockerAsync(char windowsLetter)
