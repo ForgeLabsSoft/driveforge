@@ -48,26 +48,29 @@ scoop install .\driveforge.json     # installs straight from the file
 scoop uninstall driveforge
 ```
 
-## Before submitting: Extras has an entry requirement, and we do not meet it yet
+## Where this stands, and the criterion worth knowing about
 
-Extras will not take a package just because the manifest is correct. A **package request issue** comes first,
-and that issue's template makes the criteria required checkboxes. The first one:
+[#18897](https://github.com/ScoopInstaller/Extras/pull/18897) is **open** since 2026-10-02. The bucket's own
+validation answered the `/verify` comment with seven green checks — Lint, Description, License, Hashes,
+Checkver, Autoupdate, Autoupdate Hash Extraction — and said *"Wait for review from human collaborators"*,
+labelling it `review-needed`.
+
+It also carries `package-request-needed`, whose description reads *"Create a package request issue before
+raising PR. Check the criteria for a package to be accepted."* Those criteria are required checkboxes in the
+package-request issue template, and the first is:
 
 > *Reasonably well-known and widely used (e.g. if it's a GitHub project, it should have at least
 > **100 stars and/or 50 forks**)*
 
-DriveForge is at 2 stars and 0 forks. The other two required boxes it does meet — English interface, latest
-stable version — but the first cannot be ticked honestly, and it gates the request.
+DriveForge is at 2 stars and 0 forks, so the criterion is real and unmet. Two things keep it from being a
+verdict. That label was applied by `coderabbitai`, a third-party AI reviewer, not by the maintainers' own
+tooling — which passed the PR. And no false claim was made anywhere: those checkboxes live in an issue that
+was never filed. A correct manifest, validated by their CI, is waiting on a human. That is the process.
 
-This was learned the slow way: [#18897](https://github.com/ScoopInstaller/Extras/pull/18897) was opened on
-2026-10-02 with a correct manifest, picked up `package-request-needed` within minutes, and was withdrawn. 52
-other open pull requests carry the same label, so this is the bucket's normal gate rather than bad luck. The
-format rules below were all verified and all beside the point; the criterion lives in the issue template, not
-in the contributing guide.
+52 other open pull requests carry the same label, so whatever answer comes back is worth having.
 
-**So the order is:** reach the threshold → open a package request issue → wait for it to be accepted → only
-then open the pull request. Not the other way round.
-
+**If it is declined on recognition**, the order for next time is: reach the threshold, open a package request
+issue, wait for it to be accepted, then open the pull request. The manifest here stays ready either way.
 ## Submitting
 
 One manifest per pull request. Title it exactly:
