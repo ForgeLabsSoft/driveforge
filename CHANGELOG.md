@@ -2,6 +2,33 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## Unreleased
+
+### Fixed
+- **BitLocker now says it cannot work on Windows Home *before* the clone starts, instead of at 96%.** Home
+  carries no BitLocker management: `manage-bde` refuses with `0x8031005A`, *FVE_E_NO_FEATURE_LICENSE* — "this
+  version of Windows does not support this feature of BitLocker Drive Encryption". Nothing in DriveForge had
+  ever looked at the Windows edition, so the tick was offered to everyone; a Home owner chose a folder for the
+  recovery key, waited out an entire clone, and was told at the end only that `manage-bde` had exited with a
+  code. The warning now appears in the confirmation dialog, beside the one that already checks whether a
+  security suite will block the offline registry — same lesson, same place, while the disk is still theirs.
+
+  It **warns and never blocks**. The whole test is one registry string, `EditionID`, and a string lookup cannot
+  know about an edition released after it was written, so unreadable, empty or unrecognised all mean *let it
+  try*. Only the Home family is recognised as unable — `Core`, `CoreN`, `CoreSingleLanguage` and
+  `CoreCountrySpecific`, which is all of it, and nothing outside that family begins with `Core`. Refusing to
+  run because a lookup failed would be a worse failure than the late one this replaces.
+
+  Translated into all seventeen languages, like every other message.
+
+### Under the hood
+- **Corrected a comment that was true for only one of the two ways the BitLocker step can fail.** It said a
+  recovery-key file had already been written. That holds when `-on` fails, but the Home failure happens one call
+  earlier, at `-protectors -add`, which throws before the file is created — the difference between an orphaned
+  key file for an unencrypted disk and no file at all. Nothing a user sees, but the next person to read that
+  catch block would have believed it.
+
+
 ## v4.4.0 — 2026-09-30
 
 ### Added
