@@ -48,6 +48,26 @@ scoop install .\driveforge.json     # installs straight from the file
 scoop uninstall driveforge
 ```
 
+## Before submitting: Extras has an entry requirement, and we do not meet it yet
+
+Extras will not take a package just because the manifest is correct. A **package request issue** comes first,
+and that issue's template makes the criteria required checkboxes. The first one:
+
+> *Reasonably well-known and widely used (e.g. if it's a GitHub project, it should have at least
+> **100 stars and/or 50 forks**)*
+
+DriveForge is at 2 stars and 0 forks. The other two required boxes it does meet — English interface, latest
+stable version — but the first cannot be ticked honestly, and it gates the request.
+
+This was learned the slow way: [#18897](https://github.com/ScoopInstaller/Extras/pull/18897) was opened on
+2026-10-02 with a correct manifest, picked up `package-request-needed` within minutes, and was withdrawn. 52
+other open pull requests carry the same label, so this is the bucket's normal gate rather than bad luck. The
+format rules below were all verified and all beside the point; the criterion lives in the issue template, not
+in the contributing guide.
+
+**So the order is:** reach the threshold → open a package request issue → wait for it to be accepted → only
+then open the pull request. Not the other way round.
+
 ## Submitting
 
 One manifest per pull request. Title it exactly:
