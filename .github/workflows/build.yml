@@ -25,6 +25,56 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
+      # A version tag is a claim about what the binary will say about itself, and nothing enforced it. The
+      # version is hand-written in Properties/AssemblyInfo.cs - GenerateAssemblyInfo is False, so the SDK
+      # generates none of it - which means tagging v4.5.0 without editing that file publishes an exe whose
+      # properties still read 4.4.0.0. That number is not cosmetic: it is what Explorer shows, what winget
+      # and Scoop report, and what every scanner prints in its file-version block, so the wrong one is wrong
+      # everywhere at once and cannot be corrected without re-cutting the release.
+      #
+      # Placed before the SDK and the tests on the same reasoning as the comment below: the job stops at the
+      # first red step, so a mismatched tag costs a few seconds here instead of a published release. The tag
+      # arrives through env rather than inline ${{ }} so its text is never pasted into the script body.
+      - name: Check the tag matches AssemblyInfo (on version tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $file = 'Properties/AssemblyInfo.cs'
+          $src = Get-Content $file -Raw
+          $tag = $env:TAG -replace '^v', ''
+
+          # AssemblyVersion and AssemblyFileVersion are four-part; a tag is normally three. Pad both to four
+          # so v4.4.0 and 4.4.0.0 compare equal, and drop any -rc/+build suffix before the numeric compare.
+          function Norm([string]$v) {
+            $p = @(($v -split '[-+]')[0].Split('.'))
+            while ($p.Count -lt 4) { $p += '0' }
+            ($p[0..3]) -join '.'
+          }
+          function Attr([string]$name) {
+            $m = [regex]::Match($src, "\[assembly:\s*$name\(""([^""]*)""\)\]")
+            if (-not $m.Success) { throw "$name not found in $file" }
+            $m.Groups[1].Value
+          }
+
+          $want = Norm $tag
+          $bad = @()
+          foreach ($a in 'AssemblyFileVersion', 'AssemblyVersion') {
+            $got = Attr $a
+            if ((Norm $got) -ne $want) { $bad += "$a is $got - the tag says $tag" }
+          }
+          # The informational version is the one humans read, so it must equal the tag exactly, suffix and
+          # all: v4.5.0-rc1 must not ship as plain 4.5.0.
+          $info = Attr 'AssemblyInformationalVersion'
+          if ($info -ne $tag) { $bad += "AssemblyInformationalVersion is $info - the tag says $tag" }
+
+          if ($bad.Count) {
+            $bad | ForEach-Object { Write-Host "::error::$_" }
+            throw "$file does not match tag $env:TAG. Edit it, commit, then move the tag onto that commit."
+          }
+          Write-Host "AssemblyInfo matches $($env:TAG): file=$(Attr 'AssemblyFileVersion') assembly=$(Attr 'AssemblyVersion') informational=$info"
+
       - name: Set up .NET 10 SDK
         uses: actions/setup-dotnet@v6
         with:

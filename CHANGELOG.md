@@ -28,6 +28,21 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   key file for an unencrypted disk and no file at all. Nothing a user sees, but the next person to read that
   catch block would have believed it.
 
+- **The release build now refuses to run when the tag and `AssemblyInfo.cs` disagree about the version.** The
+  version is written by hand in `Properties/AssemblyInfo.cs` - `GenerateAssemblyInfo` is `False`, so the SDK
+  generates none of it - and nothing ever checked it against the tag being built. Tagging `v4.5.0` without
+  editing that file would have published an executable whose properties still read `4.4.0.0`, which is the
+  number Explorer shows, the one winget and Scoop report, and the one every scanner prints in its file-version
+  block: wrong everywhere at once, and not correctable without cutting the release again.
+
+  The check compares the tag against `AssemblyFileVersion`, `AssemblyVersion` and
+  `AssemblyInformationalVersion`, and runs immediately after checkout - before the SDK is installed, before the
+  tests - on the same reasoning that already put the test step ahead of the build: the job stops at the first
+  red step, so a mistyped tag costs seconds instead of a published release. Three-part tags are padded to four
+  before the numeric comparison, and a pre-release suffix is stripped for it but required of the informational
+  version, so `v4.5.0-rc1` cannot ship as plain `4.5.0`. It only runs on a version tag; ordinary pushes and
+  pull requests have no tag to contradict.
+
 
 ## v4.4.0 — 2026-09-30
 
