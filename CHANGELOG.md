@@ -78,6 +78,33 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
 
 ### Fixed
+- **A healthy drive was reported as failing — but only in Chinese, Japanese and Hindi.** The same SSD, reporting
+  the same status, showed a green "good for a portable Windows drive" in English and a red "this drive reports
+  health problems — back up its data and consider replacing it" in those three. The drive was fine.
+
+  The cause: health was decided by searching the drive's *translated* health label for the English word "OK".
+  Fourteen languages leave "OK" inside the translation ("Stare: OK", "Zustand: OK"), so the search happened to
+  work. Exactly three translate it outright — 健康：正常, 状態: 正常, स्थिति: ठीक — and in those the search found
+  nothing and concluded the drive was bad. It was never a translation mistake; those three are the correct ones.
+
+  Health is now read from the status Windows itself reports, which is English in every locale, and the translated
+  label is used only for display. That also fixes everything else fed from the same source: the health card in
+  *Drive tools*, the SMART table's Health row, the replacement advice, and the failure prediction.
+
+  One of these reached disk. The health history that powers the "stable since / changed on" trend was storing the
+  translated label, so checking a drive in English and again in Japanese compared "Health: OK" against "状態: 正常"
+  and announced the drive had *degraded*, with a date. It now records the raw status. Existing history files stay
+  readable and produce no false alarm.
+
+  Worth stating plainly: nothing was ever blocked or put at risk. The gate that runs before a destructive
+  operation reads the raw status and always did, so no clone was prevented and no data was in danger — the damage
+  was bad advice, including advice to replace a healthy drive. Direction matters too: a genuinely failing drive
+  was still caught in all seventeen languages, because the raw status is interpolated into that label.
+
+  Found from a screenshot, held by tests: a sweep asserting the verdict is identical in all seventeen languages,
+  and a rule that fails the build if any decision is fed the translated label again. Six deliberate breakages were
+  tried against them, including restoring the original bug; all six were caught.
+
 - **Closed a way for an ordinary program to get its code run as Administrator.** DriveForge caches its clone
   engine, wimlib, under `%LocalAppData%\DriveForge\Tools\wimlib`, and anything running as the signed-in user
   can write there without any elevation at all. DriveForge itself is `requireAdministrator`, so when a clone or

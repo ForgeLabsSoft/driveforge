@@ -125,6 +125,17 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 		}
 
+		// The status exactly as Windows reports it - "Healthy"/"Warning"/"Unhealthy" from the storage layer, plus
+		// OperationalStatus ("OK", "Degraded", ...) - which is English whatever the interface language is.
+		//
+		// EVERY DECISION about this drive reads this. HealthText above is a TRANSLATED label and is for display only.
+		// Deciding from it is how a perfectly healthy drive came to be reported as failing in Chinese, Japanese and
+		// Hindi: those three translate the healthy label outright ("health: OK" -> "健康：正常"), so a check looking for
+		// the English word "OK" found none and concluded the drive was bad. The other fourteen languages happen to
+		// leave "OK" inside the translation, which is the only reason this went unnoticed - and exactly why no new
+		// translation may be trusted to keep it.
+		public string RawHealth => (HealthStatus + "/" + OperationalStatus).Trim('/');
+
 		public override string ToString()
 		{
 			string value = ((DriveLetters.Count == 0) ? L("DkNoLetter") : string.Join(", ", DriveLetters.Select((char letter) => letter + ":")));
@@ -2091,7 +2102,7 @@ public partial class MainWindow : Window, IComponentConnector
 			return;
 		}
 		DriveVerdictBorder.Visibility = Visibility.Visible;
-		bool healthy = IsHealthy(disk.HealthText);
+		bool healthy = IsHealthy(disk.RawHealth);
 		// The "slow for Windows To Go" warning only applies to portable use. For a normal internal install
 		// (or non-clone modes) the drive runs like any system disk, so don't show the WTG speed warning.
 		bool slow = NeedsStrongPerformanceWarning(disk) && ModeBox.SelectedIndex != ModeCloneInternal;
@@ -2230,7 +2241,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			SetToolOutput(report);
 			UpdateHealthVisuals(disk, report);
-			Log($"Health Disk {disk.Number}: {disk.HealthText}; status: {disk.OperationalStatus}; bus: {disk.BusType}; media: {disk.MediaType}");
+			Log($"Health Disk {disk.Number}: {disk.RawHealth}; status: {disk.OperationalStatus}; bus: {disk.BusType}; media: {disk.MediaType}");
 			await RefreshDisksAsync();
 			SetToolStatus(L("StHealthDone"));
 		}
@@ -6206,7 +6217,7 @@ exit 0
 		}
 		if (!string.Equals(disk.HealthStatus, "Healthy", StringComparison.OrdinalIgnoreCase) && !string.Equals(disk.HealthStatus, "Unknown", StringComparison.OrdinalIgnoreCase))
 		{
-			throw new InvalidOperationException("The selected drive health is not OK: " + disk.HealthText);
+			throw new InvalidOperationException("The selected drive health is not OK: " + disk.RawHealth);
 		}
 	}
 
@@ -7437,6 +7448,8 @@ exit 0
 	// unknown, red = bad. Shared so every path that renders the card (full report, placeholder, no-selection) agrees —
 	// the card is INSIDE the same border as ToolHealthText, so leaving a stale colour there produces a self-contradicting
 	// card such as a green box labelled "Unhealthy".
+	// Takes the RAW status (DiskItem.RawHealth). The words below are Windows' own and are English in every locale;
+	// matching them against a translated label painted healthy drives red in the languages that translate it.
 	private System.Windows.Media.Color HealthCardColor(string healthText)
 	{
 		string h = (healthText ?? "").ToLowerInvariant();
@@ -7501,10 +7514,10 @@ exit 0
 		if (HealthTrendBox != null) HealthTrendBox.Visibility = Visibility.Collapsed;
 		_trendSerial = "";
 		ToolDriveTitleText.Text = string.Format(L("DkRow"), disk.Number) + $" - {disk.FriendlyName}";
-		ToolHealthText.Text = LHealth(disk.HealthText);
+		ToolHealthText.Text = LHealth(disk.RawHealth);
 		// Recolour the card for THIS drive from its OS health label (no report yet, so no predictive escalation). Without
 		// this the previous drive's red/green verdict colour stays behind the freshly-updated label inside the same card.
-		HealthStatusCard.Background = new System.Windows.Media.SolidColorBrush(HealthCardColor(disk.HealthText));
+		HealthStatusCard.Background = new System.Windows.Media.SolidColorBrush(HealthCardColor(disk.RawHealth));
 		ToolTemperatureText.Text = "-- °C";
 		ToolFirmwareText.Text = L("DToolFwNotExposed");
 		ToolSerialText.Text = L("DToolSerByHealth");
@@ -7528,7 +7541,7 @@ exit 0
 	{
 		_diagDisk = disk; _diagReport = report;
 		ToolDriveTitleText.Text = string.Format(L("DkRow"), disk.Number) + $" - {disk.FriendlyName}";
-		ToolHealthText.Text = LHealth(disk.HealthText);
+		ToolHealthText.Text = LHealth(disk.RawHealth);
 		ToolTemperatureText.Text = ExtractReportValue(report, "Temperature") is string temperature && !string.IsNullOrWhiteSpace(temperature) ? temperature + " °C" : "-- °C";
 		ToolFirmwareText.Text = string.Format(L("DToolFwFmt"), ExtractReportValue(report, "FirmwareVersion", L("DToolNotExposed")));
 		ToolSerialText.Text = string.Format(L("DToolSerFmt"), ExtractReportValue(report, "SerialNumber", L("DToolNotExposed")));
@@ -7538,15 +7551,15 @@ exit 0
 		ToolRecommendationDetailText.Text = pred.Text + "\n" + BuildHealthRecommendation(disk);
 		SmartGrid.ItemsSource = BuildSmartRows(disk, report);
 		// Colour the Health Status card: green = good, amber = caution, red = bad, grey = unknown.
-		System.Windows.Media.Color card = HealthCardColor(disk.HealthText);
+		System.Windows.Media.Color card = HealthCardColor(disk.RawHealth);
 		// Escalate the card if the predictive verdict is worse than the OS health label (uncorrectable errors / high wear).
 		if (pred.Level == 2) card = System.Windows.Media.Color.FromRgb(180, 40, 40);
-		else if (pred.Level == 1 && IsHealthy(disk.HealthText)) card = System.Windows.Media.Color.FromRgb(180, 120, 10);
+		else if (pred.Level == 1 && IsHealthy(disk.RawHealth)) card = System.Windows.Media.Color.FromRgb(180, 120, 10);
 		HealthStatusCard.Background = new System.Windows.Media.SolidColorBrush(card);
 		if (recordTrend)
 		{
 			string trendSerial = ExtractReportValue(report, "SerialNumber", "");
-			HealthTrendText.Text = RecordHealthTrend(trendSerial, disk.HealthText ?? "", ToolTemperatureText.Text);
+			HealthTrendText.Text = RecordHealthTrend(trendSerial, disk.RawHealth, ToolTemperatureText.Text);
 			DrawHealthTrend(trendSerial);
 		}
 	}
@@ -7565,12 +7578,16 @@ exit 0
 		// return the "not present" sentinel and never actually escalate anything. Not attempted; the app already
 		// points users at a dedicated third-party SMART tool for attribute-level detail it doesn't have access to.
 		int wear = (int)Get("Wear"), temp = (int)Get("Temperature");
-		string h = (disk.HealthText ?? "").ToLowerInvariant();
-		// Require REAL reliability data before returning a confident verdict. DiskItem.HealthText is a computed property
-		// that is NEVER empty (it always starts with "Health: "), so including it here made anyData unconditionally true,
-		// turned the "not enough data" branch below into dead code, and let a drive that exposes NO counters at all — a
-		// USB bridge that hides SMART, say — be painted green with "No failure signs". A bad OS health label still counts
-		// as data (it alone is enough to say "replace"), but a good one no longer substitutes for counters we never read.
+		string h = disk.RawHealth.ToLowerInvariant();
+		// Require REAL reliability data before returning a confident verdict. This once read DiskItem.HealthText, a
+		// computed property that is NEVER empty (it always starts with "Health: "), so including it here made anyData
+		// unconditionally true, turned the "not enough data" branch below into dead code, and let a drive that exposes
+		// NO counters at all — a USB bridge that hides SMART, say — be painted green with "No failure signs". A bad OS
+		// health label still counts as data (it alone is enough to say "replace"), but a good one no longer substitutes
+		// for counters we never read.
+		//
+		// It reads the RAW status now, which keeps that property: a drive reporting no status at all gives an empty
+		// string here rather than a translated "Health: ..." sentence, so it correctly counts as no data.
 		bool badHealthLabel = h.Contains("unhealthy") || h.Contains("warn") || h.Contains("caution") || h.Contains("fail");
 		bool anyData = ruc >= 0 || wuc >= 0 || rtot >= 0 || wtot >= 0 || wear >= 0 || temp >= 0 || badHealthLabel;
 		var reasons = new List<string>();
@@ -7703,11 +7720,11 @@ exit 0
 
 	private IReadOnlyList<SmartRow> BuildSmartRows(DiskItem disk, string report)
 	{
-		bool healthy = IsHealthy(disk.HealthText);
+		bool healthy = IsHealthy(disk.RawHealth);
 		bool operOk = disk.OperationalStatus.Contains("OK", StringComparison.OrdinalIgnoreCase);
 		List<SmartRow> rows = new List<SmartRow>
 		{
-			new SmartRow("01", L("SmHealth"), LHealth(disk.HealthText), healthy ? L("SmStGood") : L("SmStCheck"), healthy ? "good" : "warn"),
+			new SmartRow("01", L("SmHealth"), LHealth(disk.RawHealth), healthy ? L("SmStGood") : L("SmStCheck"), healthy ? "good" : "warn"),
 			new SmartRow("02", L("SmOper"), disk.OperationalStatus, operOk ? L("SmStGood") : L("SmStInfo"), operOk ? "good" : "info"),
 			new SmartRow("03", L("SmBus"), disk.BusType, L("SmStInfo"), "info"),
 			new SmartRow("04", L("SmMedia"), disk.MediaType, L("SmStInfo"), "info"),
@@ -7747,17 +7764,23 @@ exit 0
 
 	private string BuildHealthRecommendation(DiskItem disk)
 	{
-		if (!IsHealthy(disk.HealthText))
+		if (!IsHealthy(disk.RawHealth))
 		{
 			return L("DHealthRecBad");
 		}
 		return L("DHealthRecOk");
 	}
 
-	// Localized health label for the prominent UI and the SMART table's Health Status value.
-	private string LHealth(string? healthText)
-		=> IsHealthy(healthText) ? L("DHlGood") : (string.IsNullOrWhiteSpace(healthText) ? L("DHlUnknown") : healthText);
+	// Localized health label for the prominent UI and the SMART table's Health Status value. Takes the RAW status
+	// and translates it for display - never the other way round. The bad branch formats the raw status through the
+	// same "Health: {0}" key DiskItem.HealthText uses, so the wording is unchanged.
+	private string LHealth(string? rawHealth)
+		=> IsHealthy(rawHealth) ? L("DHlGood")
+			: string.IsNullOrWhiteSpace(rawHealth) ? L("DHlUnknown")
+			: string.Format(L("DkHealth"), rawHealth);
 
+	// Takes the RAW status from DiskItem.RawHealth, never a translated label: the words matched below are the ones
+	// Windows itself reports, and they are English in every locale.
 	private static bool IsHealthy(string? healthText)
 	{
 		if (string.IsNullOrWhiteSpace(healthText)) return false;

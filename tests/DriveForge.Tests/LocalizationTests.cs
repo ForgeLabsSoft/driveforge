@@ -610,4 +610,67 @@ public class LocalizationTests
 		Assert.True(orphans.Length == 0,
 			"The dropdown offers languages with no translations behind them: " + string.Join(", ", orphans));
 	}
+
+	// ------------------------------------------------------------------ H. drive health must not depend on language
+	//
+	// A drive's health is a fact about the drive. It was being decided by searching the drive's *translated* health
+	// label for the English word "OK", so the three languages that translate that label outright - Chinese
+	// ("健康：正常"), Japanese ("状態: 正常") and Hindi ("स्थिति: ठीक") - reported a perfectly healthy drive as failing
+	// and advised replacing it. The other fourteen happen to leave "OK" inside the translation, which is the only
+	// reason it survived this long, and is exactly why no future translation may be trusted to keep it.
+
+	private static object NewDisk(string healthStatus, string operationalStatus) =>
+		Activator.CreateInstance(
+			Mw.Nested("DiskItem"),
+			4, "SSK Portable SSD 256", "USB", "SSD", healthStatus, operationalStatus,
+			238_500_000_000L, "GPT", false, new List<char> { 'X' });
+
+	private static string RawOf(object disk) =>
+		(string)Mw.Nested("DiskItem").GetProperty("RawHealth").GetValue(disk);
+
+	private static void UseLanguage(string code) =>
+		typeof(MainWindow)
+			.GetField("currentLanguage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+			.SetValue(null, code);
+
+	[Fact]
+	public void DriveHealthIsJudgedTheSameInEveryLanguage()
+	{
+		object healthy = NewDisk("Healthy", "OK");
+		object failing = NewDisk("Warning", "OK");
+		List<string> wrong = new List<string>();
+
+		try
+		{
+			foreach (string lang in Strings.Keys)
+			{
+				UseLanguage(lang);
+				if (!Mw.Call<bool>("IsHealthy", RawOf(healthy)))
+					wrong.Add($"{lang}: a healthy drive is reported as failing");
+				if (Mw.Call<bool>("IsHealthy", RawOf(failing)))
+					wrong.Add($"{lang}: a drive reporting Warning is reported as fine");
+			}
+		}
+		finally { UseLanguage("en"); }
+
+		Assert.True(wrong.Count == 0,
+			"The drive health verdict changes with the interface language:\n  " + string.Join("\n  ", wrong));
+	}
+
+	[Fact]
+	public void TheRawHealthStatusCarriesNoTranslatedText()
+	{
+		// Whatever the language, the string the decisions read is Windows' own wording.
+		try
+		{
+			foreach (string lang in Strings.Keys)
+			{
+				UseLanguage(lang);
+				Assert.Equal("Healthy/OK", RawOf(NewDisk("Healthy", "OK")));
+				Assert.Equal("Warning/OK", RawOf(NewDisk("Warning", "OK")));
+				Assert.Equal("Healthy", RawOf(NewDisk("Healthy", "")));
+			}
+		}
+		finally { UseLanguage("en"); }
+	}
 }

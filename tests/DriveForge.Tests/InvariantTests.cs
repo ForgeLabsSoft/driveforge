@@ -472,4 +472,35 @@ public class InvariantTests
 			"The verified clone engine is shared with writers, so it can be swapped between the hash check and " +
 			"CreateProcess. Only FileShare.Read belongs here.");
 	}
+
+	/// <summary>
+	/// A drive's health may never be decided from its translated label.
+	///
+	/// DiskItem exposes two things that look interchangeable: HealthText, a localized sentence for display, and
+	/// RawHealth, the status Windows itself reports. Passing the first to anything that DECIDES gave three languages
+	/// a red "this drive is failing, replace it" banner over a healthy drive, because the check hunts for English
+	/// words. Both still exist and still look alike at a call site, so the rule is enforced here rather than trusted.
+	/// </summary>
+	[Fact]
+	public void DriveHealthIsNeverDecidedFromTheTranslatedLabel()
+	{
+		string[] deciders = { "IsHealthy", "HealthCardColor", "RecordHealthTrend", "LHealth" };
+		List<string> problems = new List<string>();
+
+		foreach ((string file, SyntaxNode root) in SourceModel.Parsed)
+			foreach (string decider in deciders)
+				foreach (InvocationExpressionSyntax call in SourceModel.Calls(root, decider))
+					foreach (ArgumentSyntax arg in call.ArgumentList.Arguments)
+					{
+						string text = arg.ToString();
+						// ToolHealthText / HealthTrendText are UI controls, not the label.
+						if (!text.Contains("HealthText")) continue;
+						if (text.Contains("ToolHealthText") || text.Contains("HealthTrendText")) continue;
+						problems.Add($"{SourceModel.Where(file, call)}: {decider}({text}) decides from the TRANSLATED label - pass RawHealth.");
+					}
+
+		Assert.True(problems.Count == 0,
+			"Drive health is being decided from a translated string, so the verdict changes with the interface " +
+			"language:\n  " + string.Join("\n  ", problems));
+	}
 }
