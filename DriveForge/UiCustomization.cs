@@ -107,13 +107,27 @@ public partial class MainWindow
 			string osLang = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
 			if (Array.FindIndex(Languages, l => l.Code == osLang) >= 0) { savedLang = osLang; }
 		}
+		// Restoring saved settings is not a user choice, so nothing in here may write settings back.
+		//
+		// uiCustomizationReady used to go up BEFORE the line below, which defeated the only thing it is for. Setting
+		// SelectedIndex raises SelectionChanged synchronously, that handler calls SaveSettings, and it ran while the
+		// theme and accent were still the built-in dark blue - they are applied further down. So every start quietly
+		// overwrote the user's saved appearance with the defaults. The window still looked right for the rest of the
+		// session, because the correct values were applied to it a moment later; the loss only showed on the NEXT
+		// start. Any Light mode, accent or base colour therefore survived exactly one restart.
+		//
+		// The flag now means what it says - "the user is in control from here" - and goes up last. The language is
+		// applied explicitly, since the handler that used to do it is correctly suppressed during start-up.
 		int langIndex = Array.FindIndex(Languages, l => l.Code == savedLang);
-		uiCustomizationReady = true;
-		LanguageBox.SelectedIndex = langIndex >= 0 ? langIndex : 0;
+		int index = langIndex >= 0 ? langIndex : 0;
+		LanguageBox.SelectedIndex = index;
+		currentLanguage = Languages[index].Code;
+		ApplyLanguage(currentLanguage);
 		ApplyAppTheme(savedTheme, persist: false);
 		// Base-theme presets are dark variants — only apply them when not in Light mode.
 		if (!IsLightTheme(savedTheme) && !string.IsNullOrEmpty(savedBase)) { ApplyBaseTheme(HexToColor(savedBase!), persist: false); }
 		if (!string.IsNullOrEmpty(savedAccent)) { ApplyAccent(HexToColor(savedAccent!), persist: false); }
+		uiCustomizationReady = true;
 	}
 
 	private string currentThemeMode = "dark";

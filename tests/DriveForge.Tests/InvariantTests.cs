@@ -540,4 +540,37 @@ public class InvariantTests
 			$"The app opens on {mode} but lights {nav} in the sidebar; its own mapping says that task is {expected}. " +
 			"Startup would show one task with another highlighted.");
 	}
+
+	/// <summary>
+	/// The "the user is now in control" flag must be the LAST thing start-up does.
+	///
+	/// It exists to stop the language box's SelectionChanged handler - which SAVES SETTINGS - from firing while
+	/// start-up is still restoring them. It used to be raised one line too early, immediately before the selection
+	/// was assigned, so every launch saved the theme and accent while they were still the built-in defaults; the
+	/// real values were applied a few lines later. The window looked correct for that session and the file on disk
+	/// did not, so a user's Light mode, accent and base colour survived exactly one restart.
+	///
+	/// Measured before and after the fix by writing a non-default appearance into the settings file, starting the
+	/// app once and reading the file back: before, all three values came back as the defaults; after, unchanged.
+	///
+	/// Anything added to the end of that method lands AFTER the flag unless someone moves it, and this fails if
+	/// they do.
+	/// </summary>
+	[Fact]
+	public void TheUiCustomizationReadyFlagIsRaisedLast()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "InitializeUiCustomization").ToArray();
+		Assert.True(found.Length == 1, $"Expected exactly one InitializeUiCustomization, found {found.Length}.");
+
+		BlockSyntax body = found[0].Method.Body;
+		Assert.True(body != null, "InitializeUiCustomization has no block body to inspect.");
+		Assert.True(body.Statements.Count > 0, "InitializeUiCustomization is empty.");
+
+		string last = body.Statements[body.Statements.Count - 1].ToString();
+		Assert.True(last.Contains("uiCustomizationReady") && last.Contains("true"),
+			"uiCustomizationReady must be raised by the LAST statement of InitializeUiCustomization: until it is up, "
+			+ "the language box's SelectionChanged handler is suppressed, and that handler saves settings. Raise it "
+			+ "any earlier and start-up writes the defaults over the user's saved theme and accent, which then "
+			+ "survive exactly one restart.\n  The last statement is instead: " + last);
+	}
 }

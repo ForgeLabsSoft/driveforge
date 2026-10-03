@@ -94,6 +94,29 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
 
 ### Fixed
+- **Light mode, your accent colour and your base colour survived exactly one restart.** Pick them, and the window
+  looks right for the rest of the session — but the settings file on disk had already been overwritten with the
+  stock dark blue. The next launch came up with the defaults and no sign of why.
+
+  Start-up raises a flag meaning "the user is in control now", which exists to stop the language box's
+  selection-changed handler from running while saved settings are still being restored — because that handler saves
+  settings. The flag was being raised one line too early, immediately before the language was selected. So the
+  handler ran, saved, and read the theme and accent while they were still at their built-in values; the saved ones
+  were applied a few lines further down. The window therefore looked correct and the file did not, which is why
+  this never looked like a bug in the session where it happened.
+
+  The flag now goes up last, and the language is applied explicitly rather than as a side effect of a handler that
+  start-up ought to be suppressing.
+
+  Measured rather than reasoned: a non-default appearance (light theme, red accent, custom base) plus a Japanese
+  interface were written to the settings file, the app was started once and nothing was touched. Before the fix all
+  three appearance values came back as the defaults; after it, the file was unchanged and the window came up in
+  Japanese — the latter being the regression the fix could have caused, since the language used to be applied by
+  that same handler.
+
+  A test now requires the flag to be raised by the last statement of start-up, so anything added later cannot slip
+  in behind it.
+
 - **Sixteen languages were still describing an older, smaller version of the recovery tool.** *Recover deleted
   files* grew from NTFS-only to NTFS, exFAT and FAT, learned to read disk images, to list existing files as well as
   deleted ones, and to preview pictures — and stopped being merely "fast", since a deep scan is not. The English
