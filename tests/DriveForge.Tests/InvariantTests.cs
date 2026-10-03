@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -502,5 +504,40 @@ public class InvariantTests
 		Assert.True(problems.Count == 0,
 			"Drive health is being decided from a translated string, so the verdict changes with the interface " +
 			"language:\n  " + string.Join("\n  ", problems));
+	}
+
+	/// <summary>
+	/// The task the app opens on, and the sidebar entry highlighted beside it, must be the same task.
+	///
+	/// Startup sets both by hand, one statement after the other, while every LATER switch derives the highlight from
+	/// the selected task through one mapping. So the two can disagree at startup only - the window would open with
+	/// one task loaded and a different one lit in the sidebar. This reads the app's own mapping rather than pinning a
+	/// particular choice, so changing which task the app opens on stays a one-line change.
+	/// </summary>
+	[Fact]
+	public void TheStartupTaskAndTheHighlightedSidebarEntryAgree()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+
+		// The mapping the app uses everywhere else: `i == ModeX ? NavY`, plus the final `: NavZ` fallback.
+		Dictionary<string, string> map = Regex.Matches(src, @"i == (\w+) \? (Nav\w+)")
+			.Cast<Match>()
+			.ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value);
+		Assert.True(map.Count > 0, "Could not find the mode -> sidebar mapping in MainWindow.cs.");
+
+		Match start = Regex.Match(src, @"ModeBox\.SelectedIndex = (\w+);\s*(?:\r?\n\s*)*ShowWorkflowView\(\);\s*(?:\r?\n\s*)*HighlightNav\((Nav\w+)\);");
+		Assert.True(start.Success,
+			"Could not find the startup pair (ModeBox.SelectedIndex = ...; ShowWorkflowView(); HighlightNav(...);). " +
+			"If startup was restructured, update this test to match.");
+
+		string mode = start.Groups[1].Value, nav = start.Groups[2].Value;
+
+		// Several mode constants share a value (ModeCloneCurrentWindows and ModeExperimentalNtfsFullRootUsbClone are
+		// both 2), so an unmapped name means the fallback branch - which is NavClonePortable.
+		string expected = map.TryGetValue(mode, out string? n) ? n : "NavClonePortable";
+
+		Assert.True(nav == expected,
+			$"The app opens on {mode} but lights {nav} in the sidebar; its own mapping says that task is {expected}. " +
+			"Startup would show one task with another highlighted.");
 	}
 }

@@ -29,6 +29,22 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   two partitions of the same stick, and that mistake grows the file into its own source.
 
 ### Changed
+- **The app opens on *Create Windows USB* instead of a clone task.** It is the first task in the sidebar, the one
+  most people arrive for, and the only one that touches nothing until a file is chosen. The window used to open on
+  *Clone to USB / external drive*, which put "the selected disk will be formatted" under the cursor before anyone
+  had asked for it.
+
+  The sidebar order did not change - *Create Windows USB* was already first in the list, only the selection landed
+  elsewhere. Reordering the tasks would have moved the clone entry to the top, which is the opposite of the point,
+  and would have disturbed the task indices a good deal of logic keys off.
+
+  Startup sets the loaded task and the sidebar highlight as two separate statements, so they can disagree there and
+  nowhere else - every later switch derives the highlight from the task through one mapping. A test now reads that
+  mapping and requires the two startup statements to agree, so changing which task the app opens on stays a one-line
+  change that cannot silently leave the wrong entry lit.
+
+  *Remember the last task*, in Settings, still overrides this for anyone who turns it on.
+
 - **Two options now say what they do, instead of what one would like them to do.** Both were measured on real
   media before being rewritten: a Windows 11 26H2 install USB was built from Microsoft's own ISO (build 26300,
   SHA-256 checked against Microsoft's published table) and the resulting image's registry hives were read back.

@@ -406,9 +406,13 @@ public partial class MainWindow : Window, IComponentConnector
 		ModeBox.Items.Add("Clone This PC → internal disk (normal Windows install)");
 		ModeBox.Items.Add("Back up this PC to an image file (.wim)");
 		ModeBox.Items.Add("Create bootable USB from an ISO image (Linux / other)");
-		ModeBox.SelectedIndex = ModeExperimentalNtfsFullRootUsbClone;
+		// Open on "Create Windows USB": it is the first task in the sidebar, the one most people arrive for, and the
+		// only one that touches nothing until a file is chosen. Landing on a clone task instead put a destructive
+		// operation - "the selected disk will be formatted" - under the cursor before the user had asked for it.
+		// A user who prefers otherwise has Settings -> remember the last task, which overrides this below.
+		ModeBox.SelectedIndex = ModeInstallFromImage;
 		ShowWorkflowView();
-		HighlightNav(NavClonePortable);
+		HighlightNav(NavCreate);
 		// Rescue mode: when booted from a WinPE USB there is no running Windows to clone/back up, so hide those
 		// tasks and land on Drive tools.
 		if (IsRunningInWinPE())
