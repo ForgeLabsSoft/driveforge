@@ -28,6 +28,33 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   imaged compares **physical disks**, not drive letters — the letter check cannot see that `D:` and `E:` are
   two partitions of the same stick, and that mistake grows the file into its own source.
 
+### Changed
+- **Two options now say what they do, instead of what one would like them to do.** Both were measured on real
+  media before being rewritten: a Windows 11 26H2 install USB was built from Microsoft's own ISO (build 26300,
+  SHA-256 checked against Microsoft's published table) and the resulting image's registry hives were read back.
+  Every value both options claim to write was there. The problem was never that they do nothing; it is that what
+  they do is narrower than what they said.
+
+  *Remove bloatware (Copilot, Teams, ads, telemetry)* is now **Apply Microsoft's privacy policies (ads,
+  suggestions, telemetry)**. It writes eight group-policy values and removes no packages, so it was never going
+  to remove Copilot or Teams; and Microsoft documents several of those values as honoured only on Enterprise and
+  Education. The image written in that test came out as `EditionID=Core` - Home - which is the edition most of
+  these USBs become, and on it the advertising-ID and Start-web-search values apply while diagnostic data falls
+  back to *Required* rather than off. The Copilot value is a policy Microsoft has deprecated and does not govern
+  the packaged Copilot app. The new tooltip says all of that plainly rather than burying it.
+
+  *Bypass Windows 11 system requirements* keeps its name, because the name is accurate, but its tooltip no longer
+  claims it is what lets the drive run on an old PC. It said "Only matters for a fresh ISO install", which is
+  wrong twice over: this flow runs no Windows Setup at all (it applies `install.wim` directly with DISM), and an
+  already-installed Windows does not re-check TPM, Secure Boot or the CPU at boot - so the drive starts on
+  unsupported hardware whether the box is ticked or not. What the written `LabConfig` values are genuinely good
+  for is a later in-place upgrade of that Windows, which Setup *does* appraise. The tooltip now says that.
+
+  The progress line and the completion message moved with them: "Removing bloatware (Copilot, Teams, ads,
+  telemetry)" and "Bloatware & telemetry removal applied" became "Applying privacy policies" and "Privacy policy
+  settings written (several apply only to Enterprise and Education editions)". Five strings, seventeen languages.
+  Nothing about the behaviour changed - the same values are written as before.
+
 ### Fixed
 - **Closed a way for an ordinary program to get its code run as Administrator.** DriveForge caches its clone
   engine, wimlib, under `%LocalAppData%\DriveForge\Tools\wimlib`, and anything running as the signed-in user
