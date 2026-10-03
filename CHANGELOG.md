@@ -94,6 +94,25 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
 
 ### Fixed
+- **Changing language blanked the Drive tools card.** Open *Drive tools* and the selected drive's health reads
+  "Good". Switch language, come back, and it reads "Unknown" — for the same drive, with nothing else changed. It
+  stayed that way, too: the card only redraws when a *different* disk is picked, so the drive's health, name,
+  serial, firmware, interface, size and recommendation all stayed blank until you selected another drive or ran a
+  report.
+
+  The cause is a trap this codebase has now fallen into three times. Translation works by walking every string key,
+  looking for a control with that name, and writing the text into it. That is right for a fixed label and wrong for
+  anything showing a live reading — and seven controls on that card are both a control name and a string key, so
+  each was overwritten with its "Unknown" placeholder. The Pause buttons and the *Clean now* button had already
+  been fixed for exactly this; the card had not.
+
+  Changing language now redraws the card, which also brings back the cached SMART report and speed result in the
+  new language.
+
+  A test requires that redraw to happen after the translation pass, and to clear the "same disk as last time" guard
+  first — without which the redraw is skipped and the fix silently does nothing. All three ways of breaking it were
+  tried, including that one.
+
 - **Light mode, your accent colour and your base colour survived exactly one restart.** Pick them, and the window
   looks right for the rest of the session — but the settings file on disk had already been overwritten with the
   stock dark blue. The next launch came up with the defaults and no sign of why.

@@ -573,4 +573,40 @@ public class InvariantTests
 			+ "any earlier and start-up writes the defaults over the user's saved theme and accent, which then "
 			+ "survive exactly one restart.\n  The last statement is instead: " + last);
 	}
+
+	/// <summary>
+	/// Changing language must not wipe the Drive tools card.
+	///
+	/// ApplyLanguage walks every string key, calls FindName(key) and writes the static text into whatever control
+	/// has that name. Seven controls on that card — ToolHealthText, ToolDriveTitleText, ToolSerialText,
+	/// ToolFirmwareText, ToolInterfaceText, ToolSizeText, ToolRecommendationDetailText — are BOTH control names and
+	/// string keys, so the loop replaced the selected drive's real readings with the placeholders. Measured: health
+	/// read "Good", switching language turned it into "Unknown", and it stayed Unknown, because the card only
+	/// re-renders when the SELECTED DISK changes and it had not.
+	///
+	/// The repair is to clear that guard and re-render. This test exists because the same trap has now caught three
+	/// different controls (the Pause buttons, CleanRunButton, and this card), and each was found only by a person
+	/// noticing a wrong caption.
+	/// </summary>
+	[Fact]
+	public void ChangingLanguageReRendersTheDriveToolsCard()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "ApplyLanguage").ToArray();
+		Assert.True(found.Length == 1, $"Expected exactly one ApplyLanguage, found {found.Length}.");
+
+		string source = found[0].Method.ToString();
+		int loop = source.IndexOf("FindName(key)", StringComparison.Ordinal);
+		Assert.True(loop >= 0, "ApplyLanguage no longer looks like the FindName loop this rule reasons about.");
+
+		int guard = source.IndexOf("_lastOverviewDiskKey", StringComparison.Ordinal);
+		int rerender = source.IndexOf("UpdateDriveToolOverview()", StringComparison.Ordinal);
+
+		Assert.True(guard > loop && rerender > loop,
+			"ApplyLanguage must clear _lastOverviewDiskKey and call UpdateDriveToolOverview() AFTER the FindName "
+			+ "loop. Without it the loop leaves the Drive tools card showing \"Unknown\" for a drive whose health "
+			+ "it just read, and the card will not correct itself until a different disk is selected.");
+		Assert.True(rerender > guard,
+			"The guard must be cleared BEFORE UpdateDriveToolOverview() is called, or the overview sees the same "
+			+ "disk key as last time and returns without re-rendering anything.");
+	}
 }

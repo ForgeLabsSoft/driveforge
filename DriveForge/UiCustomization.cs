@@ -230,6 +230,17 @@ public partial class MainWindow
 		// CleanRunButton is BOTH a control name and a string key, so the loop above resets it to the static
 		// "Clean now" — throwing away the computed size ("Clean now — 4.2 GB") that Analyze put there.
 		RecomputeCleanTotal();
+		// The same trap, and it swallowed the whole Drive tools card. ToolHealthText, ToolDriveTitleText,
+		// ToolSerialText, ToolFirmwareText, ToolInterfaceText, ToolSizeText and ToolRecommendationDetailText are all
+		// control names AND string keys, so the loop above overwrote the selected drive's real readings with the
+		// static placeholders — "Unknown" where its health had been.
+		//
+		// Measured: open Drive tools (health reads "Good"), switch language, come back — "Unknown". And it stayed
+		// Unknown afterwards, because the overview only re-renders when the SELECTED DISK changes, which it had not.
+		// Clearing that guard forces the re-render, and it restores the cached SMART report and speed result in the
+		// new language too, since the overview already knows how to do both.
+		_lastOverviewDiskKey = "\0uninitialized";
+		UpdateDriveToolOverview();
 	}
 
 	// Localizes hover tooltips. ApplyLanguage only sets .Text/.Content/.Header, never .ToolTip, so the
