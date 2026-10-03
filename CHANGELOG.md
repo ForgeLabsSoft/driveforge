@@ -5,6 +5,40 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
 ## Unreleased
 
 ### Fixed
+- **Closed a way for an ordinary program to get its code run as Administrator.** DriveForge caches its clone
+  engine, wimlib, under `%LocalAppData%\DriveForge\Tools\wimlib`, and anything running as the signed-in user
+  can write there without any elevation at all. DriveForge itself is `requireAdministrator`, so when a clone or
+  a backup starts, it launches `wimlib-imagex.exe` out of that folder **elevated**. The integrity check that was
+  supposed to cover this ran once: it hashed the downloaded archive the first time the engine was unpacked, and
+  on every run after that the code simply took whatever executable it found in the folder and started it. A
+  program with no privileges could drop its own binary there, wait for the owner to clone a disk, and be running
+  as Administrator - and nothing would look wrong, because the check that passed had been about a file from
+  weeks earlier.
+
+  Hashing the executable on each run would not have been enough either. `wimlib-imagex.exe` imports
+  `libwim-15.dll`, and Windows resolves that import from the executable's own directory before it looks anywhere
+  else, so replacing the library alone buys exactly the same elevated execution while the executable still
+  matches its hash perfectly. Both files are now pinned by SHA-256 and both are verified **every** time the
+  engine is used.
+
+  Two further changes make that verification mean something. The engine is located at a fixed path instead of by
+  searching the folder tree for anything called `wimlib-imagex.exe` - that search returned the first match in
+  enumeration order, which is an order an attacker picks by choosing where to drop the file, so the check could
+  have been reading one executable while Windows started another. And each file is read through a handle opened
+  with `FileShare.Read`, which denies writes and deletes to everyone else and is held for the rest of the
+  session, closing the gap between "we hashed it" and "Windows executed it". That combination was measured, not
+  assumed: holding both handles that way does not stop the executable running or the library loading.
+
+  Anything that fails is not repaired in place. The folder is deleted whole and written again from the copy of
+  wimlib embedded in DriveForge itself, because a directory someone has tampered with may hold more than the two
+  files worth checking. Nothing about this is visible in normal use - an untouched installation verifies and
+  proceeds exactly as before.
+
+  Four tests cover it, each one confirmed to fail when the thing it guards is undone: the pinned hashes are
+  checked against the archive actually embedded in the app, so updating wimlib without re-pinning fails the
+  build rather than a user's clone; the library stays pinned beside the executable; the folder search cannot be
+  reinstated; and the share mode cannot be widened back to one that lets a writer in.
+
 - **BitLocker now says it cannot work on Windows Home *before* the clone starts, instead of at 96%.** Home
   carries no BitLocker management: `manage-bde` refuses with `0x8031005A`, *FVE_E_NO_FEATURE_LICENSE* — "this
   version of Windows does not support this feature of BitLocker Drive Encryption". Nothing in DriveForge had

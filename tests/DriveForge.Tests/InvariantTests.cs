@@ -377,4 +377,99 @@ public class InvariantTests
 		Assert.True(SourceModel.Methods().Any(m => m.Name == "RunBcdbootAsync"),
 			"RunBcdbootAsync is gone — every bootloader flow just lost its one explained failure path.");
 	}
+
+	/// <summary>
+	/// The clone engine is cached in %LOCALAPPDATA%, which anything running as this user can write, and DriveForge
+	/// starts it ELEVATED. Its two files are therefore pinned by SHA-256 in MainWindow.cs. This checks the pins
+	/// against the archive actually embedded in the app, so that bumping wimlib without re-pinning fails here
+	/// rather than on a user's machine, where the only symptom is a clone that refuses to start.
+	/// </summary>
+	[Fact]
+	public void CloneEnginePinsMatchTheEmbeddedArchive()
+	{
+		string zipPath = System.IO.Path.Combine(Mw.RepoRoot, "DriveForge", "Resources", "wimlib-1.14.4-windows-x86_64-bin.zip");
+		Assert.True(System.IO.File.Exists(zipPath), $"The embedded clone engine archive is missing: {zipPath}");
+
+		string source = System.IO.File.ReadAllText(System.IO.Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		using var archive = System.IO.Compression.ZipFile.OpenRead(zipPath);
+
+		foreach ((string constant, string entryName) in new[]
+		{
+			("WimlibImagexSha256", "wimlib-imagex.exe"),
+			("WimlibDllSha256", "libwim-15.dll"),
+		})
+		{
+			var match = System.Text.RegularExpressions.Regex.Match(
+				source, constant + @"\s*=\s*""([0-9A-Fa-f]{64})""");
+			Assert.True(match.Success, $"{constant} is gone from MainWindow.cs, or is no longer a 64-character SHA-256.");
+
+			var entry = archive.GetEntry(entryName);
+			Assert.True(entry != null, $"{entryName} is not at the root of the embedded archive any more.");
+
+			string actual;
+			using (var stream = entry!.Open())
+			using (var sha = System.Security.Cryptography.SHA256.Create())
+			{
+				actual = Convert.ToHexString(sha.ComputeHash(stream));
+			}
+
+			Assert.True(string.Equals(actual, match.Groups[1].Value, StringComparison.OrdinalIgnoreCase),
+				$"{constant} does not match {entryName} in the embedded archive." + Environment.NewLine +
+				$"  pinned: {match.Groups[1].Value}" + Environment.NewLine +
+				$"  actual: {actual}" + Environment.NewLine +
+				"If wimlib was deliberately updated, re-pin both constants; never relax the check.");
+		}
+	}
+
+	/// <summary>
+	/// libwim-15.dll must stay pinned alongside the exe. wimlib-imagex.exe imports it, and Windows resolves an
+	/// import from the executable's own directory first, so a check covering only the exe leaves an elevated code
+	/// path open with nothing visibly wrong: the exe still matches its hash while the library beside it does not.
+	/// </summary>
+	[Fact]
+	public void CloneEngineVerifiesItsLibraryAndNotOnlyItsExecutable()
+	{
+		string source = System.IO.File.ReadAllText(System.IO.Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		Assert.Contains("WimlibDllSha256", source);
+		Assert.Contains("libwim-15.dll", source);
+	}
+
+	/// <summary>
+	/// The engine must be found at a fixed path, never by scanning the cache folder for anything named
+	/// wimlib-imagex.exe. That scan returned the first match in enumeration order, an order an attacker chooses by
+	/// picking where to drop the file, and it is how an unprivileged program could get its own binary run as
+	/// Administrator. Path.Combine only, so there is exactly one file the hash check can be talking about.
+	/// </summary>
+	[Fact]
+	public void CloneEngineIsNeverLocatedByScanningItsFolder()
+	{
+		var method = SourceModel.Methods().FirstOrDefault(m => m.Name == "EnsureWimlibAsync");
+		Assert.True(method.Method != null, "EnsureWimlibAsync is gone, and the clone engine's integrity check with it.");
+
+		string body = method.Method.ToFullString();
+		Assert.False(body.Contains("AllDirectories"),
+			"EnsureWimlibAsync is scanning the tool folder again. Locate the engine with Path.Combine on a fixed " +
+			"name, or the hash check guards one file while Windows executes another.");
+		Assert.False(body.Contains("GetFiles("),
+			"EnsureWimlibAsync is enumerating files to find the engine again. Use the fixed path.");
+	}
+
+	/// <summary>
+	/// Verification has to read the file through a handle that denies writes and deletes, and that handle has to
+	/// outlive the check - otherwise there is a gap between hashing the file and Windows executing it, which is the
+	/// whole thing the pinning is for. FileShare.Read closes that gap; FileShare.ReadWrite would reopen it.
+	/// </summary>
+	[Fact]
+	public void CloneEngineIsHeldAgainstModificationWhileItIsTrusted()
+	{
+		var method = SourceModel.Methods().FirstOrDefault(m => m.Name == "TryLockVerifiedWimlib");
+		Assert.True(method.Method != null,
+			"TryLockVerifiedWimlib is gone, so nothing holds the verified clone engine against replacement.");
+
+		string body = method.Method.ToFullString();
+		Assert.Contains("FileShare.Read", body);
+		Assert.False(body.Contains("FileShare.ReadWrite") || body.Contains("FileShare.Write"),
+			"The verified clone engine is shared with writers, so it can be swapped between the hash check and " +
+			"CreateProcess. Only FileShare.Read belongs here.");
+	}
 }

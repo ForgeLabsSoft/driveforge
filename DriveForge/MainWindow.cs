@@ -5567,15 +5567,55 @@ exit 0
 		Log($"Full clone restored to PhysicalDrive{disk.Number} — {partCount} partition(s) present after restore.");
 	}
 
+	// wimlib is cached under %LOCALAPPDATA%, which every program running as this user can write to - and DriveForge
+	// is requireAdministrator, so it starts wimlib-imagex.exe ELEVATED. The old code hashed the zip once, on the
+	// first extraction, and from then on handed back whatever exe it found in that folder without ever looking at it
+	// again. A program with no privileges at all could drop its own binary there and wait for the next clone to run
+	// it as Administrator.
+	//
+	// Hashing only the exe would not have closed it either: wimlib-imagex.exe imports libwim-15.dll, Windows
+	// resolves that from the exe's own directory before anywhere else, and replacing the DLL alone buys the same
+	// elevated execution with the exe left untouched and still matching. Both files are therefore pinned, and both
+	// are checked on EVERY call, at fixed paths rather than by searching the tree for anything named
+	// wimlib-imagex.exe - that search returned the first match in enumeration order, which an attacker chooses.
+	//
+	// The check reads each file through a handle opened with FileShare.Read, which denies writes and deletes to
+	// everyone else, and those handles stay open for the rest of the session. That is what makes the answer still
+	// true by the time CreateProcess opens the file: without it there is a gap between "we hashed it" and "Windows
+	// executed it", and the whole point of the fix is that no such gap exists. Measured, because it is not obvious:
+	// holding both handles this way does NOT stop the exe running or the DLL loading.
+	//
+	// Anything that fails the check is not repaired in place. The folder is deleted whole and laid down again from
+	// the copy embedded in this executable, because a directory someone has tampered with may hold more than the two
+	// files we know to look at.
+	private const string WimlibImagexSha256 = "401BF99D6DEC2B749B464183F71D146327AE0856A968C309955F71A0C398A348";
+	private const string WimlibDllSha256 = "6480B53D4ECD4423AF9E100FE15E3D2C3D114EFF33FBA07977E46C1AB124342E";
+	private FileStream? wimlibExeHandle;
+	private FileStream? wimlibDllHandle;
+	private string? wimlibVerifiedPath;
+
 	private async Task<string> EnsureWimlibAsync()
 	{
 		string toolRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge", "Tools", "wimlib");
-		string exePath = Directory.Exists(toolRoot)
-			? Directory.GetFiles(toolRoot, "wimlib-imagex.exe", SearchOption.AllDirectories).FirstOrDefault()
-			: null;
-		if (!string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath))
+		string exePath = Path.Combine(toolRoot, "wimlib-imagex.exe");
+		string dllPath = Path.Combine(toolRoot, "libwim-15.dll");
+
+		// Verified earlier in this session AND still held open, so it cannot have changed since. No re-hash needed:
+		// the handles are the guarantee, not the memory of having checked.
+		if (wimlibVerifiedPath != null && wimlibExeHandle != null && wimlibDllHandle != null) return wimlibVerifiedPath;
+
+		if (TryLockVerifiedWimlib(exePath, dllPath))
 		{
-			return exePath;
+			Log("Clone engine verified against its pinned SHA-256 and locked against modification.");
+			return wimlibVerifiedPath!;
+		}
+
+		// Missing, incomplete, or not what we shipped. Start again from nothing.
+		ReleaseWimlibHandles();
+		if (Directory.Exists(toolRoot))
+		{
+			Log("Cached clone engine failed its integrity check - discarding it and extracting a fresh copy.");
+			TryDeleteDirectory(toolRoot);
 		}
 		Directory.CreateDirectory(toolRoot);
 		string zipPath = Path.Combine(toolRoot, "wimlib.zip");
@@ -5617,13 +5657,67 @@ exit 0
 		}
 		Log("Clone engine integrity verified (SHA-256 matches the official wimlib 1.14.4 build).");
 		ZipFile.ExtractToDirectory(zipPath, toolRoot, overwriteFiles: true);
-		exePath = Directory.GetFiles(toolRoot, "wimlib-imagex.exe", SearchOption.AllDirectories).FirstOrDefault();
-		if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+		if (!TryLockVerifiedWimlib(exePath, dllPath))
 		{
-			throw new FileNotFoundException("Could not prepare the streaming clone engine.");
+			throw new FileNotFoundException(
+				"Could not prepare the streaming clone engine: the files extracted from the verified archive did not " +
+				"match their expected SHA-256. Something is modifying " + toolRoot + " while DriveForge is using it.");
 		}
-		Log("Streaming clone engine prepared: " + exePath);
-		return exePath;
+		Log("Streaming clone engine prepared and locked: " + wimlibVerifiedPath);
+		return wimlibVerifiedPath!;
+	}
+
+	// Opens both files denying write and delete to everyone else, hashes them THROUGH those same handles, and keeps
+	// the handles only if both match. Reading through the locked handle is the point: a separate File.ReadAllBytes
+	// would hash one copy of the file and execute whatever happened to be there afterwards.
+	//
+	// A failure here is never an error to report - it only means "not the copy we shipped", whether because the file
+	// is absent, truncated, replaced, or held open for writing by someone else. Every one of those is answered the
+	// same way, by throwing the folder away and extracting again.
+	private bool TryLockVerifiedWimlib(string exePath, string dllPath)
+	{
+		FileStream? exe = null;
+		FileStream? dll = null;
+		try
+		{
+			if (!File.Exists(exePath) || !File.Exists(dllPath)) return false;
+			exe = new FileStream(exePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+			dll = new FileStream(dllPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+			if (!FileHashMatches(exe, WimlibImagexSha256)) return false;
+			if (!FileHashMatches(dll, WimlibDllSha256)) return false;
+			ReleaseWimlibHandles();
+			wimlibExeHandle = exe;
+			wimlibDllHandle = dll;
+			wimlibVerifiedPath = exePath;
+			exe = null;
+			dll = null;
+			return true;
+		}
+		catch (IOException) { return false; }
+		catch (UnauthorizedAccessException) { return false; }
+		finally
+		{
+			exe?.Dispose();
+			dll?.Dispose();
+		}
+	}
+
+	private static bool FileHashMatches(FileStream stream, string expectedSha256)
+	{
+		stream.Position = 0L;
+		using var sha = System.Security.Cryptography.SHA256.Create();
+		string actual = Convert.ToHexString(sha.ComputeHash(stream));
+		stream.Position = 0L;
+		return string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private void ReleaseWimlibHandles()
+	{
+		wimlibExeHandle?.Dispose();
+		wimlibDllHandle?.Dispose();
+		wimlibExeHandle = null;
+		wimlibDllHandle = null;
+		wimlibVerifiedPath = null;
 	}
 
 	private async Task StreamCloneWithWimlibAsync(string wimlibPath, string sourceRoot, char windowsLetter, string configPath)
