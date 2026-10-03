@@ -673,4 +673,53 @@ public class LocalizationTests
 		}
 		finally { UseLanguage("en"); }
 	}
+
+	// ------------------------------------------------------------------ I. translations that fell behind the English
+
+	/// <summary>
+	/// A translation may be worded freely, but it cannot quietly describe an OLDER version of the feature.
+	///
+	/// This is the failure that produced it: the recovery tool grew from NTFS-only to NTFS/exFAT/FAT, gained disk
+	/// images, existing files and image preview, and stopped being merely "fast". The English said so. All sixteen
+	/// other languages still advertised "recover files from a drive (NTFS)" - so a Romanian user with an exFAT stick
+	/// was told, by the app, that it was not supported. Nothing caught it: the key existed, was non-empty and had no
+	/// placeholder mismatch, which is all the other tests here check.
+	///
+	/// The detector: some names are identifiers, not words, and are never translated in any language. If the English
+	/// value names one and the translation does not, the translation almost certainly predates an edit to the English.
+	///
+	/// Deliberately NOT listed: "Secure Boot", "Windows To Go", "Trusted Platform Module". Those genuinely are
+	/// translated - sicherer Start, demarrage securise, (Japanese katakana) - and flagging them would teach everyone
+	/// to ignore this test, which is how a rule stops being a rule.
+	///
+	/// Comparison is case-SENSITIVE, which is what separates S.M.A.R.T. from the ordinary word in "Smart clean".
+	/// </summary>
+	[Fact]
+	public void TranslationsKeepTheTechnicalNamesTheEnglishUses()
+	{
+		string[] identifiers = { "NTFS", "exFAT", "FAT32", "BitLocker", "DISM", "VHDX", "Hyper-V", "TPM", "ReFS", "WinPE" };
+		List<string> stale = new List<string>();
+
+		foreach (KeyValuePair<string, string> entry in Strings[Base])
+		{
+			string[] named = identifiers.Where(id => entry.Value.Contains(id, StringComparison.Ordinal)).ToArray();
+			if (named.Length == 0) continue;
+
+			foreach (string lang in OtherLanguages)
+			{
+				// A missing key is a different defect, and AllKeysExistInEveryLanguage already reports it.
+				if (!Strings[lang].TryGetValue(entry.Key, out string? translated)) continue;
+
+				string[] lost = named.Where(id => !translated.Contains(id, StringComparison.Ordinal)).ToArray();
+				if (lost.Length > 0)
+					stale.Add($"{lang}/{entry.Key}: the English names {string.Join(", ", lost)}, the translation does not."
+						+ $"\n      en: {entry.Value}\n      {lang}: {translated}");
+			}
+		}
+
+		Assert.True(stale.Count == 0,
+			"These translations look like they describe an older version of the feature than the English does "
+			+ "(if a term here is genuinely translated in that language, add it to the exclusions above rather "
+			+ "than loosening the rule):\n  " + string.Join("\n  ", stale));
+	}
 }

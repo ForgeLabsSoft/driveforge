@@ -94,6 +94,26 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
 
 ### Fixed
+- **Sixteen languages were still describing an older, smaller version of the recovery tool.** *Recover deleted
+  files* grew from NTFS-only to NTFS, exFAT and FAT, learned to read disk images, to list existing files as well as
+  deleted ones, and to preview pictures — and stopped being merely "fast", since a deep scan is not. The English
+  text was updated. The other sixteen were not, so they still read "recover files from a drive (NTFS)" and promised
+  a "fast, read-only scan".
+
+  The effect was to understate the program to almost everyone who uses it: someone running the Romanian, German or
+  Japanese interface with an exFAT stick was told by the app itself that it was not supported. Both strings — the
+  sidebar subtitle and the panel description — are now rewritten in all sixteen.
+
+  Nothing caught this, and that is the more interesting half. Every existing check passes on a stale translation:
+  the key is present, non-empty, placeholder-compatible and in the right alphabet. So a new test looks for the one
+  thing a translation cannot change — the identifiers that are never translated in any language (NTFS, exFAT,
+  BitLocker, DISM, VHDX, TPM and so on). If the English names one and the translation does not, the translation
+  almost certainly predates an edit to the English. It checks 864 values across 54 keys today.
+
+  The list deliberately leaves out *Secure Boot*, *Windows To Go* and *Trusted Platform Module*: those really are
+  translated (sicherer Start, démarrage sécurisé, セキュア ブート), and a rule that cries wolf gets ignored. The
+  comparison is case-sensitive, which is what tells S.M.A.R.T. apart from the ordinary word in "Smart clean".
+
 - **A healthy drive was reported as failing — but only in Chinese, Japanese and Hindi.** The same SSD, reporting
   the same status, showed a green "good for a portable Windows drive" in English and a red "this drive reports
   health problems — back up its data and consider replacing it" in those three. The drive was fine.
