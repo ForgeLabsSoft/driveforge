@@ -781,6 +781,7 @@
                     <Button.ContextMenu>
                       <ContextMenu>
                         <MenuItem Header="Create disk image…" Click="CreateImage_Click" />
+                        <MenuItem Header="Create image of the whole drive…" Click="CreateWholeDiskImage_Click" />
                         <MenuItem Header="Open image…" Click="OpenImage_Click" />
                         <Separator />
                         <MenuItem Header="Save session…" Click="RecoverSaveSession_Click" />

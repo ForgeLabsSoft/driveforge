@@ -4,6 +4,30 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
 
 ## Unreleased
 
+### Added
+- **Image a whole drive, not just one partition of it — which makes DriveForge a duplicator.** *Recover → ⋯
+  → Create image of the whole drive…* reads a physical drive end to end, first sector to last, into a `.img`.
+  The image that comes out goes straight back in through *Create bootable USB from a disk image* with *Write
+  this image to several drives* ticked, so one stick becomes a batch of identical copies without any duplicator
+  hardware.
+
+  The existing *Create disk image* was never going to do this, and the difference is not obvious from the
+  outside: it images a **volume**, which is right for recovery — you freeze one partition and carve from the
+  copy instead of the drive — but a volume image holds that partition's bytes and nothing else. Write it to a
+  stick and you get the files back and a drive that will not boot, because the partition table and the boot
+  sector were never in the image. Reading the physical drive takes those too.
+
+  It reuses the machinery that was already there rather than adding a second copy of it: the same reader, which
+  already aligns every access to 4096 bytes as a raw device demands; the same response to a bad block, which
+  retries it sector by sector, zero-fills only the sectors that genuinely fail, and reports how many — so an
+  image that is partly fiction says so, on a stopped run as well as a finished one.
+
+  Two checks are stricter than the volume version's, because the mistakes are worse. The size comes from the
+  **device**, not from the volume: a stick with one 8 GB partition on a 16 GB device would otherwise be imaged
+  half-way and every copy truncated mid-filesystem. And the refusal to write the image onto the drive being
+  imaged compares **physical disks**, not drive letters — the letter check cannot see that `D:` and `E:` are
+  two partitions of the same stick, and that mistake grows the file into its own source.
+
 ### Fixed
 - **Closed a way for an ordinary program to get its code run as Administrator.** DriveForge caches its clone
   engine, wimlib, under `%LocalAppData%\DriveForge\Tools\wimlib`, and anything running as the signed-in user

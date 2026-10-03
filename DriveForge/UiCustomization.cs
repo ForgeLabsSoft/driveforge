@@ -363,12 +363,13 @@ public partial class MainWindow
 		if (ProgressBar != null && isBusy) UpdateProgressStats();
 
 		// Recover "⋯ More" overflow menu items (ContextMenu is a separate namescope, so set by index).
-		if (RecoverMoreButton?.ContextMenu != null && RecoverMoreButton.ContextMenu.Items.Count >= 5)
+		if (RecoverMoreButton?.ContextMenu != null && RecoverMoreButton.ContextMenu.Items.Count >= 6)
 		{
 			if (RecoverMoreButton.ContextMenu.Items[0] is System.Windows.Controls.MenuItem mi0) mi0.Header = L("CreateImageButton");
-			if (RecoverMoreButton.ContextMenu.Items[1] is System.Windows.Controls.MenuItem mi1) mi1.Header = L("OpenImageButton");
-			if (RecoverMoreButton.ContextMenu.Items[3] is System.Windows.Controls.MenuItem mi3) mi3.Header = L("RecoverSaveSessionButton");
-			if (RecoverMoreButton.ContextMenu.Items[4] is System.Windows.Controls.MenuItem mi4) mi4.Header = L("RecoverOpenSessionButton");
+			if (RecoverMoreButton.ContextMenu.Items[1] is System.Windows.Controls.MenuItem mi1) mi1.Header = L("CreateWholeImageButton");
+			if (RecoverMoreButton.ContextMenu.Items[2] is System.Windows.Controls.MenuItem mi2) mi2.Header = L("OpenImageButton");
+			if (RecoverMoreButton.ContextMenu.Items[4] is System.Windows.Controls.MenuItem mi4) mi4.Header = L("RecoverSaveSessionButton");
+			if (RecoverMoreButton.ContextMenu.Items[5] is System.Windows.Controls.MenuItem mi5) mi5.Header = L("RecoverOpenSessionButton");
 		}
 	}
 

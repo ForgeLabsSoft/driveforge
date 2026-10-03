@@ -477,4 +477,72 @@ public class LocalizationTests
 		Assert.True(offenders.Count == 0,
 			"Wrong-alphabet letter(s) in a language block:\n  " + string.Join("\n  ", offenders));
 	}
+
+	/// <summary>
+	/// The Recover "More" overflow menu lives in a ContextMenu, which is its own XAML namescope, so its items cannot
+	/// be found by name and their headers are assigned BY POSITION in ApplyLanguage. That makes the menu silently
+	/// order-dependent: insert one item in the XAML and every label below it shifts onto the wrong row, in all
+	/// seventeen languages at once, with nothing to see in English because the XAML Header still reads correctly
+	/// until the first language switch. (It happened: adding "Create image of the whole drive" moved "Open image",
+	/// the separator and both session items down one.)
+	///
+	/// So this walks the two in lockstep: for every Items[N] the code assigns, the XAML's Nth child must be a
+	/// MenuItem, and its hard-coded English Header must be exactly what that key says in English.
+	/// </summary>
+	[Fact]
+	public void OverflowMenuHeadersAreAssignedToTheRightItems()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		string ui = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "UiCustomization.cs"));
+
+		var menu = Regex.Match(xaml, @"RecoverMoreButton.*?<ContextMenu>(.*?)</ContextMenu>", RegexOptions.Singleline);
+		Assert.True(menu.Success, "The Recover overflow ContextMenu is gone from MainWindow.xaml.");
+
+		// Children in document order; a Separator counts as a position even though it gets no header.
+		var children = Regex.Matches(menu.Groups[1].Value, @"<(MenuItem|Separator)\b([^>]*)>")
+			.Select(m => (Tag: m.Groups[1].Value, Attrs: m.Groups[2].Value))
+			.ToList();
+		Assert.True(children.Count > 0, "The overflow menu has no items.");
+
+		var assignments = Regex.Matches(ui, @"ContextMenu\.Items\[(\d+)\][^;]*?Header = L\(" + @"""" + @"([A-Za-z0-9_]+)" + @"""" + @"\)")
+			.Select(m => (Index: int.Parse(m.Groups[1].Value), Key: m.Groups[2].Value))
+			.ToList();
+		Assert.True(assignments.Count > 0, "Nothing assigns headers to the overflow menu any more.");
+
+		var problems = new List<string>();
+		foreach ((int index, string key) in assignments)
+		{
+			if (index >= children.Count)
+			{
+				problems.Add($"Items[{index}] -> {key}: the menu only has {children.Count} items.");
+				continue;
+			}
+			if (children[index].Tag != "MenuItem")
+			{
+				problems.Add($"Items[{index}] -> {key}: position {index} is a {children[index].Tag}, not a MenuItem.");
+				continue;
+			}
+			if (!Strings[Base].TryGetValue(key, out string? english))
+			{
+				problems.Add($"Items[{index}] -> {key}: no such key in English.");
+				continue;
+			}
+			var header = Regex.Match(children[index].Attrs, @"Header=" + @"""" + @"([^" + @"""" + @"]*)" + @"""");
+			if (!header.Success)
+			{
+				problems.Add($"Items[{index}] -> {key}: the XAML item has no Header to compare.");
+				continue;
+			}
+			if (header.Groups[1].Value != english)
+				problems.Add($"Items[{index}] -> {key}: XAML says \"{header.Groups[1].Value}\", English says \"{english}\".");
+		}
+
+		// Every MenuItem must get a header from somewhere, or it stays English in every other language.
+		for (int i = 0; i < children.Count; i++)
+			if (children[i].Tag == "MenuItem" && !assignments.Any(a => a.Index == i))
+				problems.Add($"Menu item {i} is never translated - nothing assigns Items[{i}].");
+
+		Assert.True(problems.Count == 0,
+			"The overflow menu and its by-index translation have drifted apart:\n  " + string.Join("\n  ", problems));
+	}
 }

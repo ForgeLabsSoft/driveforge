@@ -225,6 +225,15 @@ public partial class MainWindow
 		return new VolumeReader(h);
 	}
 
+	// The whole drive, not one partition of it. Same wrapper: VolumeReader already aligns every read to 4096, which
+	// a raw device handle requires just as a volume handle does.
+	private VolumeReader OpenPhysicalDisk(int diskNumber)
+	{
+		var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
+		if (h.IsInvalid) throw new IOException($"Could not open physical drive {diskNumber} for reading (run as administrator).");
+		return new VolumeReader(h);
+	}
+
 	// Opens whichever source a scan came from: a live volume, or a disk-image file.
 	private VolumeReader OpenSource(NtfsScanResult g)
 	{
@@ -1251,6 +1260,29 @@ public partial class MainWindow
 	private long CreateDiskImage(char letter, string destPath, long totalSize, Action<int> progress)
 	{
 		using var vr = OpenVolume(letter);
+		return CreateImageFromReader(vr, destPath, totalSize, progress);
+	}
+
+	/// <summary>
+	/// Images the whole of a physical drive — every sector from the first to the last, partition table and boot
+	/// sector included.
+	/// </summary>
+	/// <remarks>
+	/// A volume image holds one partition's bytes and nothing else, so a copy written from it has no partition table
+	/// and no boot sector: the data is all there, and it will not boot. That is fine for recovery, which is what the
+	/// volume version is for, and useless for duplicating a stick. This reads the drive exactly as it lies, which is
+	/// the only thing a duplicate can be written from. Everything else — the sector-by-sector retry around a bad
+	/// block, the zero-fill, the count that comes back — is shared with the volume path, so both report an incomplete
+	/// image the same way.
+	/// </remarks>
+	private long CreateWholeDiskImage(int diskNumber, string destPath, long totalSize, Action<int> progress)
+	{
+		using var vr = OpenPhysicalDisk(diskNumber);
+		return CreateImageFromReader(vr, destPath, totalSize, progress);
+	}
+
+	private long CreateImageFromReader(VolumeReader vr, string destPath, long totalSize, Action<int> progress)
+	{
 		using var outFs = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
 		const int block = 8 << 20;
 		const int sector = 4096;

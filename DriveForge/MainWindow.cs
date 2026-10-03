@@ -12876,6 +12876,86 @@ exit 0
 		finally { _progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop(); RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
 	}
 
+	// The sibling of CreateImage_Click, for the other question. That one images a VOLUME, which is right for recovery:
+	// you freeze one partition and carve from the copy. It is the wrong thing for duplicating a drive, because a volume
+	// image has no partition table and no boot sector, so every stick written from it holds the files and boots none of
+	// them. This images the whole physical drive instead, and the resulting .img goes straight into "Create bootable USB
+	// from an ISO image" with "Write this image to several drives" ticked - which is the duplicator, already built.
+	private async void CreateWholeDiskImage_Click(object sender, RoutedEventArgs e)
+	{
+		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		if (!IsAdministrator()) { MessageBox.Show(L("RfAdminImage"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		char letter = ParseVolumeLetter(RecoverVolumeBox?.SelectedItem as string);
+		if (letter == '\0') { MessageBox.Show(L("RfImgPick"), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+
+		int diskNumber = PhysicalDiskOfVolume(letter);
+		if (diskNumber < 0) { MessageBox.Show(L("RfImgWholeNoDisk"), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+
+		// The size has to be the DEVICE's, not the volume's - a stick with one 8 GB partition on a 16 GB device would
+		// otherwise be imaged half-way and the copy would be truncated mid-filesystem. Take it from the disk list,
+		// which already has it; refuse rather than guess if this disk is not in the list.
+		DiskItem? src = disks.FirstOrDefault(d => d.Number == diskNumber);
+		if (src == null || src.Size <= 0L) { MessageBox.Show(L("RfImgNoSize"), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		long total = src.Size;
+
+		var dlg = new Microsoft.Win32.SaveFileDialog { Filter = L("RfFltDiskImage") + " (*.img)|*.img", FileName = $"disk{diskNumber}-whole.img", Title = L("RfImgSaveTitle") };
+		if (dlg.ShowDialog() != true) return;
+		string dest = dlg.FileName;
+
+		// Compare PHYSICAL DISKS, not drive letters. The volume check in CreateImage_Click cannot see that D: and E:
+		// are two partitions of the same stick, and writing the image onto the drive being imaged grows the file into
+		// its own source: the read never reaches the end, and the disk fills up on the way.
+		if (PhysicalDiskOfPath(dest) == diskNumber)
+		{ MessageBox.Show(L("RfImgDiffDrive"), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+		try
+		{
+			string? destRoot = Path.GetPathRoot(dest);
+			if (!string.IsNullOrEmpty(destRoot))
+			{
+				long destFree = new DriveInfo(destRoot).AvailableFreeSpace;
+				if (destFree < total)
+				{ MessageBox.Show(string.Format(L("RfImgNoSpace"), FormatBytes(total), FormatBytes(destFree), destRoot), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+			}
+		}
+		catch { }
+		if (MessageBox.Show(string.Format(L("RfImgWholeConfirm"), diskNumber, src.FriendlyName, FormatBytes(total), dest),
+				L("RfImgTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK) return;
+
+		try
+		{
+			stopRequested = false; _progressFullRange = true;
+			progressTotalGiB = Math.Max(1.0, total / 1073741824.0); progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
+			operationStopwatch.Restart(); operationTimer.Start();
+			RecoverStopButton.IsEnabled = true;
+			SetBusy(busy: true, string.Format(L("RfImgWholeBusy"), diskNumber, Path.GetFileName(dest)));
+			ProgressBar.Value = 0.0;
+			long badSectors = await Task.Run(() => CreateWholeDiskImage(diskNumber, dest, total, p => Dispatcher.Invoke(() => ProgressBar.Value = p)));
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
+			UpdateProgressStats();
+			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
+			if (badSectors > 0)
+				Log($"WARNING: {badSectors} sector(s) could not be read and were written to the image as zeros — the image is INCOMPLETE in those regions.");
+			// A stopped run matters more here than on the volume path: a half-read drive image is not a short file, it
+			// is a drive whose later partitions are missing, and writing it to a stick produces something that mounts
+			// and is wrong. Both endings therefore carry the bad-sector note.
+			string badNote = (badSectors > 0 ? "\n\n" + string.Format(L("RfImgBadSectors"), badSectors) : "");
+			MessageBox.Show((stopRequested
+				? string.Format(L("RfImgStopped"), dest)
+				: string.Format(L("RfImgDone"), dest)) + badNote,
+				L("RfImgTitle"), MessageBoxButton.OK,
+				badSectors > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+		}
+		catch (Exception ex)
+		{
+			operationTimer.Stop(); operationStopwatch.Stop();
+			ResetProgressWidgets();
+			StatusText.Text = L("SxReady");
+			NotifyOperationDone(false); ShowError(L("RfImgFailed"), ex);
+		}
+		finally { _progressFullRange = false; operationTimer.Stop(); operationStopwatch.Stop(); RecoverStopButton.IsEnabled = false; SetBusy(busy: false); }
+	}
+
 	private async void OpenImage_Click(object sender, RoutedEventArgs e)
 	{
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
