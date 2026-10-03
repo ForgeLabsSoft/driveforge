@@ -55,6 +55,28 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   settings written (several apply only to Enterprise and Education editions)". Five strings, seventeen languages.
   Nothing about the behaviour changed - the same values are written as before.
 
+- **The language list is in an order again.** It had grown by appending, so after seventeen languages it was in
+  no order at all: English, Romana, Deutsch, Francais, Espanol, Italiano, Portugues, Nederlands, Russkij,
+  Polski, Turkce, Ukrayinska, then the non-Latin names, with Indonesia and العربية last because they were
+  added last.
+  English stays pinned at the top, where someone who cannot read the current language can find it; everything
+  else is now alphabetical by the name shown in the list, so people look for their language under the name they
+  know it by rather than under its English name or its code.
+
+  The order is computed rather than typed out, which is the point: the old list was hand-ordered, and every
+  language added over the years went to the end because that is the path of least resistance. An eighteenth
+  language will now land in its place on its own.
+
+  Sorting is ordinal and deliberately not culture-aware. A culture-aware sort reads the machine's own locale, so
+  the same build would show the list in a different order on a Turkish or a Swedish PC; the list is the same for
+  everyone instead. The cost is that the names not written in the Latin alphabet - العربية, हिन्दी, 中文, 日本語 -
+  collate after the ones that are, which is at least a predictable place to keep them.
+
+  Nobody's language changes on update, and this was checked rather than assumed: the saved setting stores the
+  language *code* and the selection is recomputed from it, so the order is free to move. Three tests now hold
+  this - the rendered order, that every language is offered exactly once, and that none is offered without
+  translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
+
 ### Fixed
 - **Closed a way for an ordinary program to get its code run as Administrator.** DriveForge caches its clone
   engine, wimlib, under `%LocalAppData%\DriveForge\Tools\wimlib`, and anything running as the signed-in user

@@ -545,4 +545,69 @@ public class LocalizationTests
 		Assert.True(problems.Count == 0,
 			"The overflow menu and its by-index translation have drifted apart:\n  " + string.Join("\n  ", problems));
 	}
+
+	// ------------------------------------------------------------------ G. the language dropdown's order
+	//
+	// The order shown to the user is DERIVED (English pinned first, the rest sorted by the name people read) rather
+	// than hand-written, so these tests read the real arrays off the built assembly instead of re-parsing the source.
+	//
+	// Reflecting on them also forces the static initialiser to run, which is the one way this file can fail
+	// catastrophically rather than cosmetically: a derived field declared BEFORE the literal it reads leaves the
+	// literal null at init time, and MainWindow then throws TypeInitializationException the first time anything
+	// touches it - the whole window, not just the dropdown. C# runs static initialisers in textual order and the
+	// compiler does not warn, so only running them catches it.
+
+	private static (string Code, string Display)[] ReadLanguages(string field)
+	{
+		Array arr = (Array)Mw.Field(field);
+		Type option = Mw.Nested("LanguageOption");
+		System.Reflection.PropertyInfo code = option.GetProperty("Code")
+			?? throw new MissingMemberException("LanguageOption.Code");
+		System.Reflection.PropertyInfo display = option.GetProperty("Display")
+			?? throw new MissingMemberException("LanguageOption.Display");
+		return arr.Cast<object>()
+			.Select(o => ((string)code.GetValue(o), (string)display.GetValue(o)))
+			.ToArray();
+	}
+
+	[Fact]
+	public void TheLanguageDropdownPutsEnglishFirstAndSortsTheRest()
+	{
+		(string Code, string Display)[] shown = ReadLanguages("Languages");
+
+		Assert.Equal("en", shown[0].Code);
+
+		// Ordinal on purpose, matching production: a culture-aware sort would order this differently on a Turkish
+		// or Swedish machine, and the dropdown has to be the same list for everyone.
+		string[] rest = shown.Skip(1).Select(l => l.Display).ToArray();
+		Assert.Equal(rest.OrderBy(d => d, StringComparer.Ordinal).ToArray(), rest);
+	}
+
+	[Fact]
+	public void TheDropdownOffersEveryLanguageExactlyOnce()
+	{
+		// The shown list is built from the source list with two predicates. Get either wrong and a language quietly
+		// vanishes from the dropdown or appears twice - both still compile and both look fine until someone goes
+		// looking for their own language, so count and compare rather than trusting the LINQ.
+		(string Code, string Display)[] all = ReadLanguages("AllLanguages");
+		(string Code, string Display)[] shown = ReadLanguages("Languages");
+
+		Assert.Equal(all.Length, shown.Length);
+		Assert.Equal(shown.Length, shown.Select(l => l.Code).Distinct().Count());
+		Assert.Equal(
+			all.Select(l => l.Code).OrderBy(c => c, StringComparer.Ordinal).ToArray(),
+			shown.Select(l => l.Code).OrderBy(c => c, StringComparer.Ordinal).ToArray());
+	}
+
+	[Fact]
+	public void EveryLanguageOfferedHasStringsBehindIt()
+	{
+		string[] orphans = ReadLanguages("Languages")
+			.Select(l => l.Code)
+			.Where(c => !Strings.ContainsKey(c))
+			.ToArray();
+
+		Assert.True(orphans.Length == 0,
+			"The dropdown offers languages with no translations behind them: " + string.Join(", ", orphans));
+	}
 }

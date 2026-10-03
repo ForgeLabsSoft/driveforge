@@ -16,7 +16,7 @@ public partial class MainWindow
 {
 	private sealed record LanguageOption(string Code, string Display);
 
-	private static readonly LanguageOption[] Languages = new[]
+	private static readonly LanguageOption[] AllLanguages = new[]
 	{
 		new LanguageOption("en", "English"),
 		new LanguageOption("ro", "Romana"),
@@ -36,6 +36,27 @@ public partial class MainWindow
 		new LanguageOption("id", "Indonesia"),
 		new LanguageOption("ar", "العربية"),
 	};
+
+	// The list the dropdown shows: English pinned at the top, everything else by the name the user actually reads.
+	//
+	// Sorted here rather than hand-ordered in the literal above, so a language added later lands in its place
+	// instead of at the end - which is how the old order drifted into no order at all.
+	//
+	// Ordinal, deliberately, not StringComparer.CurrentCulture: a culture-aware sort would order the list
+	// differently on a Turkish or a Swedish machine, and the dropdown is the same list for everyone. The cost is
+	// that names not written in the Latin alphabet collate after those that are, which is the only predictable
+	// place to put them anyway.
+	//
+	// Safe to reorder: the saved setting holds the language CODE, and the selected index is recomputed from it
+	// with Array.FindIndex, so nobody's language changes when this order does.
+	//
+	// Must stay BELOW AllLanguages. Static initialisers run in textual order, so declaring this first reads a null
+	// AllLanguages and MainWindow then throws TypeInitializationException the first time anything touches it - the
+	// entire window, not just the dropdown. The compiler does not warn; TheLanguageDropdownPutsEnglishFirst... does.
+	private static readonly LanguageOption[] Languages =
+		AllLanguages.Where(l => l.Code == "en")
+			.Concat(AllLanguages.Where(l => l.Code != "en").OrderBy(l => l.Display, StringComparer.Ordinal))
+			.ToArray();
 
 	// Accent presets: label + hex.
 	private static readonly (string Name, string Hex)[] AccentPresets = new[]
