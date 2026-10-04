@@ -679,4 +679,43 @@ public class InvariantTests
 			"A dark base colour can be applied while Light mode is still on, which paints the window's panels in "
 			+ "the same colour as its text:\n  " + string.Join("\n  ", problems));
 	}
+
+	/// <summary>
+	/// The result lines on Clean and Recover must be re-derived when the language changes.
+	///
+	/// Both are written once, when the work finishes, and then sit on screen - so they stayed in whatever language
+	/// they were written in. Measured by driving the app: "About 2.0 GB can be freed." and "20 deleted files" were
+	/// still English under an otherwise Romanian window, beside a Clean button that HAD followed the language,
+	/// because that one already had a repair.
+	///
+	/// Neither is remembered as a sentence; both are recomputed from live state, which is why this only has to check
+	/// that the recomputation is still wired into ApplyLanguage.
+	/// </summary>
+	[Fact]
+	public void ChangingLanguageReRendersTheComputedResultLines()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "ApplyLanguage").ToArray();
+		Assert.True(found.Length == 1, $"Expected exactly one ApplyLanguage, found {found.Length}.");
+
+		string src = found[0].Method.ToString();
+		int loop = src.IndexOf("FindName(key)", StringComparison.Ordinal);
+		Assert.True(loop >= 0, "ApplyLanguage no longer looks like the FindName loop this rule reasons about.");
+
+		(string Needle, string What)[] required =
+		{
+			("UpdateRecoverSelectionInfo()", "the Recover result line (\"20 deleted files\")"),
+			("CleanAnalyzeResult", "the Clean result line (\"About 2.0 GB can be freed.\")"),
+		};
+
+		List<string> missing = new List<string>();
+		foreach ((string needle, string what) in required)
+		{
+			int at = src.IndexOf(needle, StringComparison.Ordinal);
+			if (at < 0 || at < loop) missing.Add($"{what} - expected {needle} after the loop.");
+		}
+
+		Assert.True(missing.Count == 0,
+			"ApplyLanguage no longer refreshes a computed result line, so it will stay in the language it was "
+			+ "written in:\n  " + string.Join("\n  ", missing));
+	}
 }

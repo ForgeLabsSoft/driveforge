@@ -94,6 +94,16 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
 
 ### Fixed
+- **Two result lines stayed in the language they were written in.** After an analysis, *Clean* says how much can
+  be freed and *Recover* says how many deleted files it found. Both are written once, when the work finishes, and
+  then simply sit there - so changing language left "About 2.0 GB can be freed." and "20 deleted files" in English
+  under an otherwise translated window, next to a *Clean* button that did follow along, because that one had been
+  repaired years earlier.
+
+  Neither is remembered as a sentence now; both are recomputed from what is on screen, so there is nothing left to
+  go stale. They are only refreshed while idle: during a run those same labels carry progress, and replacing that
+  with a finished-looking total would be a worse lie than the wrong language.
+
 - **Choosing a base colour while in Light mode made the window unreadable.** The base-theme presets repaint the
   window and its panels; the colour of the *text* belongs to Light or Dark. So picking one in Light mode put near-
   black panels under Light mode's near-black text, and *Reset to default* set the panels to exactly the colour the

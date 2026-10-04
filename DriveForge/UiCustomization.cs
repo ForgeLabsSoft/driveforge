@@ -236,6 +236,16 @@ public partial class MainWindow
 		// CleanRunButton is BOTH a control name and a string key, so the loop above resets it to the static
 		// "Clean now" — throwing away the computed size ("Clean now — 4.2 GB") that Analyze put there.
 		RecomputeCleanTotal();
+		// The two RESULT lines are written once, when the work finishes, and then sit on screen — so they stayed in
+		// the language they were written in. Measured: "About 2.0 GB can be freed." and "20 deleted files" were still
+		// English under an otherwise Romanian window. Both are re-derived from live state rather than remembered as
+		// sentences, so there is nothing to go stale.
+		//
+		// Only while idle: during a run these same labels carry progress ("Cleaning temporary files…"), and
+		// overwriting that with a finished-looking total would be a worse lie than the wrong language.
+		if (!isBusy && CleanStatusText != null && _cleanCats != null && _cleanCats.Any(c => c.Size > 0))
+			CleanStatusText.Text = string.Format(L("CleanAnalyzeResult"), FormatBytes(_cleanCats.Sum(c => c.Size)));
+		if (!isBusy && _lastScan != null) UpdateRecoverSelectionInfo();
 		// The same trap, and it swallowed the whole Drive tools card. ToolHealthText, ToolDriveTitleText,
 		// ToolSerialText, ToolFirmwareText, ToolInterfaceText, ToolSizeText and ToolRecommendationDetailText are all
 		// control names AND string keys, so the loop above overwrote the selected drive's real readings with the
