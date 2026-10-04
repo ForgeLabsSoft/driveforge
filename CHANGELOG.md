@@ -2,7 +2,7 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## v4.4.1 — 2026-10-04
 
 ### Added
 - **Image a whole drive, not just one partition of it — which makes DriveForge a duplicator.** *Recover → ⋯
