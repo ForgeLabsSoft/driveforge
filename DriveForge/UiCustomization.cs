@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -196,13 +197,35 @@ public partial class MainWindow
 	}
 
 	// Looks up a localized string for the current language, falling back to English then the key itself.
-	private static string L(string key)
+	private static string L(string key) => ExpandTaskRefs(LRaw(key));
+
+	/// <summary>The stored text for a key, with no reference expansion. Falls back to English, then to the key.</summary>
+	private static string LRaw(string key)
 	{
 		if (Strings.TryGetValue(currentLanguage, out Dictionary<string, string>? d) && d.TryGetValue(key, out string? v))
 			return v;
 		if (Strings["en"].TryGetValue(key, out string? e))
 			return e;
 		return key;
+	}
+
+	private static readonly Regex TaskRefPattern = new Regex(@"\[\[([A-Za-z0-9_]+)\]\]", RegexOptions.Compiled);
+
+	/// <summary>
+	/// Fills in [[SomeKey]] with that key's text, so a sentence can name another task without freezing its name.
+	///
+	/// A handful of strings point the reader somewhere else — "…use 'Restore image' instead". Writing the name into
+	/// the sentence meant the sentence got translated and the name did not, so sixteen languages sent people to a
+	/// button whose label reads something different. The reference is resolved from the SAME key the sidebar uses,
+	/// so a rename moves both at once.
+	///
+	/// LRaw, not L: one level of expansion only, so a reference cannot resolve into another and loop. A reference to
+	/// a key that does not exist resolves to the key's own name, which is visible and harmless rather than a crash.
+	/// </summary>
+	private static string ExpandTaskRefs(string text)
+	{
+		if (text.IndexOf("[[", StringComparison.Ordinal) < 0) return text;   // the overwhelmingly common case
+		return TaskRefPattern.Replace(text, m => LRaw(m.Groups[1].Value));
 	}
 
 	private void ApplyLanguage(string lang)

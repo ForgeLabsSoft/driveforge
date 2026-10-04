@@ -2,6 +2,23 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## Unreleased
+
+### Fixed
+- **Sentences that point you at another task now use that task's name in your own language.** A few descriptions
+  and confirmations say things like *"...you can restore it later with 'Restore image'"*. The name was written into
+  the sentence, so the sentence was translated and the name was not: in Romanian the text sent you to *Restore
+  image* while the button beside it read *Restaurează imagine*, and in Japanese to a label that simply was not on
+  screen. Five strings, all sixteen languages.
+
+  They now carry a reference to the task rather than its name, filled in from the same string the sidebar draws its
+  label from. That is the point of doing it this way instead of translating the names by hand: the two cannot
+  disagree again, including after a rename, in any language.
+
+  Three tests hold it — every reference resolves to a real key, the resolved text carries that language's own label
+  with no reference left showing, and no translation may name a task in English when that language renames it. The
+  last one is the rule that found this, and it now passes over the whole table, so there are no others.
+
 ## v4.4.1 — 2026-10-04
 
 ### Added

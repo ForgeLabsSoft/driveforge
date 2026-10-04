@@ -722,4 +722,85 @@ public class LocalizationTests
 			+ "(if a term here is genuinely translated in that language, add it to the exclusions above rather "
 			+ "than loosening the rule):\n  " + string.Join("\n  ", stale));
 	}
+
+	// ------------------------------------------------------------------ J. sentences that name another task
+	//
+	// A few strings send the reader somewhere else - "...use 'Restore image' instead". The name used to be written
+	// into the sentence, so the sentence was translated and the name was not: sixteen languages pointed at a button
+	// whose label reads something different ("Restaurează imagine", "イメージを復元"). They now carry a reference,
+	// [[SbRestoreT]], resolved at display time from the same key the sidebar draws its label from.
+
+	private static readonly string[] TaskNameKeys =
+	{
+		"SbCreateT", "SbClonePortableT", "SbCloneInternalT", "SbExportVhdxT", "SbBackupT", "SbRestoreT",
+		"SbLinuxT", "SbDownloadIsoT", "SbMultiBootT", "SbToolsT", "SbRecoverT", "SbCleanT", "StartBackup",
+	};
+
+	[Fact]
+	public void EveryTaskReferenceResolvesToARealKey()
+	{
+		// An unknown reference does not crash - it renders as the key's own name - which is exactly why it would
+		// reach a user unnoticed.
+		List<string> bad = new List<string>();
+		foreach (string lang in Strings.Keys)
+			foreach (KeyValuePair<string, string> entry in Strings[lang])
+				foreach (Match m in Regex.Matches(entry.Value, @"\[\[([A-Za-z0-9_]+)\]\]"))
+					if (!Strings[Base].ContainsKey(m.Groups[1].Value))
+						bad.Add($"{lang}/{entry.Key} refers to [[{m.Groups[1].Value}]], which is not a string key.");
+
+		Assert.True(bad.Count == 0, "A sentence refers to a key that does not exist:\n  " + string.Join("\n  ", bad));
+	}
+
+	[Fact]
+	public void ASentenceNamingAnotherTaskShowsThatLanguagesName()
+	{
+		// End to end, through L() itself: no reference may survive to the screen, and the name that appears must be
+		// the one this language puts on the button.
+		List<string> bad = new List<string>();
+		try
+		{
+			foreach (string lang in Strings.Keys)
+			{
+				UseLanguage(lang);
+				string shown = Mw.Call<string>("L", "ExportVhdxBackupHint");
+				if (shown.Contains("[[")) bad.Add($"{lang}: an unexpanded reference reached the text - {shown}");
+				foreach (string nameKey in new[] { "SbRestoreT", "SbBackupT" })
+					if (Strings[lang].TryGetValue(nameKey, out string? name) && !shown.Contains(name))
+						bad.Add($"{lang}: does not name the task as this language does (expected \"{name}\").");
+			}
+		}
+		finally { UseLanguage("en"); }
+
+		Assert.True(bad.Count == 0, "Task references are not resolving per language:\n  " + string.Join("\n  ", bad));
+	}
+
+	[Fact]
+	public void NoTranslationNamesATaskInEnglishWhenItRenamesIt()
+	{
+		// The rule that found this. If a language renames a task, no other string in that language may still carry
+		// the English name - the reader would be sent to a button that is not there under that label.
+		List<string> bad = new List<string>();
+
+		foreach (string nameKey in TaskNameKeys)
+		{
+			if (!Strings[Base].TryGetValue(nameKey, out string? english) || english.Length < 6) continue;
+
+			foreach (string lang in OtherLanguages)
+			{
+				// Only when this language actually uses a different label.
+				if (!Strings[lang].TryGetValue(nameKey, out string? local) || local == english) continue;
+
+				foreach (KeyValuePair<string, string> entry in Strings[lang])
+				{
+					if (entry.Key == nameKey) continue;                       // the name itself
+					if (!entry.Value.Contains(english, StringComparison.Ordinal)) continue;
+					bad.Add($"{lang}/{entry.Key} names the task in English (\"{english}\"), but this language calls "
+						+ $"it \"{local}\". Use [[{nameKey}]] so it follows the label.");
+				}
+			}
+		}
+
+		Assert.True(bad.Count == 0,
+			"Translations send the reader to a button by its English name:\n  " + string.Join("\n  ", bad));
+	}
 }
