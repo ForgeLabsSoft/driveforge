@@ -94,6 +94,26 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   translations behind it - and each was confirmed to fail when the implementation is broken on purpose.
 
 ### Fixed
+- **Choosing a base colour while in Light mode made the window unreadable.** The base-theme presets repaint the
+  window and its panels; the colour of the *text* belongs to Light or Dark. So picking one in Light mode put near-
+  black panels under Light mode's near-black text, and *Reset to default* set the panels to exactly the colour the
+  text was already using. The program was still running and could not be read, with no way back but restarting.
+
+  Clicking a dark colour is a request for the dark look, so it now switches to it rather than refusing or doing
+  something halfway; *Reset to default* restores the whole default appearance, mode included. Start-up had always
+  refused to restore a dark base in Light mode for this reason — the buttons simply never got the same treatment. A
+  test now holds both of them to it.
+
+- **The About box had been showing the wrong version since 4.4.0 shipped.** It read "DriveForge 4.3.3" because the
+  number was typed into the window by hand. It now comes from the build itself, so it cannot disagree again — and
+  a bug report quoting it will no longer point at the wrong source. A test rejects a version number written into
+  the window.
+
+- **The drive-health trend line stayed in the previous language.** After a language change the whole Drive tools
+  card is redrawn — but the redraw deliberately does not record a new health check, and the sentence under the
+  drive's name ("checked 4× since …, status stable") was only ever written while recording one. It now carries the
+  identity of the drive it describes and is redrawn with it, so it follows the language without inventing a check.
+
 - **Changing language blanked the Drive tools card.** Open *Drive tools* and the selected drive's health reads
   "Good". Switch language, come back, and it reads "Unknown" — for the same drive, with nothing else changed. It
   stayed that way, too: the card only redraws when a *different* disk is picked, so the drive's health, name,

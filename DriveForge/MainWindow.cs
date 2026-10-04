@@ -7563,8 +7563,15 @@ exit 0
 		if (recordTrend)
 		{
 			string trendSerial = ExtractReportValue(report, "SerialNumber", "");
+			_trendNoteDiskKey = DiskIdentityKey(disk);
 			HealthTrendText.Text = RecordHealthTrend(trendSerial, disk.RawHealth, ToolTemperatureText.Text);
 			DrawHealthTrend(trendSerial);
+		}
+		else
+		{
+			// Redrawing (a language change, a disk-list refresh) must not append a check — but the sentence still has
+			// to follow the language, or it sits in the previous one under a card that has just been translated.
+			HealthTrendText.Text = RenderTrendNote(DiskIdentityKey(disk));
 		}
 	}
 
@@ -7681,6 +7688,31 @@ exit 0
 
 	private sealed class HealthSnap { public string Serial { get; set; } public DateTime Date { get; set; } public string Health { get; set; } public string Temp { get; set; } }
 
+	// What the trend sentence says, kept so it can be re-rendered in a new language without recording a new check.
+	// Storing the finished STRING would freeze it in the language it was first written in, which is the bug this
+	// exists to fix; storing the ingredients lets L() do its job every time the card is redrawn.
+	//
+	// It carries the identity of the drive it describes, and is only rendered for that drive. The first attempt
+	// cleared it defensively in the "no drive selected" branch instead — and a language change rebuilds the disk
+	// list, so SelectedItem is briefly null and the note was discarded a moment before the redraw that needed it.
+	// Measured: the sentence vanished on every language change. An identity check cannot be mistimed that way.
+	private (string DiskKey, string Kind, int Count, DateTime First, DateTime Prev, string Health)? _lastTrendNote;
+	private string _trendNoteDiskKey = "";
+
+	/// <summary>The trend sentence for this drive in the CURRENT language, or "" if we hold none for it.</summary>
+	private string RenderTrendNote(string diskKey)
+	{
+		if (!_lastTrendNote.HasValue) return "";
+		var t = _lastTrendNote.Value;
+		if (!string.Equals(t.DiskKey, diskKey, StringComparison.OrdinalIgnoreCase)) return "";
+		return t.Kind switch
+		{
+			"first" => L("DTrendFirst"),
+			"changed" => string.Format(L("DTrendChanged"), t.Health, t.Prev.ToLocalTime().ToString("yyyy-MM-dd")),
+			_ => string.Format(L("DTrendStable"), t.Count, t.First.ToLocalTime().ToString("yyyy-MM-dd"), LHealth(t.Health)),
+		};
+	}
+
 	// Records a health snapshot per drive serial and returns a short trend note (stable / degrading).
 	private string RecordHealthTrend(string serial, string health, string temp)
 	{
@@ -7697,13 +7729,21 @@ exit 0
 			try { Directory.CreateDirectory(Path.GetDirectoryName(path)); string tmp = path + ".tmp"; File.WriteAllText(tmp, JsonSerializer.Serialize(list)); File.Move(tmp, path, true); } catch { }
 
 			int count = mine.Count + 1;
-			if (mine.Count == 0) return L("DTrendFirst");
+			if (mine.Count == 0)
+			{
+				_lastTrendNote = (_trendNoteDiskKey, "first", count, DateTime.UtcNow, DateTime.UtcNow, health);
+				return RenderTrendNote(_trendNoteDiskKey);
+			}
 			var first = mine.First();
 			var prev = mine.Last();
 			// Compare against the most recent prior check, and report when THAT transition happened (not the first-ever date).
 			if (IsHealthy(prev.Health) && !IsHealthy(health))
-				return string.Format(L("DTrendChanged"), health, prev.Date.ToLocalTime().ToString("yyyy-MM-dd"));
-			return string.Format(L("DTrendStable"), count, first.Date.ToLocalTime().ToString("yyyy-MM-dd"), LHealth(health));
+			{
+				_lastTrendNote = (_trendNoteDiskKey, "changed", count, first.Date, prev.Date, health);
+				return RenderTrendNote(_trendNoteDiskKey);
+			}
+			_lastTrendNote = (_trendNoteDiskKey, "stable", count, first.Date, prev.Date, health);
+			return RenderTrendNote(_trendNoteDiskKey);
 		}
 		catch { return ""; }
 	}

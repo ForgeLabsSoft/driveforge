@@ -609,4 +609,74 @@ public class InvariantTests
 			"The guard must be cleared BEFORE UpdateDriveToolOverview() is called, or the overview sees the same "
 			+ "disk key as last time and returns without re-rendering anything.");
 	}
+
+	/// <summary>
+	/// The version the app shows must come from the assembly, never from a literal.
+	///
+	/// It used to be typed into the XAML, and drifted exactly as you would expect: a 4.4.0 build told every user it
+	/// was "DriveForge 4.3.3". Nothing failed - the number is just a label - which is why it survived a release, and
+	/// why a bug report quoting it would have sent someone to the wrong source.
+	///
+	/// This is cheap to keep right: AssemblyInfo is already the single source CI checks the release tag against.
+	/// </summary>
+	[Fact]
+	public void TheVersionOnScreenComesFromTheAssembly()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+
+		Match declared = Regex.Match(xaml, @"<TextBlock[^>]*\bName=""AboutVersionText""[^>]*>");
+		Assert.True(declared.Success, "AboutVersionText is gone from MainWindow.xaml - update this test with it.");
+
+		Match literal = Regex.Match(declared.Value, @"Text=""([^""]*)""");
+		if (literal.Success)
+			Assert.False(Regex.IsMatch(literal.Groups[1].Value, @"\d+\.\d+"),
+				"The About line has a version number written into the XAML (" + literal.Groups[1].Value + "). It will "
+				+ "be wrong the next time a release goes out, and nothing will fail to say so. Assign it from "
+				+ "AppVersionString() instead.");
+
+		string ui = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "UiCustomization.cs"));
+		string mw = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		Assert.True(Regex.IsMatch(ui + mw, @"AboutVersionText\.Text\s*=[^;]*AppVersionString\(\)"),
+			"Nothing assigns AboutVersionText from AppVersionString(), so the About line shows whatever the XAML "
+			+ "happens to say.");
+	}
+
+	/// <summary>
+	/// Applying a dark base colour must not leave the app in Light mode.
+	///
+	/// The base presets repaint the window and panels only; the TEXT colour belongs to the light/dark mode. Clicking
+	/// one while in Light mode therefore painted near-black panels under Light mode's near-black text — measured at
+	/// 1.01:1 contrast — and "Reset to default" set the panels to #0F172A, the exact colour Light mode uses for
+	/// text: 1.00:1, a window still running and completely invisible, recoverable only by restarting.
+	///
+	/// Start-up has always refused to restore a dark base in Light mode for this reason. The click handlers did not,
+	/// and nothing noticed, because colour contrast is not something the compiler or any other test here can see.
+	/// </summary>
+	[Fact]
+	public void ApplyingADarkBaseNeverLeavesTheAppInLightMode()
+	{
+		string[] handlers = { "BaseTheme_Click", "ResetTheme_Click" };
+		List<string> problems = new List<string>();
+
+		foreach (string name in handlers)
+		{
+			var found = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			if (found.Length != 1) { problems.Add($"{name}: expected one definition, found {found.Length}."); continue; }
+
+			string src = found[0].Method.ToString();
+			// The CALL, not the word: the comment explaining this guard names ApplyBaseTheme too, and matching that
+			// put "apply" before "guard" and failed on correct code.
+			if (!src.Contains("ApplyBaseTheme(", StringComparison.Ordinal)) continue;   // no longer applies a base
+
+			int guard = src.IndexOf("ApplyAppTheme(", StringComparison.Ordinal);
+			int apply = src.IndexOf("ApplyBaseTheme(", StringComparison.Ordinal);
+			if (guard < 0 || guard > apply)
+				problems.Add($"{name} applies a dark base without first settling the light/dark mode "
+					+ "(call ApplyAppTheme before ApplyBaseTheme).");
+		}
+
+		Assert.True(problems.Count == 0,
+			"A dark base colour can be applied while Light mode is still on, which paints the window's panels in "
+			+ "the same colour as its text:\n  " + string.Join("\n  ", problems));
+	}
 }

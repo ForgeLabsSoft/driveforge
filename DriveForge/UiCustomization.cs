@@ -100,6 +100,12 @@ public partial class MainWindow
 			AccentPresetsPanel.Children.Add(swatch);
 		}
 
+		// The About line carried a version typed into the XAML by hand, so it drifted the moment a release went out:
+		// it read "DriveForge 4.3.3" in a 4.4.0 build, telling every user the wrong version and making any bug report
+		// based on it misleading. Read it from the assembly instead, where the release tag is already checked against
+		// it in CI, and it can never disagree again.
+		if (AboutVersionText != null) { AboutVersionText.Text = "DriveForge " + AppVersionString(); }
+
 		(string savedLang, string? savedAccent, string? savedBase, string savedTheme) = LoadSettings();
 		// First launch (no settings file yet): default to the OS display language so users see their own language.
 		if (!File.Exists(SettingsFilePath))
@@ -431,7 +437,17 @@ public partial class MainWindow
 
 	private void BaseTheme_Click(object sender, RoutedEventArgs e)
 	{
-		if (sender is Button b && b.Tag is string hex) { ApplyBaseTheme(HexToColor(hex)); }
+		if (!(sender is Button b && b.Tag is string hex)) { return; }
+		// Base presets are DARK backgrounds, and ApplyBaseTheme repaints only the window and panels — the text
+		// colour belongs to the light/dark mode. Clicking one while in Light mode therefore left near-black panels
+		// carrying Light mode's near-black text: measured at 1.01:1 contrast, a window that cannot be read, with no
+		// way back except restarting. Start-up already refuses to restore a dark base in Light mode for exactly this
+		// reason; the click handlers did not.
+		//
+		// Switching the mode rather than ignoring the click: picking a dark colour is a clear request for the dark
+		// look, and a button that silently does nothing is its own defect.
+		if (IsLightTheme(currentThemeMode)) { ApplyAppTheme("dark", persist: false); }
+		ApplyBaseTheme(HexToColor(hex));
 	}
 
 	private void ColorSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -449,6 +465,10 @@ public partial class MainWindow
 
 	private void ResetTheme_Click(object sender, RoutedEventArgs e)
 	{
+		// Reset has to include the light/dark mode, not just the two colours. Restoring the default DARK base while
+		// Light mode stayed on painted every panel #0F172A — the exact colour Light mode uses for its text. 1.00:1:
+		// the window was still there, and completely invisible.
+		ApplyAppTheme("dark", persist: false);
 		ApplyAccent(HexToColor("2563EB"));
 		ApplyBaseTheme(HexToColor("0F172A"));
 	}
