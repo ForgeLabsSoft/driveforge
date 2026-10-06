@@ -2,7 +2,7 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## v4.4.2 — 2026-10-06
 
 ### Fixed
 - **Sentences that point you at another task now use that task's name in your own language.** A few descriptions
