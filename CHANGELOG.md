@@ -2,6 +2,31 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## Unreleased
+
+### Fixed
+- **The same fault was in three more places, and one of them was the tool for recovering from it.** 4.4.3
+  said the problem was fixed everywhere. It was not. Quick partition, Convert MBR/GPT and "Initialize a
+  blank / RAW disk" all emptied the disk and then asked diskpart to convert it — the same sequence that
+  fails on Windows 11 26H2 and leaves a drive wiped and uninitialised.
+
+  The third one is the worst of the three. It is where the error message, the release notes and the reply to
+  the user who reported this all send people to put their drive back. On the build where the original bug
+  bites, that tool would have failed in exactly the same way.
+
+  All three now obtain the partition table with the call meant for an uninitialised disk and check that they
+  got it, as the SSD erase already did. The message names the style that was refused, so it reads correctly
+  for MBR as well as GPT, in all seventeen languages.
+
+- **Why the test did not catch them.** The rule added in 4.4.3 searched for the literal text `convert gpt`.
+  These three wrote `convert {style}` — a variable filled in at run time, which is `convert gpt` every time
+  the user picks GPT. They passed the rule while carrying the exact defect it exists to stop. It now matches
+  the interpolated form as well and rejects it outright: nothing in the source can prove the variable is
+  never "gpt".
+
+  A second rule covers the shape underneath. The helper that obtains a partition style returns whether it
+  succeeded, and every caller must look at that — a discarded result is the same silent-wrong-answer shape
+  as diskpart's `noerr`. Both rules were confirmed by breaking the code five different ways; none survived.
 ## v4.4.3 — 2026-10-10
 
 ### Fixed

@@ -740,7 +740,11 @@ public class InvariantTests
 		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
 		List<string> problems = new List<string>();
 
-		foreach (Match m in Regex.Matches(src, @"convert\s+(gpt|mbr)(\s+noerr)?", RegexOptions.IgnoreCase))
+		// The style is matched as gpt, mbr OR an interpolated hole like {style}. The first version of this rule
+		// looked for literal styles only, and three live flows wrote `convert {style}` - which is `convert gpt`
+		// every time the user picks GPT. They passed this test while carrying the exact defect it exists to stop.
+		// Restricting the alternation to styles and holes is also what keeps qemu-img's `convert -O vmdk` out.
+		foreach (Match m in Regex.Matches(src, @"convert\s+(gpt|mbr|\{[A-Za-z_][A-Za-z0-9_]*\})(\s+noerr)?", RegexOptions.IgnoreCase))
 		{
 			string style = m.Groups[1].Value.ToLowerInvariant();
 			bool noerr = m.Groups[2].Success;
@@ -753,7 +757,11 @@ public class InvariantTests
 			string trimmed = line.TrimStart().TrimStart('"');
 			if (trimmed.StartsWith("//") || trimmed.StartsWith("rem ", StringComparison.OrdinalIgnoreCase)) continue;
 
-			if (style == "gpt")
+			if (style.StartsWith("{"))
+				problems.Add($"`{m.Value.Trim()}` at offset {m.Index}: the style is decided at runtime, so this is "
+					+ "`convert gpt` for every caller that picks GPT. Obtain the table with EnsureDiskPartitionStyleAsync "
+					+ "and check the result, rather than asking convert for it.");
+			else if (style == "gpt")
 				problems.Add($"`{m.Value.Trim()}` at offset {m.Index}: a GPT table must be obtained and verified "
 					+ "(EnsureDiskPartitionStyleAsync), not asked of convert — on a cleaned disk convert has nothing "
 					+ "to convert, and tolerating the failure silently yields MBR.");
@@ -781,5 +789,38 @@ public class InvariantTests
 		Assert.True(Regex.IsMatch(src, @"if\s*\(\s*!\s*await\s+EnsureDiskPartitionStyleAsync"),
 			"The result of EnsureDiskPartitionStyleAsync is not checked — the erase would carry on and build a "
 			+ "volume on whatever table it happened to get.");
+	}
+
+	/// <summary>
+	/// Every flow that asks for a partition style must look at the answer.
+	///
+	/// EnsureDiskPartitionStyleAsync returns bool because Windows can refuse. A discarded bool is the same
+	/// shape of mistake as diskpart's `noerr`: the flow carries on and builds on whatever table it happened
+	/// to get, which on an uninitialised disk is MBR - so a 4 TB drive comes back as 2 TB, reported as a
+	/// success. The sibling rule above pins the SSD erase by name; this one covers every caller, including
+	/// the ones added later.
+	/// </summary>
+	[Fact]
+	public void EveryPartitionStyleRequestIsChecked()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		MatchCollection calls = Regex.Matches(src, @"await\s+EnsureDiskPartitionStyleAsync\s*\(");
+		Assert.True(calls.Count >= 5,
+			$"Only {calls.Count} flows obtain the partition style explicitly. Every flow that cleans a disk and "
+			+ "then builds on it needs to, so this is either a removed call or a new flow that skipped it.");
+
+		List<string> unguarded = new List<string>();
+		foreach (Match m in calls)
+		{
+			// The only acceptable shape is `if (!await EnsureDiskPartitionStyleAsync(...))`.
+			int from = Math.Max(0, m.Index - 16);
+			string before = src.Substring(from, m.Index - from);
+			if (!Regex.IsMatch(before, @"if\s*\(\s*!\s*$"))
+				unguarded.Add($"call at offset {m.Index}");
+		}
+
+		Assert.True(unguarded.Count == 0,
+			"EnsureDiskPartitionStyleAsync is called without checking what it returns, so the flow would carry "
+			+ "on with the wrong partition table:\n  " + string.Join("\n  ", unguarded));
 	}
 }

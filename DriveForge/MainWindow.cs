@@ -14950,7 +14950,7 @@ exit 0
 		if (!await ConfirmDestructive(disk, L("PtQuickPart"))) return;
 		string style = disk.Size > 2L * 1024 * 1024 * 1024 * 1024 || disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true ? "gpt" : "mbr";
 		var sb = new StringBuilder();
-		sb.Append($"select disk {disk.Number}\r\nclean\r\nconvert {style}\r\n");
+		sb.Append($"select disk {disk.Number}\r\n");
 		if (n > 1 && (usableMb <= 0 || each < 16)) // multiple partitions need an explicit size=; a too-small disk would yield an invalid diskpart script (after 'clean' already wiped it)
 		{
 			MessageBox.Show(string.Format(L("PtTooSmall"), n), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation);
@@ -14965,7 +14965,13 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtQuickPart")));
-			string outp = await RunDiskpartAsync(sb.ToString());
+			// `clean` first, then the style obtained and CHECKED, then the partitions: asking `convert` for it
+			// fails on a disk with no partition table, and diskpart abandons the rest of the script at the first
+			// error - leaving the disk wiped with nothing on it.
+			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			if (!await EnsureDiskPartitionStyleAsync(disk.Number, style))
+				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
+			outp += await RunDiskpartAsync(sb.ToString());
 			SetToolOutput("diskpart quick partition\r\n\r\n" + outp);
 			Log($"Quick partition: Disk {disk.Number} -> {n} x {fs}.");
 			await RefreshDisksAsync();
@@ -15660,7 +15666,15 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtInit")));
-			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nconvert {style}\r\ncreate partition primary\r\nformat fs=ntfs quick label=DriveForge\r\nassign\r\nexit\r\n");
+			// Three steps, not one script. `clean` leaves the disk RAW, and `convert` wants an EMPTY MBR disk, so on
+			// some builds it refuses and diskpart abandons everything after it - the disk is wiped and nothing is
+			// created, which is the failure a user reported. The style is obtained with the call meant for an
+			// uninitialised disk, and then CHECKED. Note this is the tool people are sent to in order to RECOVER a
+			// disk left in that state, so it is the last place that may carry the fault.
+			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			if (!await EnsureDiskPartitionStyleAsync(disk.Number, style))
+				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
+			outp += await RunDiskpartAsync($"select disk {disk.Number}\r\ncreate partition primary\r\nformat fs=ntfs quick label=DriveForge\r\nassign\r\nexit\r\n");
 			SetToolOutput("diskpart initialize\r\n\r\n" + outp);
 			Log($"Initialized Disk {disk.Number} as {style}.");
 			await RefreshDisksAsync();
@@ -15685,7 +15699,11 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtConvert")));
-			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nconvert {target}\r\nexit\r\n");
+			// `clean` removes the partition table, so there is nothing left for `convert` to convert and it refuses
+			// on some builds. The new style is written with the call meant for an uninitialised disk, and verified.
+			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			if (!await EnsureDiskPartitionStyleAsync(disk.Number, target))
+				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, target.ToUpperInvariant()));
 			SetToolOutput("diskpart convert\r\n\r\n" + outp);
 			Log($"Converted Disk {disk.Number} to {target}.");
 			await RefreshDisksAsync();
