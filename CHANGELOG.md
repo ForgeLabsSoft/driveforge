@@ -18,6 +18,15 @@ All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD
   got it, as the SSD erase already did. The message names the style that was refused, so it reads correctly
   for MBR as well as GPT, in all seventeen languages.
 
+- **Quick format could quietly cap a large drive at 2 TB.** The same family, arrived at by omission rather
+  than by a refused command: it emptied the disk and then created a partition without asking for a
+  partition table at all. On a disk with no table, Windows makes one — MBR — so a 4 TB drive came back as a
+  2 TB volume with the rest unreachable, and the operation reported success. Nothing failed, which is what
+  made it worse than the crash: there was nothing to notice.
+
+  It now decides the style, obtains it and checks it, by the same rule Quick partition uses, so the two
+  tools cannot disagree: keep GPT if the disk already had it, require GPT above the 2 TB MBR ceiling, and
+  otherwise MBR, which stays the friendlier choice for removable drives.
 - **Why the test did not catch them.** The rule added in 4.4.3 searched for the literal text `convert gpt`.
   These three wrote `convert {style}` — a variable filled in at run time, which is `convert gpt` every time
   the user picks GPT. They passed the rule while carrying the exact defect it exists to stop. It now matches

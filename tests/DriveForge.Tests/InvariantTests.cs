@@ -805,7 +805,7 @@ public class InvariantTests
 	{
 		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
 		MatchCollection calls = Regex.Matches(src, @"await\s+EnsureDiskPartitionStyleAsync\s*\(");
-		Assert.True(calls.Count >= 5,
+		Assert.True(calls.Count >= 6,
 			$"Only {calls.Count} flows obtain the partition style explicitly. Every flow that cleans a disk and "
 			+ "then builds on it needs to, so this is either a removed call or a new flow that skipped it.");
 

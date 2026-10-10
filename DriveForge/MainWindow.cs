@@ -14781,9 +14781,20 @@ exit 0
 			SetBusy(busy: true, string.Format(L("BzFormat"), disk.Number, fs.ToUpperInvariant()));
 			busyRaised = true;
 			if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
-			string script = $"select disk {disk.Number}\r\nclean\r\ncreate partition primary\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n";
-			await File.WriteAllTextAsync(scriptPath, script, Encoding.ASCII);
+			// `create partition` on a disk with NO partition table initialises it as MBR, silently - so a 4 TB
+			// drive would come back as a 2 TB volume and be reported as a success. Decide the style, obtain it
+			// with the call meant for an uninitialised disk, and check it, before anything is created. Same rule
+			// as Quick partition so the two tools cannot disagree: keep GPT if the disk already had it, require
+			// GPT above the 2 TB MBR ceiling, otherwise MBR - the friendlier default for removable media.
+			string style = disk.Size > 2L * 1024 * 1024 * 1024 * 1024
+				|| disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true ? "gpt" : "mbr";
+			await File.WriteAllTextAsync(scriptPath, $"select disk {disk.Number}\r\nclean\r\nexit\r\n", Encoding.ASCII);
 			string outp = await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(scriptPath));
+			if (!await EnsureDiskPartitionStyleAsync(disk.Number, style))
+				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
+			string script = $"select disk {disk.Number}\r\ncreate partition primary\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n";
+			await File.WriteAllTextAsync(scriptPath, script, Encoding.ASCII);
+			outp += await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(scriptPath));
 			SetToolOutput("diskpart format\r\n\r\n" + outp);
 			Log($"Formatted Disk {disk.Number} as {fs}.");
 			await RefreshDisksAsync();
