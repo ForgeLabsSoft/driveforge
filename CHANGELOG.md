@@ -2,6 +2,38 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## Unreleased
+
+### Fixed
+- **SSD erase could wipe a drive and then stop, leaving it unusable.** Reported by a user on Windows 11 26H2
+  (build 26300): the drive was emptied, then *"The disk you specified is not MBR formatted"* and nothing else — no
+  partition, no volume, no explanation beyond a raw error code.
+
+  DriveForge asked diskpart to `convert gpt` straight after `clean`. But `convert` turns an **empty MBR** disk into
+  GPT, and a disk that has just been cleaned has no partition table at all, so there is nothing to convert. Most
+  Windows builds wave that through; 26H2 does not, and diskpart abandons the rest of the script at the first error
+  — which is why the drive was left wiped and uninitialised.
+
+  It no longer converts. The partition table is now created with the call meant for an uninitialised disk, and
+  then checked; if Windows will not give it one, DriveForge says so in your own language and tells you the drive is
+  blank rather than broken, instead of failing with a hex code. Because nothing is converted any more, this does
+  not depend on how forgiving a particular Windows build happens to be.
+
+- **The same fault, found in two more places while fixing the first.** Creating a bootable VHDX hit it identically
+  — measured, same error code — because a freshly made virtual disk is also uninitialised. And the Windows-To-Go
+  layout would have aborted for the same reason, though there the fallback happens to be the layout it wanted.
+
+  Worth recording why the obvious one-word fix was rejected: diskpart's `noerr` would have let the failure pass,
+  and the next command then initialises the disk as **MBR**. A 4 TB SSD would have come back formatted to 2 TB and
+  reported as a success. That is worse than the bug, so the partition style is now obtained and verified wherever
+  GPT is actually required.
+
+  A dead code path carrying the same pattern was removed rather than fixed — nothing called it, and leaving a
+  broken example in the tree invites someone to copy it.
+
+  Two tests now hold the rule: no cleaned disk may be handed to `convert`, and the SSD erase must verify it got
+  the table it asked for. Both were confirmed by breaking the code on purpose.
+
 ## v4.4.2 — 2026-10-06
 
 ### Fixed

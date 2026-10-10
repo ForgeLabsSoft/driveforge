@@ -6873,7 +6873,11 @@ exit 0
 		{
 			$"select disk {diskNumber}",
 			"clean",
-			"convert mbr",
+			// noerr because `convert mbr` has nothing to convert on a just-cleaned disk and refuses on some builds,
+			// aborting everything below. Tolerating it is safe HERE and only here: MBR is the layout this script
+			// wants, and MBR is exactly what `create partition` falls back to on an uninitialised disk. Do not copy
+			// this to a `convert gpt` — there the fallback is MBR too, which is the wrong answer, silently.
+			"convert mbr noerr",
 			"create partition primary size=300 align=1024",
 			"format quick fs=fat32 label=\"WINTOGO\"",
 			"active",
@@ -6893,42 +6897,6 @@ exit 0
 		}
 		lines.Add("exit");
 		return string.Join(Environment.NewLine, lines);
-	}
-
-	private static string BuildVhdxHostDiskpartScript(int diskNumber, char bootLetter, char hostLetter, bool useUefiLayout)
-	{
-		if (useUefiLayout)
-		{
-			return string.Join(Environment.NewLine, new string[12]
-			{
-				$"select disk {diskNumber}",
-				"clean",
-				"convert gpt",
-				"create partition efi size=300",
-				"format quick fs=fat32 label=\"WINTOGO\"",
-				$"assign letter={bootLetter}",
-				"create partition msr size=128",   // 128 MB — Microsoft minimum for disks > 16 GB; required for 4Kn drives
-				"create partition primary",
-				"format quick fs=ntfs label=\"VHDXSTORE\"",
-				$"assign letter={hostLetter}",
-				"rescan",
-				"exit"
-			});
-		}
-		return string.Join(Environment.NewLine, new string[11]
-		{
-			$"select disk {diskNumber}",
-			"clean",
-			"convert mbr",
-			"create partition primary size=300",
-			"format quick fs=fat32 label=\"WINTOGO\"",
-			"active",
-			$"assign letter={bootLetter}",
-			"create partition primary",
-			"format quick fs=ntfs label=\"VHDXSTORE\"",
-			$"assign letter={hostLetter}",
-			"exit"
-		});
 	}
 
 	private static string BuildCreateVhdxDiskpartScript(string vhdPath, char windowsLetter, long maximumMb)
@@ -10219,7 +10187,18 @@ exit 0
 			// fails and diskpart throws, the finally must still try to detach it. DetachVhdxAsync is harmless (and
 			// caught) if the vdisk was never actually attached.
 			attached = true;
-			string createOut = await RunDiskpartAsync(BuildCreateBootableVhdxDiskpartScript(vhdPath, espLetter, windowsLetter, maxMb));
+			string createOut = await RunDiskpartAsync(BuildAttachBlankVhdxDiskpartScript(vhdPath, maxMb));
+			// A new vdisk is RAW, and `convert gpt` refuses a disk with no partition table on some builds. Measured:
+			// tolerating that leaves the disk MBR and the EFI partition below fails with 0x80070057. So the style is
+			// obtained explicitly and checked before anything is created on it.
+			int vhdDiskNumber = ParseAssociatedDiskNumber(createOut);
+			if (vhdDiskNumber < 0)
+				throw new InvalidOperationException("DriveForge could not tell which disk number Windows gave the new "
+					+ "virtual disk, so it stopped rather than partition the wrong one.\r\n\r\ndiskpart output:\r\n" + createOut);
+			if (!await EnsureDiskPartitionStyleAsync(vhdDiskNumber, "GPT"))
+				throw new InvalidOperationException("The new virtual disk could not be given a GPT partition table, "
+					+ "which the bootable layout requires.\r\n\r\ndiskpart output:\r\n" + createOut);
+			createOut += await RunDiskpartAsync(BuildLayOutBootableVhdxDiskpartScript(vhdDiskNumber, espLetter, windowsLetter));
 			Log("VHDX created + attached (GPT ESP+MSR+Windows), virtual size " + (maxMb / 1024) + " GB.");
 			if (!Directory.Exists(realRoot))
 				throw new InvalidOperationException("The VHDX Windows partition (" + windowsLetter + ":) did not mount.\r\n\r\ndiskpart output:\r\n" + createOut);
@@ -10511,7 +10490,11 @@ exit 0
 
 	// GPT layout for a self-contained bootable VHDX: ESP (FAT32, holds \EFI\Microsoft\Boot\bootmgfw.efi + BCD) +
 	// MSR + a 64K-cluster NTFS Windows partition. The vdisk is created expandable so the file only grows with data.
-	private static string BuildCreateBootableVhdxDiskpartScript(string vhdPath, char espLetter, char windowsLetter, long maximumMb)
+	// Step 1 of the export: make the vdisk and bring it online. It stops before any partition is created, because
+	// a freshly attached vdisk is RAW and the layout below needs GPT — see BuildLayOutBootableVhdxDiskpartScript.
+	// `detail vdisk` is here for its "Associated disk#: N" line, which is how the caller learns the disk number
+	// without the Hyper-V module (Get-VHD), which most machines do not have.
+	private static string BuildAttachBlankVhdxDiskpartScript(string vhdPath, long maximumMb)
 	{
 		return string.Join(Environment.NewLine, new string[]
 		{
@@ -10524,7 +10507,29 @@ exit 0
 			"attributes disk clear readonly noerr",
 			"online disk noerr",
 			"attributes disk clear readonly noerr",
-			"convert gpt noerr",
+			"detail vdisk",
+			"exit"
+		});
+	}
+
+	/// <summary>
+	/// The disk number diskpart gave a just-attached vdisk, read from its own `detail vdisk` output, or -1.
+	/// Deliberately not Get-VHD: that is the Hyper-V module, which is absent on most machines.
+	/// </summary>
+	private static int ParseAssociatedDiskNumber(string detailVdiskOutput)
+	{
+		var m = Regex.Match(detailVdiskOutput ?? "", @"Associated\s+disk#\s*:\s*(\d+)", RegexOptions.IgnoreCase);
+		return m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : -1;
+	}
+
+	// Step 2: the GPT layout — ESP + MSR + Windows. Only called once the disk is known to BE GPT, because
+	// `create partition efi` on anything else fails with 0x80070057 ("MSR and EFI partitions are only supported on
+	// GPT disks"), which is the same failure a user hit on the SSD erase.
+	private static string BuildLayOutBootableVhdxDiskpartScript(int diskNumber, char espLetter, char windowsLetter)
+	{
+		return string.Join(Environment.NewLine, new string[]
+		{
+			$"select disk {diskNumber}",
 			"create partition efi size=100",
 			"format quick fs=fat32 label=\"System\"",
 			$"assign letter={espLetter}",
@@ -15842,6 +15847,37 @@ exit 0
 		return s == "NO NAME" ? "" : s;
 	}
 
+	/// <summary>
+	/// Gives a freshly cleaned disk the partition style the caller needs, and says whether it got it.
+	///
+	/// diskpart's `convert gpt` converts an EMPTY MBR disk into GPT. After `clean` a disk has no partition table at
+	/// all, so there is nothing to convert. Most Windows builds wave it through and initialise the disk anyway;
+	/// 26300 does not — it answers "The disk you specified is not MBR formatted", which aborts the whole diskpart
+	/// script and leaves the drive wiped and unusable. Measured on 26200: `clean` leaves the disk RAW there too, so
+	/// the builds differ only in how forgiving `convert` is, which is not something to depend on.
+	///
+	/// Tolerating the failure with `noerr` would be worse than the bug. Measured: with no convert, the following
+	/// `create partition` initialises the disk as MBR — so a 4 TB SSD would come back formatted to 2 TB, reported
+	/// as a success. Ask for the style with the API meant for an uninitialised disk, then CHECK it.
+	/// </summary>
+	private async Task<bool> EnsureDiskPartitionStyleAsync(int diskNumber, string style)
+	{
+		async Task<string> Current() => (await RunProcessCaptureAsync("powershell.exe",
+			"-NoProfile -Command " + QuoteArgument($"(Get-Disk -Number {diskNumber}).PartitionStyle"))).Trim();
+
+		string now = await Current();
+		// A lenient build may already have done it, and Initialize-Disk refuses a disk that is not RAW.
+		if (string.Equals(now, style, StringComparison.OrdinalIgnoreCase)) return true;
+		if (now.Length == 0 || now.Equals("RAW", StringComparison.OrdinalIgnoreCase))
+		{
+			await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+				+ QuoteArgument($"Initialize-Disk -Number {diskNumber} -PartitionStyle {style} -Confirm:$false"));
+			now = await Current();
+		}
+		Log($"Disk {diskNumber}: partition style is '{now}' after asking for {style}.");
+		return string.Equals(now, style, StringComparison.OrdinalIgnoreCase);
+	}
+
 	// SSD-appropriate erase: clean + quick-format (TRIMs on SSDs) + a full ReTrim so the controller discards
 	// every block. The right approach for flash, where raw overwrite is defeated by wear-levelling.
 	private async Task SsdSecureEraseFlow(DiskItem disk)
@@ -15859,7 +15895,12 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("SsdWorking"), disk.Number));
-			await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nconvert gpt\r\ncreate partition primary\r\nformat fs=ntfs quick label=DriveForge\r\nassign\r\nexit\r\n");
+			// Three steps rather than one script, so the partition style is OBTAINED and CHECKED instead of being
+			// asked of `convert`, which refuses a just-cleaned disk on some builds and aborts everything after it.
+			await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			if (!await EnsureDiskPartitionStyleAsync(disk.Number, "GPT"))
+				throw new InvalidOperationException(string.Format(L("ErrSsdInit"), disk.Number));
+			await RunDiskpartAsync($"select disk {disk.Number}\r\ncreate partition primary\r\nformat fs=ntfs quick label=DriveForge\r\nassign\r\nexit\r\n");
 			await RefreshDisksAsync();
 			var d2 = disks.FirstOrDefault(x => x.Number == disk.Number);
 			char letter = d2?.DriveLetters?.FirstOrDefault() ?? '\0';

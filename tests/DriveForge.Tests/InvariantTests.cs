@@ -718,4 +718,68 @@ public class InvariantTests
 			"ApplyLanguage no longer refreshes a computed result line, so it will stay in the language it was "
 			+ "written in:\n  " + string.Join("\n  ", missing));
 	}
+
+	/// <summary>
+	/// A just-cleaned disk must never be handed to diskpart's `convert`.
+	///
+	/// `convert gpt` converts an EMPTY MBR disk. After `clean` there is no partition table at all, so there is
+	/// nothing to convert. Most Windows builds wave it through; build 26300 answers "The disk you specified is not
+	/// MBR formatted", which aborts the whole script — a user's SSD erase stopped there and left the drive wiped
+	/// and uninitialised (reported against 4.4.2).
+	///
+	/// `noerr` is not an escape hatch here, and that is the point of this rule. Measured: with no convert, the
+	/// following `create partition` initialises the disk as MBR — so a tolerated `convert gpt` failure would hand a
+	/// 4 TB SSD a 2 TB table and call it success. A GPT table must be obtained and CHECKED
+	/// (EnsureDiskPartitionStyleAsync), never asked of `convert`.
+	///
+	/// `convert mbr` is allowed with `noerr`, and only with it: there the fallback IS the wanted layout.
+	/// </summary>
+	[Fact]
+	public void ACleanedDiskIsNeverHandedToDiskpartConvert()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		List<string> problems = new List<string>();
+
+		foreach (Match m in Regex.Matches(src, @"convert\s+(gpt|mbr)(\s+noerr)?", RegexOptions.IgnoreCase))
+		{
+			string style = m.Groups[1].Value.ToLowerInvariant();
+			bool noerr = m.Groups[2].Success;
+
+			// Only inside a diskpart script: the word also appears in prose above these builders.
+			int lineStart = src.LastIndexOf('\n', m.Index) + 1;
+			string line = src.Substring(lineStart, src.IndexOf('\n', m.Index) - lineStart);
+			// Skip C# comments AND diskpart `rem` lines: one script carries a rem that spells out why it does NOT
+			// convert, and matching prose about the rule is not the same as breaking it.
+			string trimmed = line.TrimStart().TrimStart('"');
+			if (trimmed.StartsWith("//") || trimmed.StartsWith("rem ", StringComparison.OrdinalIgnoreCase)) continue;
+
+			if (style == "gpt")
+				problems.Add($"`{m.Value.Trim()}` at offset {m.Index}: a GPT table must be obtained and verified "
+					+ "(EnsureDiskPartitionStyleAsync), not asked of convert — on a cleaned disk convert has nothing "
+					+ "to convert, and tolerating the failure silently yields MBR.");
+			else if (!noerr)
+				problems.Add($"`{m.Value.Trim()}` at offset {m.Index}: needs `noerr`, or it aborts the whole script "
+					+ "on a build where convert refuses a just-cleaned disk.");
+		}
+
+		Assert.True(problems.Count == 0,
+			"diskpart is being asked to convert a disk that may have no partition table:\n  "
+			+ string.Join("\n  ", problems));
+	}
+
+	/// <summary>The SSD erase must obtain its GPT table explicitly, and stop if it does not get it.</summary>
+	[Fact]
+	public void TheSsdEraseVerifiesItGotAGptTable()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "SsdSecureEraseFlow").ToArray();
+		Assert.True(found.Length == 1, $"Expected one SsdSecureEraseFlow, found {found.Length}.");
+
+		string src = found[0].Method.ToString();
+		Assert.True(src.Contains("EnsureDiskPartitionStyleAsync", StringComparison.Ordinal),
+			"SsdSecureEraseFlow no longer obtains the partition style explicitly; a cleaned disk would be left "
+			+ "uninitialised, or silently formatted as MBR.");
+		Assert.True(Regex.IsMatch(src, @"if\s*\(\s*!\s*await\s+EnsureDiskPartitionStyleAsync"),
+			"The result of EnsureDiskPartitionStyleAsync is not checked — the erase would carry on and build a "
+			+ "volume on whatever table it happened to get.");
+	}
 }
