@@ -9673,12 +9673,21 @@ exit 0
 			SetBusy(busy: false);
 			NotifyOperationDone(!fake);
 
+			// The test can only write what the file system hands it, which is the FREE space - so on a drive
+			// with files on it, most of the claimed capacity is never touched. Saying "the capacity is real"
+			// then retracts the caveat the confirmation had just made ("for a complete check, run it on an
+			// empty drive"), and the last message is the one that is remembered. This is the one tool whose
+			// whole purpose is catching a drive that lies about its size; it must not round its own coverage
+			// up. 90% leaves room for file-system overhead on an otherwise empty drive.
+			bool wholeDrive = disk.Size > 0 && verifiedOk >= (long)(disk.Size * 0.9);
 			string verdict;
 			if (stopRequested) verdict = L("CapStopped");
 			else if (fake)
 				verdict = string.Format(L("CapFake"), FormatBytes(verifiedOk), FormatBytes(written), FormatBytes(disk.Size));
-			else
+			else if (wholeDrive)
 				verdict = string.Format(L("CapGenuine"), FormatBytes(verifiedOk));
+			else
+				verdict = string.Format(L("CapGenuinePartial"), FormatBytes(verifiedOk), FormatBytes(disk.Size));
 			ToolRecommendationDetailText.Text = verdict.Replace("\n", " ");
 			SetToolOutput($"Capacity test on {letter}: — claimed {FormatBytes(disk.Size)}\r\nWritten: {FormatBytes(written)}\r\nVerified OK: {FormatBytes(verifiedOk)}\r\nResult: {(fake ? "FAKE/FAULTY" : "GENUINE")}");
 			MessageBox.Show(verdict, L("MbCapacityTitle"), MessageBoxButton.OK, fake ? MessageBoxImage.Warning : MessageBoxImage.Information);

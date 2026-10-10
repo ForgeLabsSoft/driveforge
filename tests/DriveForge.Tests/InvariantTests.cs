@@ -1226,4 +1226,33 @@ public class InvariantTests
 			"These flows announce an ending while polling Stop, and have no wording for a stopped run, so a "
 			+ "run the person cut short reads as one that finished:\n  " + string.Join("\n  ", fresh.Distinct()));
 	}
+
+	/// <summary>
+	/// The capacity test must not pronounce a drive genuine beyond what it actually wrote.
+	///
+	/// It can only write the FREE space, so on a drive with files on it most of the claimed capacity is
+	/// never touched - and a counterfeit can sit in the untouched part. The confirmation says so
+	/// ("for a complete check, run it on an empty drive"); the verdict used to retract it with "the
+	/// capacity is real" whatever fraction had been covered. The last message is the one remembered,
+	/// and this is the one tool whose entire purpose is catching a drive that lies about its size.
+	/// </summary>
+	[Fact]
+	public void TheCapacityVerdictMatchesWhatWasActuallyTested()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "CapacityTest_Click").ToArray();
+		Assert.True(found.Length == 1, $"Expected one CapacityTest_Click, found {found.Length}.");
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		Assert.True(code.Contains("CapGenuinePartial", StringComparison.Ordinal),
+			"A drive is called genuine on one verdict however little of it was reached. On a drive that is "
+			+ "mostly full that is a few gigabytes of evidence standing in for the whole claimed size.");
+
+		// A COMPARISON, not a co-occurrence. The first version of this rule matched verifiedOk and
+		// disk.Size appearing on one line - which the CapGenuinePartial format call does, so replacing the
+		// coverage test with `verifiedOk >= 0` left it green while every drive got the full verdict again.
+		Assert.True(Regex.IsMatch(code, @"verifiedOk\s*[<>]=?[^;\r\n]*disk\.Size"),
+			"What was verified is never compared against what the drive claims, so the choice between the "
+			+ "two verdicts cannot be about coverage at all.");
+	}
 }
