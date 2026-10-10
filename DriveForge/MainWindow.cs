@@ -15889,6 +15889,43 @@ exit 0
 	/// `create partition` initialises the disk as MBR — so a 4 TB SSD would come back formatted to 2 TB, reported
 	/// as a success. Ask for the style with the API meant for an uninitialised disk, then CHECK it.
 	/// </summary>
+	[StructLayout(LayoutKind.Sequential)]
+	private struct STORAGE_PROPERTY_QUERY { public uint PropertyId; public uint QueryType; public uint AdditionalParameters; }
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct DEVICE_TRIM_DESCRIPTOR { public uint Version; public uint Size; public byte TrimEnabled; }
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool DeviceIoControl(SafeFileHandle h, uint ctl, ref STORAGE_PROPERTY_QUERY inB, uint inS,
+		ref DEVICE_TRIM_DESCRIPTOR outB, uint outS, out uint ret, IntPtr ovl);
+
+	/// <summary>
+	/// Whether the DEVICE itself reports that it accepts TRIM, or null when it will not say.
+	///
+	/// Measured on a USB-bridged SSD: a ReTrim really did discard 236 of its 238 GB, while the bus-type rule
+	/// in the erase called the discard unconfirmed. Guessing from the model name and the bus can be wrong in
+	/// both directions; this asks the storage stack instead. It answers with a flag rather than a sentence,
+	/// so unlike reading Optimize-Volume's output it does not depend on the system language.
+	/// </summary>
+	private static bool? DeviceReportsTrimSupport(int diskNumber)
+	{
+		const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x2D1400;
+		const uint StorageDeviceTrimProperty = 8;
+		const uint PropertyStandardQuery = 0;
+		try
+		{
+			using SafeFileHandle h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
+			if (h.IsInvalid) return null;
+			var q = new STORAGE_PROPERTY_QUERY { PropertyId = StorageDeviceTrimProperty, QueryType = PropertyStandardQuery };
+			var d = new DEVICE_TRIM_DESCRIPTOR();
+			if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, ref q, (uint)Marshal.SizeOf<STORAGE_PROPERTY_QUERY>(),
+				ref d, (uint)Marshal.SizeOf<DEVICE_TRIM_DESCRIPTOR>(), out _, IntPtr.Zero))
+				return null;
+			return d.TrimEnabled != 0;
+		}
+		catch { return null; }
+	}
+
 	private async Task<bool> EnsureDiskPartitionStyleAsync(int diskNumber, string style)
 	{
 		async Task<string> Current() => (await RunProcessCaptureAsync("powershell.exe",
@@ -15953,8 +15990,14 @@ exit 0
 				|| bus.Contains("1394", StringComparison.OrdinalIgnoreCase)
 				|| bus.Equals("SD", StringComparison.OrdinalIgnoreCase)
 				|| bus.Equals("MMC", StringComparison.OrdinalIgnoreCase);
-			bool trimEffective = reTrimRan && DetectWipeMedia(disk) == WipeMedia.Ssd && !bridgeBus;
-			Log($"SSD erase on Disk {disk.Number}: ReTrim ran={reTrimRan}, media={DetectWipeMedia(disk)}, bus={bus}, bridge={bridgeBus}, discard-claimed={trimEffective}.");
+			// Supersedes the bus-only rule described above, which was measured wrong on a USB-bridged SSD: the
+			// ReTrim discarded 236 of 238 GB and the user would still have been told the data might be there.
+			// Ask the device; keep the old guess only when it will not answer, because an unanswered query must
+			// never turn into a claim that the data is gone.
+			bool? deviceTrim = DeviceReportsTrimSupport(disk.Number);
+			bool trimEffective = reTrimRan && (deviceTrim ?? (DetectWipeMedia(disk) == WipeMedia.Ssd && !bridgeBus));
+			string trimAnswer = deviceTrim.HasValue ? (deviceTrim.Value ? "yes" : "no") : "unknown";
+			Log($"SSD erase on Disk {disk.Number}: ReTrim ran={reTrimRan}, media={DetectWipeMedia(disk)}, bus={bus}, bridge={bridgeBus}, device-reports-trim={trimAnswer}, discard-claimed={trimEffective}.");
 			MessageBox.Show(string.Format(L(trimEffective ? "SsdDone" : "SsdDoneNoTrim"), disk.Number),
 				"DriveForge", MessageBoxButton.OK, trimEffective ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}

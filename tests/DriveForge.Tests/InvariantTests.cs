@@ -823,4 +823,32 @@ public class InvariantTests
 			"EnsureDiskPartitionStyleAsync is called without checking what it returns, so the flow would carry "
 			+ "on with the wrong partition table:\n  " + string.Join("\n  ", unguarded));
 	}
+
+	/// <summary>
+	/// The erase must ASK the device whether it accepts TRIM, not infer it from the bus.
+	///
+	/// This decides which of two sentences the user reads: that the old data was discarded, or that it may
+	/// still be physically present. Measured on a USB-bridged SSD, the bus rule was wrong - a ReTrim had
+	/// discarded 236 of 238 GB while the message said it might all still be there. Measured again on a
+	/// spinning disk in a USB enclosure, the device correctly answers no, and on a cheap flash drive it does
+	/// not answer at all - which is why the unanswered case must fall back to the old conservative guess
+	/// rather than become a claim.
+	/// </summary>
+	[Fact]
+	public void TheEraseAsksTheDeviceBeforeClaimingTheDataIsGone()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "SsdSecureEraseFlow").ToArray();
+		Assert.True(found.Length == 1, $"Expected one SsdSecureEraseFlow, found {found.Length}.");
+		string src = found[0].Method.ToString();
+
+		Assert.True(src.Contains("DeviceReportsTrimSupport", StringComparison.Ordinal),
+			"The erase no longer asks the device whether it accepts TRIM, so the claim about the old data is "
+			+ "back to being inferred from the model name and the bus - which was measured wrong in both "
+			+ "directions.");
+
+		// The unanswered case must stay conservative: `??` keeps the old guess, it does not claim anything.
+		Assert.True(Regex.IsMatch(src, @"deviceTrim\s*\?\?"),
+			"The device answer is used without a fallback for the case where the device will not answer. A "
+			+ "cheap flash drive returns no answer at all, and no answer must never read as 'the data is gone'.");
+	}
 }
