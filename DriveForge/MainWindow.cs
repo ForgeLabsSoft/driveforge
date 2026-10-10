@@ -15318,12 +15318,18 @@ exit 0
 			// sectors with the table still pointing at them and nothing to roll back to. So a Stop pressed mid-move is
 			// ignored by design — but the flag stays set, and SetBusy(false) zeroes the bar when it is, which left a
 			// fully-completed move announcing "moved successfully" over an empty 0% bar. Say so, then clear it.
-			if (stopRequested) { Log("Stop was ignored: a partition move cannot be interrupted safely — it ran to completion."); stopRequested = false; }
+			// Remembered before the reset, because the ending has to mention it: a button the person pressed
+			// that did nothing visible needs an explanation, or the natural reading is that the operation is
+			// still running - and that is how a drive gets pulled out mid-move.
+			bool stopIgnored = stopRequested;
+			if (stopIgnored) { Log("Stop was ignored: a partition move cannot be interrupted safely — it ran to completion."); stopRequested = false; }
 			ProgressBar.Value = 100.0;
 			SetBusy(busy: false);
 			await RefreshDisksAsync();
 			Log($"Moved MBR partition #{pick.Value + 1} on Disk {disk.Number}: LBA {src} -> {dst}.");
-			MessageBox.Show(moved ? string.Format(L("MvDone"), pick.Value + 1) : L("MvFailed"), L("MvTitle"), MessageBoxButton.OK, moved ? MessageBoxImage.Information : MessageBoxImage.Warning);
+			MessageBox.Show((moved ? string.Format(L("MvDone"), pick.Value + 1) : L("MvFailed"))
+				+ (stopIgnored ? "\n\n" + L("MvStopIgnored") : ""),
+				L("MvTitle"), MessageBoxButton.OK, moved ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex)
 		{
@@ -15599,11 +15605,17 @@ exit 0
 			await RunDiskpartAsync($"select disk {disk.Number}\r\nonline disk\r\nattributes disk clear readonly\r\nexit\r\n");
 			// See the MBR move: the copy is deliberately uninterruptible, so a mid-move Stop is ignored by design and
 			// must not leave a completed move showing a zeroed bar.
-			if (stopRequested) { Log("Stop was ignored: a partition move cannot be interrupted safely — it ran to completion."); stopRequested = false; }
+			// Remembered before the reset, because the ending has to mention it: a button the person pressed
+			// that did nothing visible needs an explanation, or the natural reading is that the operation is
+			// still running - and that is how a drive gets pulled out mid-move.
+			bool stopIgnored = stopRequested;
+			if (stopIgnored) { Log("Stop was ignored: a partition move cannot be interrupted safely — it ran to completion."); stopRequested = false; }
 			ProgressBar.Value = 100.0; SetBusy(busy: false);
 			await RefreshDisksAsync();
 			Log($"Moved GPT partition #{pick.Value + 1} on Disk {disk.Number}: LBA {p.first} -> {newFirst}.");
-			MessageBox.Show(moved ? string.Format(L("MvDone"), pick.Value + 1) : L("MvFailed"), L("MvTitle"), MessageBoxButton.OK, moved ? MessageBoxImage.Information : MessageBoxImage.Warning);
+			MessageBox.Show((moved ? string.Format(L("MvDone"), pick.Value + 1) : L("MvFailed"))
+				+ (stopIgnored ? "\n\n" + L("MvStopIgnored") : ""),
+				L("MvTitle"), MessageBoxButton.OK, moved ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex)
 		{

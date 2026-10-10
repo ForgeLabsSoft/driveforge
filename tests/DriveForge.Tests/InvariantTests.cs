@@ -1187,25 +1187,27 @@ public class InvariantTests
 	/// a folder and the recovery into a zip - while the wipe, the free-space wipe, the shredder, the
 	/// imager and the deep scan all handled it. The convention existed; these had simply missed it.
 	///
-	/// The baseline below is the honest part. The rule was dry-run over the whole app before being
-	/// written, and eight further flows match the shape. They have NOT been audited - a stop may be
-	/// unreachable in some, or may throw rather than fall through to the message - so they are recorded
-	/// rather than blessed in silence or 'fixed' on a guess. Nothing NEW may join them, and working one
-	/// off the list means deleting its name here.
+	/// The list below is the honest part. The rule was dry-run over the whole app before being written,
+	/// and eight further flows matched the shape. All eight have since been READ, one at a time: six of
+	/// them cannot reach their ending after a Stop at all - the stop throws, or is caught, or the result
+	/// is verified on the disk afterwards and fails - and the other two could, and now say so. Each name
+	/// that stays carries the reason it stays. A name with no reason is a rule looking away.
+	///
+	/// Nothing NEW may join the list. Adding a name means doing the reading first.
 	/// </summary>
 	[Fact]
 	public void AStoppedRunDoesNotAnnounceItselfAsFinished()
 	{
-		HashSet<string> notYetAudited = new HashSet<string>(StringComparer.Ordinal)
+		// Read 2026-10-11. Each of these reports an ending and polls Stop, and in each the ending is
+		// unreachable once a Stop has happened:
+		HashSet<string> stopCannotReachTheEnding = new HashSet<string>(StringComparer.Ordinal)
 		{
-			"RunSpeedTestAsync",
-			"StartButton_Click",
-			"BackupThisPcToImageAsync",
-			"RunExperimentalFullRootUsbCloneAsync",
-			"ExportBootableVhdxCoreAsync",
-			"MultiBootFlowAsync",
-			"MovePartitionFlow",
-			"MoveGptFlow",
+			"RunSpeedTestAsync",                      // MeasureDiskSpeed throws OperationCanceledException
+			"StartButton_Click",                      // a stop lands in the "aborted before any write" branch
+			"BackupThisPcToImageAsync",               // the capture is verified, and `ok` needs the file on disk
+			"RunExperimentalFullRootUsbCloneAsync",   // throws on stop; `ok` also requires !rawIncomplete
+			"ExportBootableVhdxCoreAsync",            // throws on stop before the ending
+			"MultiBootFlowAsync",                     // a stop kills Ventoy, then the disk is checked and throws
 		};
 
 		List<string> fresh = new List<string>();
@@ -1216,7 +1218,7 @@ public class InvariantTests
 			if (!code.Contains("stopRequested", StringComparison.Ordinal)) continue;
 			if (!Regex.IsMatch(code, @"L\(""\w*(?:Done|Finished|Complete)\w*""\)")) continue;        // does not report its own ending
 			if (Regex.IsMatch(code, @"L\(""\w*Stop\w*""\)")) continue;         // has something to say about a stop
-			if (notYetAudited.Contains(m.Name)) continue;
+			if (stopCannotReachTheEnding.Contains(m.Name)) continue;
 			fresh.Add(m.Name);
 		}
 
