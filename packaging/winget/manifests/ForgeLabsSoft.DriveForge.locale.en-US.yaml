@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 
 PackageIdentifier: ForgeLabsSoft.DriveForge
-PackageVersion: 4.4.3
+PackageVersion: 4.4.4
 PackageLocale: en-US
 Publisher: ForgeLabsSoft
 PublisherUrl: https://github.com/ForgeLabsSoft
@@ -37,19 +37,22 @@ Tags:
 - portable
 - open-source
 ReleaseNotes: |-
-  Fixed: erasing an SSD could empty the drive and then stop, leaving it blank and uninitialised with only
-  an error code to explain it. Reported by a user on Windows 11 26H2.
+  Fixed: the same fault behind 4.4.3 was still in four more places, and one of them was the tool for
+  recovering from it.
 
-  DriveForge was asking Windows to convert a partition table that the erase had just removed, so there was
-  nothing to convert. It now creates the table with the call meant for a blank disk, and then checks that it
-  got one; if Windows refuses, the message says the drive is blank rather than broken, in your own language.
+  Quick partition, Convert MBR/GPT and "Initialize a blank / RAW disk" all emptied the disk and then asked
+  Windows to convert a partition table that no longer existed, which fails on Windows 11 26H2 and leaves the
+  drive blank. Quick format had the quiet version of it: it created a partition without asking for a table at
+  all, and Windows then makes an MBR one, so a 4 TB drive came back as a 2 TB volume and the operation
+  reported success.
 
-  If this happened to you, the drive is not damaged. Initialise it from DriveForge's Partition tools,
-  "Initialize a blank / RAW disk", or from Windows Disk Management, and it is a normal empty drive again.
+  All four now create the partition table with the call meant for a blank disk and check that they got it.
+  Two build-breaking rules were added so the pattern cannot return, and both were confirmed by deliberately
+  breaking the code.
 
-  The same mistake was found in two more places while fixing the first - creating a bootable VHDX, and the
-  Windows-To-Go layout - and both are fixed. Two tests now fail the build if it is ever reintroduced.
-ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.4.3
+  Verified on real hardware as well as in tests, including driving the application itself through the repair
+  on a USB-attached SSD, in both directions.
+ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.4.4
 Documentations:
 - DocumentLabel: Wiki
   DocumentUrl: https://github.com/ForgeLabsSoft/driveforge/wiki
