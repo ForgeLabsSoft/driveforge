@@ -20,3 +20,9 @@ TestResults/
 *.user
 Thumbs.db
 desktop.ini
+
+# Backups made while mutation-testing a rule (the file is restored byte-identically afterwards).
+# One of these was committed by a `git add -A` once: 17,640 lines of duplicated source.
+*.mutbak
+*.mutbak[0-9]
+*.mutbak?
