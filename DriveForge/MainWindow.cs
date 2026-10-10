@@ -13588,6 +13588,10 @@ exit 0
 			var rr = await Task.Run(() => RecoverPickedToDir(picked, scan, temp));
 			ok = rr.Ok; fail = rr.Fail; partialCount = rr.Partial;
 			int emptyCount = rr.Empty;
+			// Same as the folder recovery: the files after a Stop are never attempted, and saying only how many
+			// came back invites the reader to treat the rest as unrecoverable. They were not tested.
+			bool stopped = stopRequested;
+			int skipped = Math.Max(0, picked.Count - (rr.Ok + rr.Partial + rr.Fail));
 			// Partial files are real files on disk — archive them too, and report them separately from clean ones.
 			// Zip whatever was recovered EVEN IF the user hit Stop: the temp folder holds the only copies, and the
 			// finally deletes it — skipping the zip on stop would silently destroy every file recovered so far.
@@ -13600,6 +13604,7 @@ exit 0
 			SetBusy(busy: false);
 			NotifyOperationDone(ok > 0);
 			if (MessageBox.Show(string.Format(L("RfZipDoneHead"), ok, picked.Count, zipPath)
+					+ (stopped && skipped > 0 ? string.Format(L("RfRecStoppedNote"), skipped) : "")
 					+ (emptyCount > 0 ? string.Format(L("RfRecEmptyNote"), emptyCount) : "")
 					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
 					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfZipShowExplorer"),

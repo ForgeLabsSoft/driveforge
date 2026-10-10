@@ -1112,22 +1112,33 @@ public class InvariantTests
 	[Fact]
 	public void AStoppedRecoveryIsNotReportedAsAFinishedOne()
 	{
-		var found = SourceModel.Methods().Where(m => m.Name == "RecoverButton_Click").ToArray();
-		Assert.True(found.Length == 1, $"Expected one RecoverButton_Click, found {found.Length}.");
-		// Code only: the comments here quote the message this rule exists to prevent.
-		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
-			.Where(l => !l.TrimStart().StartsWith("//")));
+		// Every flow that hands a list of files to RecoverPickedToDir, not one method by name: a third
+		// recovery path added later must not be able to land without the same sentence.
+		var callers = SourceModel.Methods()
+			.Where(m => m.Name != "RecoverPickedToDir" && m.Method.ToString().Contains("RecoverPickedToDir(", StringComparison.Ordinal))
+			.ToArray();
+		Assert.True(callers.Length >= 2,
+			$"Only {callers.Length} flow(s) recover picked files; there were two - into a folder and into a zip.");
 
-		Assert.True(code.Contains("RfRecStoppedNote", StringComparison.Ordinal),
-			"A stopped recovery says nothing about the files it never reached, so the count of recovered "
-			+ "files reads as a verdict on all of them.");
+		List<string> problems = new List<string>();
+		foreach (var c in callers)
+		{
+			// Code only: the comments in these flows quote the message this rule exists to prevent.
+			string code = string.Join("\n", c.Method.ToString().Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//")));
+			if (!code.Contains("RfRecStoppedNote", StringComparison.Ordinal))
+				problems.Add($"{c.Name}: says nothing about the files a Stop never reached, so the count of "
+					+ "recovered files reads as a verdict on all of them");
+			else if (!Regex.IsMatch(code, @"stopped\s*&&"))
+				problems.Add($"{c.Name}: the note is not tied to the run having been stopped");
+			else if (!Regex.IsMatch(code, @"picked\.Count\s*-\s*\(\s*rr\.Ok"))
+				problems.Add($"{c.Name}: the number of untouched files is not derived from what was actually "
+					+ "attempted");
+		}
 
-		Assert.True(Regex.IsMatch(code, @"stopped\s*&&"),
-			"The note about untouched files is not tied to the run having been stopped.");
-
-		Assert.True(Regex.IsMatch(code, @"picked\.Count\s*-\s*\(\s*rr\.Ok"),
-			"The number of untouched files is not derived from what was actually attempted. It has to be "
-			+ "the picked count minus the files that were recovered, partly recovered or failed - any other "
-			+ "number is a guess presented to someone deciding whether to give up on a drive.");
+		Assert.True(problems.Count == 0,
+			"A stopped recovery reads like a finished one. The files past the Stop were never tested, and on "
+			+ "a dying drive that is the difference between trying again and giving up on the drive:\n  "
+			+ string.Join("\n  ", problems));
 	}
 }
