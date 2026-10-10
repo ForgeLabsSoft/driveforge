@@ -2,7 +2,7 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## v4.4.4 — 2026-10-10
 
 ### Fixed
 - **The same fault was in three more places, and one of them was the tool for recovering from it.** 4.4.3
