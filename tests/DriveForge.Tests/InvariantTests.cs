@@ -1056,4 +1056,44 @@ public class InvariantTests
 			$"Only {callers} flows lay out a single partition through the checked step; there were three: the "
 			+ "SSD erase, Initialize, and Format.");
 	}
+
+	/// <summary>
+	/// The wipe is confirmed AFTER the method is chosen, never before.
+	///
+	/// The other way round, the confirmation promises something the next step can take back. It read
+	/// "Every sector will be OVERWRITTEN. Data will NOT be recoverable. This cannot be undone." - and
+	/// the user was then offered the method, whose first entry is "Quick - clear partition table only
+	/// (fast, recoverable)", which does neither of those things. One of the six choices made the
+	/// sentence they had just agreed to false.
+	///
+	/// The ending had already been fixed to say which of the two actually happened, and the comment
+	/// there spells the problem out - but the promise itself was left in place, and the promise is the
+	/// half the person is asked to agree to. Choosing first also means cancelling at the method list
+	/// costs nothing, instead of coming after a full-screen warning about unrecoverable data.
+	/// </summary>
+	[Fact]
+	public void TheWipeIsConfirmedAfterTheMethodIsChosen()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "WipeDrive_Click").ToArray();
+		Assert.True(found.Length == 1, $"Expected one WipeDrive_Click, found {found.Length}.");
+		// Code only: the prose above the flow quotes both strings, in the order that was wrong.
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		int method = code.IndexOf("AmWipeMethodTitle", StringComparison.Ordinal);
+		int confirm = code.IndexOf("MbWipeConfirm", StringComparison.Ordinal);
+		Assert.True(method >= 0 && confirm >= 0,
+			"The wipe flow no longer shows a method list or no longer confirms - one of the two is gone, and "
+			+ "this rule is about the order between them.");
+
+		Assert.True(method < confirm,
+			"The drive is confirmed BEFORE the method is chosen, so the confirmation is promising something "
+			+ "the next step can take back: Quick clears the partition table and overwrites nothing, after the "
+			+ "person has agreed that every sector will be overwritten and nothing will be recoverable.");
+
+		Assert.True(code.Contains("MbWipeConfirmQuick", StringComparison.Ordinal),
+			"Quick and the overwrite methods share one confirmation again. They cannot: one of them writes "
+			+ "over every sector and the other writes nothing at all, and the drive's owner is agreeing to "
+			+ "whichever sentence is on screen.");
+	}
 }

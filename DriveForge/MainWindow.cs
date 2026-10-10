@@ -8705,12 +8705,14 @@ exit 0
 		if (wmode == 1) { await WipeFreeSpaceFlow(disk); return; }
 		if (wmode == 2) { await SsdSecureEraseFlow(disk); return; }
 
-		string contents = await GetDiskContentsAsync(disk.Number);
-		if (MessageBox.Show(string.Format(L("MbWipeConfirm"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
-				L("MbWipeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
-			return;
-
-		// Method dropdown. Each maps to a list of overwrite passes (0 = zeros, 1 = ones/0xFF, 2 = random).
+		// The METHOD is chosen first, and only then is the operation confirmed - because the confirmation
+		// has to describe what will actually happen. It used to run the other way round: the user accepted
+		// "Every sector will be OVERWRITTEN. Data will NOT be recoverable", and was THEN offered "Quick -
+		// clear partition table only (fast, recoverable)", which does neither. The ending was already fixed
+		// to say which of the two had happened; this fixes the promise itself, which is the half the person
+		// is actually asked to agree to. It also means cancelling at the method list costs them nothing.
+		//
+		// Each method maps to a list of overwrite passes (0 = zeros, 1 = ones/0xFF, 2 = random).
 		string[] methods = {
 			L("AmMethodQuick"),
 			L("AmMethodZero"),
@@ -8734,6 +8736,14 @@ exit 0
 			default: fills = new[] { 0 }; break;                     // Zero 1
 		}
 		string label = methods[sel.Value].Split('—')[0].Trim();
+		// Quick overwrites nothing at all, so it gets a confirmation that says so rather than one promising
+		// that every sector will be written over.
+		bool overwrote = fills.Length > 0;
+
+		string contents = await GetDiskContentsAsync(disk.Number);
+		if (MessageBox.Show(string.Format(L(overwrote ? "MbWipeConfirm" : "MbWipeConfirmQuick"), disk.Number, disk.FriendlyName, FormatBytes(disk.Size), contents),
+				L("MbWipeTitle"), MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK)
+			return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // make sure this is still the same physical drive
 
 		bool failed = false;
@@ -8764,7 +8774,6 @@ exit 0
 			// false assurance — someone selling or donating the drive believes it is unreadable when every file is
 			// still there for any undelete tool. Say plainly which of the two actually happened.
 			// (These messages were also the last hardcoded English left in this flow.)
-			bool overwrote = fills.Length > 0;
 			MessageBox.Show(stopRequested
 				? string.Format(L("MbWipeStopped"), disk.Number)
 				: string.Format(L(overwrote ? "MbWipeDoneOverwrite" : "MbWipeDoneQuick"), disk.Number, label),
