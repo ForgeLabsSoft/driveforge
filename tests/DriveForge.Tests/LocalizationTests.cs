@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace DriveForge.Tests;
@@ -421,6 +424,115 @@ public class LocalizationTests
 		}
 		Assert.True(offenders.Count == 0,
 			"UI text typed into the source instead of coming from a string key:\n  " + string.Join("\n  ", offenders));
+	}
+
+	/// <summary>
+	/// The verdict a diagnostic tool ends on comes from the dictionary, never from the source.
+	///
+	/// The two rules above match a literal assigned straight to a widget, and that is not how a verdict is
+	/// written: it is built into a local over several branches and assigned at the end. The surface test's
+	/// five endings were typed in English that way and no rule here could see them - while the confirmation
+	/// that opens the same tool, its title, its progress line and its error message were all translated. So
+	/// the one sentence in the app that says a drive may be dying reached sixteen of seventeen languages in
+	/// a language the reader may not have, under a window that was otherwise entirely in theirs.
+	///
+	/// This follows the assignment back: the locals it names in the same method, and one step into a helper
+	/// it calls (which is how the health card's verdict is built). A literal counts as text somebody reads
+	/// when it holds two words - that is what separates a sentence from the property names the predictive
+	/// verdict looks up ("ReadErrorsUncorrected") and from punctuation and units.
+	///
+	/// The report pane underneath (SetToolOutput) is deliberately NOT covered: it carries raw diskpart,
+	/// CHKDSK and PowerShell output verbatim on twenty other screens and is English everywhere. The verdict
+	/// is the sentence the user acts on; the report is the evidence under it.
+	/// </summary>
+	[Fact]
+	public void TheVerdictOnTheToolsCardIsNeverTypedInEnglish()
+	{
+		var offenders = new List<string>();
+		foreach (var (file, root) in SourceModel.Parsed)
+		{
+			foreach (AssignmentExpressionSyntax a in root.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+			{
+				if (a.Left is not MemberAccessExpressionSyntax ma || ma.Name.Identifier.Text != "Text") continue;
+				if (ma.Expression is not IdentifierNameSyntax widget
+					|| widget.Identifier.Text != "ToolRecommendationDetailText") continue;
+				var method = a.FirstAncestorOrSelf<BaseMethodDeclarationSyntax>();
+				if (method == null) continue;
+
+				// Follow the assignment back until the chain stops growing. ONE hop is not enough: the coverage line
+				// is a string declared fifty lines above the verdict, so it is named inside `verdict` and not inside
+				// `verdict.Replace(...)`. Measured - the first draft of this rule did not reach it.
+				//
+				// Only STRING locals and string-returning helpers. Following every name reached into
+				// RunSurfaceScanCore and flagged its "Could not open the disk for reading." - an exception message,
+				// not a verdict, and a false positive here is how a rule gets loosened later.
+				var sources = new List<SyntaxNode>();
+				var pending = new Queue<SyntaxNode>();
+				var walked = new HashSet<string>(StringComparer.Ordinal) { "L" };
+				pending.Enqueue(a.Right);
+				while (pending.Count > 0)
+				{
+					SyntaxNode here = pending.Dequeue();
+					sources.Add(here);
+					foreach (string name in here.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>()
+							.Select(i => i.Identifier.Text).Distinct().ToList())
+					{
+						if (!walked.Add(name)) continue;
+						foreach (var v in method.DescendantNodes().OfType<VariableDeclaratorSyntax>())
+							if (v.Identifier.Text == name && v.Initializer != null && IsString(
+									(v.Parent as VariableDeclarationSyntax)?.Type.ToString()))
+								pending.Enqueue(v.Initializer.Value);
+						foreach (var asg in method.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+							if (asg.Left is IdentifierNameSyntax lid && lid.Identifier.Text == name)
+								pending.Enqueue(asg.Right);
+						// Into a helper that hands back text, so moving the wording into a method does not hide it.
+						foreach (var (_, r) in SourceModel.Parsed)
+							foreach (var m in r.DescendantNodes().OfType<MethodDeclarationSyntax>())
+								if (m.Identifier.Text == name && m.ReturnType.ToString().Contains("string"))
+									sources.Add(m);
+					}
+				}
+
+				foreach (SyntaxNode node in sources)
+					foreach (string sentence in SentencesTypedIn(node))
+						offenders.Add($"{SourceModel.Where(file, a)}: \"{sentence}\"");
+			}
+		}
+		Assert.True(offenders.Count == 0,
+			"A tool verdict is written in English in the source instead of coming from a string key"
+				+ " (this is the sentence the user reads):\n  " + string.Join("\n  ", offenders.Distinct()));
+	}
+
+	/// <summary>A declaration that holds text. Nothing else is followed back.</summary>
+	private static bool IsString(string? declaredType) =>
+		declaredType is "string" or "string?" or "String" or "String?";
+
+	/// <summary>Literals under <paramref name="node"/> that read as a sentence rather than as a lookup
+	/// name, a unit or punctuation. A key inside L("...") is not one.</summary>
+	private static IEnumerable<string> SentencesTypedIn(SyntaxNode node)
+	{
+		foreach (SyntaxNode n in node.DescendantNodesAndSelf())
+		{
+			string text;
+			// The runs of one $"..." are ONE sentence and are judged together. Taken apart, the coverage line
+			// ($"Read {x} of {y} ({z}%)") is "Read ", " of ", " (" and "%)" - four single words, and it walked
+			// straight through the two-word test below. Measured: the first draft of this rule did not see it.
+			if (n is InterpolatedStringExpressionSyntax istr)
+				text = string.Join(" ", istr.Contents.OfType<InterpolatedStringTextSyntax>()
+					.Select(t => t.TextToken.ValueText));
+			else if (n is LiteralExpressionSyntax lit && lit.Token.IsKind(SyntaxKind.StringLiteralToken))
+			{
+				// The argument of L("Key") is the name of a string, not a string anybody reads.
+				if (n.Parent is ArgumentSyntax arg && arg.Parent?.Parent is InvocationExpressionSyntax inv
+					&& (inv.Expression as IdentifierNameSyntax)?.Identifier.Text == "L") continue;
+				text = lit.Token.ValueText;
+			}
+			else continue;
+
+			// Two words of two or more letters. One word is a property name or a unit; no words is punctuation.
+			if (Regex.IsMatch(text, @"[A-Za-z]{2,}[^A-Za-z]+[A-Za-z]{2,}"))
+				yield return Regex.Replace(text.Trim(), @"\s+", " ");
+		}
 	}
 
 	/// <summary>

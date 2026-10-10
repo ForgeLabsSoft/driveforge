@@ -14353,8 +14353,8 @@ exit 0
 			// against, so coverage is UNVERIFIABLE — that must not count as "fully covered" either.
 			bool covered = disk.Size > 0 && res.readBytes >= disk.Size - (8L * 1024 * 1024);
 			string coverageNote = disk.Size > 0
-				? $"Read {FormatBytes(res.readBytes)} of {FormatBytes(disk.Size)} ({res.readBytes * 100.0 / disk.Size:F1}%)"
-				: $"Read {FormatBytes(res.readBytes)}";
+				? string.Format(L("SfCoverage"), FormatBytes(res.readBytes), FormatBytes(disk.Size), (res.readBytes * 100.0 / disk.Size).ToString("F1"))
+				: string.Format(L("SfCoverageNoSize"), FormatBytes(res.readBytes));
 			// Don't slam the bar to 100% for a scan that ended early — a full bar was itself part of the false
 			// "the whole drive was checked" impression. This MUST run before SetBusy(false): UpdateProgressStats only
 			// moves ProgressBar.Value while isBusy is true, so doing it afterwards would silently do nothing.
@@ -14400,16 +14400,18 @@ exit 0
 
 			// Distinguish "the USER cancelled" from "the drive stopped answering". Both leave the scan short, but blaming
 			// the hardware for a deliberate Stop is a false alarm on a perfectly healthy drive.
+			// Every one of these was typed in English, under a confirmation, a progress row and an error message
+			// that are all translated. A drive that may be dying has to say so in the language the window is in.
 			string verdict = res.bad > 0
-				? $"⚠ {res.bad} unreadable block(s) found ({FormatBytes(res.badBytes)}).\n\nThe drive may be failing — back up your data now and consider replacing it."
+				? string.Format(L("SfBad"), res.bad, FormatBytes(res.badBytes))
 				: covered
-					? $"✓ No bad blocks found.\n\n{coverageNote} with no read errors at ~{avgMb:F0} MB/s. The surface looks healthy."
+					? string.Format(L("SfClean"), coverageNote, avgMb.ToString("F0"))
 					: res.stopped
-						? $"Surface test stopped before finishing.\n\n{coverageNote} at ~{avgMb:F0} MB/s, with no read errors in that part. The rest of the drive was not checked, so this is not a verdict either way."
+						? L("SfStoppedHead") + "\n\n" + string.Format(L("SfStoppedBody"), coverageNote, avgMb.ToString("F0"))
 						: disk.Size <= 0
-							? $"The drive did not report its size, so how much of it was checked could not be verified.\n\n{coverageNote} at ~{avgMb:F0} MB/s, with no read errors in that part. This is not a verdict either way."
-							: $"⚠ The test did NOT cover the whole drive.\n\n{coverageNote} at ~{avgMb:F0} MB/s, then the drive stopped returning data. No bad blocks were hit in the part that was read, but this is NOT a clean bill of health — a drive that stops responding mid-scan may be failing. Back up your data.";
-			if (res.stopped && res.bad > 0) verdict = "Surface test stopped before finishing.\n\n" + verdict;
+							? string.Format(L("SfNoSize"), coverageNote, avgMb.ToString("F0"))
+							: string.Format(L("SfPartial"), coverageNote, avgMb.ToString("F0"));
+			if (res.stopped && res.bad > 0) verdict = L("SfStoppedHead") + "\n\n" + verdict;
 			ToolRecommendationDetailText.Text = verdict.Replace("\n", " ");
 			SetToolOutput($"Surface test — Disk {disk.Number} ({disk.FriendlyName})\r\nRead: {FormatBytes(res.readBytes)} of {FormatBytes(disk.Size)}\r\nAverage read: {avgMb:F0} MB/s\r\nBad blocks: {res.bad}" +
 				(res.detail.Length > 0 ? "\r\nFirst bad regions:\r\n" + res.detail : ""));
