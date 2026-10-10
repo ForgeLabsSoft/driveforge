@@ -8732,7 +8732,7 @@ exit 0
 			case 2: fills = new[] { 2 }; break;                      // Random 1
 			case 3: fills = new[] { 0, 2, 0 }; break;                // 3-pass
 			case 4: fills = new[] { 0, 1, 2, 0, 1, 2, 2 }; break;    // 7-pass
-			case 5: fills = new int[35]; for (int i = 0; i < 35; i++) fills[i] = 2; break; // Gutmann ~ 35 random
+			case 5: fills = new int[35]; for (int i = 0; i < 35; i++) fills[i] = 2; break; // 35 random passes - NOT Gutmann's patterns, and no longer named after them
 			default: fills = new[] { 0 }; break;                     // Zero 1
 		}
 		string label = methods[sel.Value].Split('—')[0].Trim();
