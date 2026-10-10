@@ -1,3 +1,4 @@
+# Created using wingetcreate 1.12.13.0
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 
 PackageIdentifier: ForgeLabsSoft.DriveForge
@@ -49,5 +50,8 @@ ReleaseNotes: |-
   The same mistake was found in two more places while fixing the first - creating a bootable VHDX, and the
   Windows-To-Go layout - and both are fixed. Two tests now fail the build if it is ever reintroduced.
 ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.4.3
+Documentations:
+- DocumentLabel: Wiki
+  DocumentUrl: https://github.com/ForgeLabsSoft/driveforge/wiki
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0
