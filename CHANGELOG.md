@@ -2,7 +2,7 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
-## Unreleased
+## v4.4.3 — 2026-10-10
 
 ### Fixed
 - **SSD erase could wipe a drive and then stop, leaving it unusable.** Reported by a user on Windows 11 26H2
