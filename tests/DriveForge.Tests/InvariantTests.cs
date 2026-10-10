@@ -851,4 +851,209 @@ public class InvariantTests
 			"The device answer is used without a fallback for the case where the device will not answer. A "
 			+ "cheap flash drive returns no answer at all, and no answer must never read as 'the data is gone'.");
 	}
+
+	/// <summary>
+	/// Only one place in the app may empty a disk.
+	///
+	/// `clean` is the most destructive line DriveForge writes, and measured on a plain 4 GB USB flash drive
+	/// it is REFUSED about four times in five while the stick has a mounted volume - after the partition
+	/// table is already gone. A canary file written before a refused clean was unreadable after it, with
+	/// zero partitions left on the disk. So every flow that issued its own clean had the same failure
+	/// available to it: report a hex error code and walk away from a drive it had just emptied. Seven
+	/// flows did, two of them with the clean inside a longer diskpart script, where the refusal also took
+	/// every line after it down - so the stick was left blank with nothing created on it.
+	///
+	/// The rule is structural rather than a count: the clean lives in CleanDiskAsync, which checks the
+	/// disk and escalates, and nowhere else. A flow written later cannot bring the defect back by copying
+	/// a line, which is exactly how it spread to seven.
+	/// </summary>
+	[Fact]
+	public void OnlyOnePlaceEmptiesADisk()
+	{
+		List<string> offenders = new List<string>();
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			string body = method.ToString();
+			bool inScript = Regex.IsMatch(body, @"\\r\\nclean\\r\\n");   // a clean inside a diskpart script literal
+			bool asLine = Regex.IsMatch(body, @"""clean""\s*,");       // ...or one line of a script built as a list
+			if ((inScript || asLine) && name != "CleanDiskAsync")
+				offenders.Add($"{name} ({Path.GetFileName(file)})");
+		}
+
+		Assert.True(offenders.Count == 0,
+			"These methods issue their own diskpart `clean`. A refused clean empties the disk and THEN fails, so "
+			+ "each of them can leave a user with a blank drive and an error code. Go through CleanDiskAsync:\n  "
+			+ string.Join("\n  ", offenders.Distinct()));
+	}
+
+	/// <summary>
+	/// CleanDiskAsync must CHECK the disk after every attempt, not read diskpart's exit code.
+	///
+	/// Both halves were measured, and they fail in opposite directions. diskpart answered
+	/// ERROR_ACCESS_DENIED on a disk it had in fact emptied, so a failure is no evidence that the data
+	/// survived; and diskpart exits 0 having declined to do anything, so a success is no evidence either.
+	/// The partition count read back afterwards is the only evidence there is - once per attempt, or an
+	/// attempt is being taken on trust.
+	/// </summary>
+	[Fact]
+	public void TheCleanIsCheckedAfterEveryAttempt()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "CleanDiskAsync").ToArray();
+		Assert.True(found.Length == 1, $"Expected one CleanDiskAsync, found {found.Length}.");
+		// Code only, never the prose: this method's own documentation names each step, and the first version
+		// of this rule counted its own words as attempts. The `convert` rule next door skips comments too.
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		int cleans = Regex.Matches(code, @"RunDiskpartAsync\(script\)").Count;
+		bool clearDisk = code.Contains("Clear-Disk -Number", StringComparison.Ordinal);
+		int attempts = cleans + (clearDisk ? 1 : 0);
+		int checks = Regex.Matches(code, @"PartitionCountAsync\s*\(").Count;
+
+		Assert.True(cleans >= 2 && clearDisk,
+			$"CleanDiskAsync runs {cleans} clean(s) and {(clearDisk ? "does" : "does not")} try Clear-Disk. The measured way through a refused clean is Clear-Disk, then a second clean; one attempt "
+			+ "is the behaviour that left the drive empty and the job undone.");
+		Assert.True(checks >= attempts,
+			$"{attempts} attempts but only {checks} readings of the partition count: at least one attempt is being "
+			+ "believed on its exit code alone. diskpart has answered ACCESS_DENIED on a disk it had emptied, and "
+			+ "exits 0 having declined to act, so the count read back afterwards is the only evidence there is.");
+
+		Assert.True(code.Contains("ErrCleanDisk", StringComparison.Ordinal),
+			"A clean that could not be completed has to say so in the user's own language, and say that nothing "
+			+ "new was created, instead of surfacing a hex error code.");
+	}
+
+	/// <summary>Every flow that empties a disk goes through the checked clean. There are eleven.</summary>
+	[Fact]
+	public void EveryFlowThatEmptiesADiskUsesTheCheckedClean()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		int calls = Regex.Matches(src, @"await\s+CleanDiskAsync\s*\(").Count;
+		Assert.True(calls >= 11,
+			$"Only {calls} flows empty a disk through CleanDiskAsync, and there were eleven: the SSD erase, Initialize, Convert, Quick partition, Format, the overwrite Wipe, writing an ISO, and the four "
+			+ "USB-layout scripts. A missing call is either a flow that is no longer destructive or one that empties a disk some other way - find out which.");
+	}
+
+	/// <summary>
+	/// A disk that has just been emptied must still get the partition table it was asked for.
+	///
+	/// An emptied disk does not have to read RAW. Measured on a plain USB flash drive: after a clean that
+	/// removed every partition, Get-Disk still answered MBR with zero partitions, and the host storage
+	/// cache refresh agreed - so it is the disk's answer, not a stale one. Initialize-Disk refuses such a
+	/// disk ("the disk has already been initialized"), and this method gave up there and told the user
+	/// Windows would not give the drive a GPT table - on a drive that was blank by then. Which is the same
+	/// thing that happens to a person as the bug this release is about, one step further along.
+	///
+	/// Two parts are held here. Set-Disk, because it is the one call measured to write the table on an
+	/// already-initialised disk. And the gate: it runs only when the disk has NO partitions, so it can
+	/// never rewrite the table of a disk that still holds something. The rescan is held too - a
+	/// create+format issued straight after the conversion failed with ERROR_INVALID_PARAMETER and left an
+	/// unformatted volume behind.
+	/// </summary>
+	[Fact]
+	public void AnEmptiedDiskStillGetsTheStyleItWasAskedFor()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "EnsureDiskPartitionStyleAsync").ToArray();
+		Assert.True(found.Length == 1, $"Expected one EnsureDiskPartitionStyleAsync, found {found.Length}.");
+		// Code only: the prose above names every call, and matching prose is not following it.
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		// The COMMAND, not the word. Matching "Set-Disk" alone passed a mutation that removed the call and
+		// left only the log line that names it in its failure message - a green rule proving nothing, which
+		// is the exact mistake 4.4.3 shipped behind.
+		Assert.True(Regex.IsMatch(code, @"Set-Disk\s+-Number\s+\{diskNumber\}\s+-PartitionStyle"),
+			"An emptied disk that reports another partition style now has no way to get the one it was asked "
+			+ "for: Initialize-Disk refuses it, and the flow would stop on a drive it has already emptied.");
+
+		Assert.True(Regex.IsMatch(code, @"PartitionCountAsync\s*\(\s*diskNumber\s*\)\s*==\s*0"),
+			"The table is written without first checking that the disk has no partitions. That gate is what "
+			+ "keeps this from being a way to rewrite the partition table of a disk that still holds data.");
+
+		Assert.True(code.Contains("rescan", StringComparison.Ordinal),
+			"No rescan after the table is rewritten. Measured: the create+format that follows then fails with "
+			+ "ERROR_INVALID_PARAMETER and leaves an unformatted volume with a drive letter on it.");
+	}
+
+	/// <summary>
+	/// A drive that will not accept a TRIM must not turn a finished erase into a failure.
+	///
+	/// Measured by driving the app on a plain USB flash drive, three times out of three: the disk was
+	/// cleaned, given a GPT table, partitioned, formatted, mounted and was writable - and the operation
+	/// then reported "SSD erase failed", because the last step, Optimize-Volume -ReTrim, answered "the
+	/// volume optimization operation requested is not supported by the hardware backing the volume" and
+	/// powershell exited 1.
+	///
+	/// A drive that cannot TRIM is not an error. It is the exact case SsdDoneNoTrim exists for - the
+	/// warning that the old data may still be physically present, which steers the person to the
+	/// full-overwrite Wipe. Letting the refusal throw replaced that warning with a stack trace, on the
+	/// very class of drive the person who reported the original bug had.
+	/// </summary>
+	[Fact]
+	public void ADriveThatRefusesTrimDoesNotFailTheErase()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "SsdSecureEraseFlow").ToArray();
+		Assert.True(found.Length == 1, $"Expected one SsdSecureEraseFlow, found {found.Length}.");
+
+		// The syntax tree, not the text: what matters is whether the call is INSIDE a try, and no amount of
+		// line matching answers that honestly.
+		InvocationExpressionSyntax retrim = found[0].Method.DescendantNodes()
+			.OfType<InvocationExpressionSyntax>()
+			.FirstOrDefault(i => i.ToString().Contains("Optimize-Volume", StringComparison.Ordinal));
+		Assert.True(retrim != null,
+			"The erase no longer issues a ReTrim at all, so it cannot discard anything on a drive that does "
+			+ "support it - and the message would still be deciding what to claim.");
+
+		// Not just "inside some try": the whole flow already sits in one, whose catch is what turns every
+		// failure into "SSD erase failed". The refusal has to be caught NEXT TO the call, so the honest
+		// message still runs afterwards - and the way to say that is that the nearest try does not also
+		// contain the final message.
+		TryStatementSyntax guard = retrim.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault();
+		Assert.True(guard != null,
+			"The ReTrim is not inside a try at all. A drive that refuses it makes powershell exit non-zero, "
+			+ "which throws, which reports the whole erase as failed - on a disk that was by then cleaned, "
+			+ "formatted and perfectly usable. Measured on a plain USB flash drive, three times out of three.");
+
+		Assert.True(!guard.ToString().Contains("MessageBox.Show", StringComparison.Ordinal),
+			"The nearest try around the ReTrim is the flow's own outer try - the one whose catch reports "
+			+ "\"SSD erase failed\". A refused ReTrim would still take the whole operation down with it, and "
+			+ "the SsdDoneNoTrim warning that exists for exactly that drive would never be shown.");
+	}
+
+	/// <summary>
+	/// A partition that was created but could not be formatted must be finished, not abandoned.
+	///
+	/// Measured by driving the app on a plain USB flash drive, about one run in three and only ever in a
+	/// run where the partition style had to be rewritten first: `create partition primary` succeeds and
+	/// the `format` on the next line answers "There is no volume selected". The volume for that partition
+	/// exists 0.2 s later. What the person is left holding is a drive with a volume that has no file
+	/// system, a drive letter on it, and a hex code.
+	///
+	/// Two things are held. That the repair WAITS for the volume rather than sleeping for a guessed
+	/// interval - a tuned sleep is a guess dressed as a fix. And that it never addresses the partition as
+	/// number 1: on a disk initialised as GPT, partition 1 is the 15 MB Microsoft Reserved partition, so
+	/// a hardcoded 1 would format the wrong thing on every disk that has one.
+	/// </summary>
+	[Fact]
+	public void ACreatedPartitionIsNotLeftUnformatted()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "CreateAndFormatAsync").ToArray();
+		Assert.True(found.Length == 1, $"Expected one CreateAndFormatAsync, found {found.Length}.");
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		Assert.True(code.Contains("WaitForFormattablePartitionAsync", StringComparison.Ordinal),
+			"The repair no longer waits for the volume to exist. The only thing that was missing when the "
+			+ "format failed was the volume, and a sleep tuned to todays hardware is a guess, not a fix.");
+
+		Assert.True(!Regex.IsMatch(code, @"select partition 1\b"),
+			"The repair addresses the partition as number 1. On a disk initialised as GPT that is the 15 MB "
+			+ "Microsoft Reserved partition - it would format the wrong one. Use the number Windows reports.");
+
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		int callers = Regex.Matches(src, @"await\s+CreateAndFormatAsync\s*\(").Count;
+		Assert.True(callers >= 3,
+			$"Only {callers} flows lay out a single partition through the checked step; there were three: the "
+			+ "SSD erase, Initialize, and Format.");
+	}
 }

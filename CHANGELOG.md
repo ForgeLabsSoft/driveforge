@@ -2,6 +2,99 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.4.5 — 2026-10-10
+
+Everything here was found by driving the app on a plain 4 GB USB flash drive — the kind of drive the person
+who reported the 4.4.3 bug actually had. Five faults in one chain: each fix let the operation get one step
+further, and the next fault was waiting there.
+
+### Fixed
+- **A drive could be emptied and then told the operation had failed.** Every destructive tool starts with the
+  same command — diskpart's `clean` — and on a plain USB flash drive Windows often refuses it: "Access is
+  denied". Measured on that stick, four times in five. What matters is the state it leaves behind: a file
+  written to the stick before the refused clean was already unreachable after it, with no partition table left.
+  So the tool stopped, showed a hexadecimal error code and created nothing. The person is left holding a blank
+  drive and an explanation that explains nothing — the same thing that happens to someone as the bug 4.4.3
+  exists to fix, arrived at by a different route.
+
+  Eleven places began with that command: the SSD erase, Initialize, Convert MBR/GPT, Quick partition, Format,
+  the full-overwrite Wipe — the very tool the SSD-erase warning sends flash drives to — writing an ISO to a
+  stick, and the four USB-layout scripts. In two of them the `clean` sat inside a longer diskpart script, where
+  a refusal also abandons every line after it, so the stick was left blank with nothing written on it.
+
+  All eleven now go through one step that looks at the disk instead of reading diskpart's exit code, and that
+  finishes the job rather than walking away from a drive it has emptied. When the partition table is already
+  gone it carries on; otherwise it tries Clear-Disk, and then a second `clean`, because a refused clean is
+  followed by a successful one — measured. Only if all three fail does it stop, and then it says so in plain
+  language: nothing new was created, check the drive in Disk Management, and unplugging it and trying again
+  usually clears it. In all seventeen languages.
+
+  Two things that look like fixes are deliberately not in it, both measured dead ends on removable media:
+  dropping the drive letter first (`mountvol /p`) leaves the device answering "The device is not ready" until
+  it is physically unplugged, and taking the disk offline is refused outright.
+
+- **"Disk 4 was emptied, but Windows would not give it a GPT partition table" — on a drive that was blank.**
+  With the clean working, the next step stopped. An emptied disk does not have to report itself as RAW:
+  measured on that stick, after a clean that removed every partition, Windows still answered MBR with zero
+  partitions, and it was not a stale reading. `Initialize-Disk` refuses such a disk ("the disk has already
+  been initialized"), so the app gave up and said Windows would not give the drive a table — on a drive that
+  was by then blank. That sentence is what the person who reported the original bug saw.
+
+  An emptied disk that reports the wrong style is now converted with the call that works on an already
+  initialised disk, and only ever when the disk has NO partitions, so it can never rewrite the table of a
+  drive that still holds something. Forcing the disk to RAW by zeroing its first sectors was tried and
+  rejected: the table came back as MBR with a partition in it and every step after failed.
+
+- **A drive that cannot TRIM no longer fails the erase.** With both of those fixed, the erase ran all the way
+  to its last step and then reported "SSD erase failed" — three runs out of three — because the drive
+  answered "the volume optimization operation requested is not supported by the hardware backing the volume".
+  The disk had been cleaned, given a partition table, formatted, mounted, and was writable. A drive that
+  cannot TRIM is not an error: it is the exact case the "the old data may still be physically present"
+  warning exists for. The refusal is now caught next to the call, so that warning is what the person reads,
+  not a stack trace.
+
+- **A partition created but not formatted is now finished, not abandoned.** About one run in three, and only
+  ever in a run where the partition table had to be rewritten first, `create partition primary` succeeded and
+  the `format` on the next line answered "There is no volume selected" — the volume for that partition exists
+  about two tenths of a second later. The drive was left carrying a volume with no file system, a drive letter
+  on it, and a hex code. The SSD erase, Initialize and Format now wait for the volume to actually exist and
+  then format the partition by the number Windows reports — never a hardcoded partition 1, which on a disk
+  initialised as GPT is the 15 MB Microsoft Reserved partition.
+
+- **The progress line no longer calls a flash drive an SSD.** The app warns "this drive isn't detected as an
+  SSD", you accept, and the status line then read "SSD-erasing Disk 4" — asserting the very thing it had just
+  denied, in all seventeen languages. It now says what the operation actually is, which is true on any medium:
+  a quick format plus a TRIM.
+
+- **The erase asks the device about TRIM instead of guessing from the bus.** The final message tells you one of
+  two things: that the old data was discarded, or that it may still be physically present. That was decided
+  from the model name and the bus type, and the guess is wrong in both directions. Measured on an SSD in a USB
+  enclosure: the ReTrim really did discard 236 of its 238 GB, and the message still said the data might all
+  still be there.
+
+  It now asks the device — a flag from the storage stack, so unlike reading Optimize-Volume's output it does
+  not change with the system language. It discriminates three ways on this bench: an internal NVMe SSD and an
+  SSD in an enclosure answer yes, a hard disk in an enclosure answers no, and a cheap flash drive does not
+  answer at all. That third state is why the fallback matters: an unanswered query keeps the old conservative
+  guess rather than becoming a claim that the data is gone.
+
+- **Why the rules hold this time.** The rule added in 4.4.3 searched for a line of text, and three live flows
+  wrote that line a slightly different way; it passed while the defect shipped. The rules added here are
+  structural: only one method in the whole app may issue a `clean` at all, whatever shape it is written in;
+  the table is only ever rewritten on a disk with no partitions; the TRIM refusal must be caught next to the
+  call and not by the flow's own catch; the partition is never addressed by a hardcoded number. Each of the
+  six new rules was then mutated and watched go red — twelve mutations in all. One of them survived the first
+  time, because the rule matched a word that also appears in a log message, which is the same mistake 4.4.3
+  shipped behind; the rule now matches the command. 129 tests, 0 warnings.
+
+### Verified on hardware
+- SSD erase, driven through the app on the flash drive from a normal MBR + FAT32 starting state: four
+  consecutive runs, each ending with the honest warning, a GPT table, a drive letter and a volume that can be
+  written to.
+- SSD erase on an SSD in a USB enclosure: unchanged, still claims the discard, which is correct there.
+- Not exercised through the interface: Initialize, Convert, Quick partition, Format, the Wipe and the
+  USB-layout scripts. They go through the same two shared steps, and the rules hold them, but they were not
+  driven end to end on this release.
 ## v4.4.4 — 2026-10-10
 
 ### Fixed

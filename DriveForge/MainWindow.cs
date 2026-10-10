@@ -3026,6 +3026,9 @@ public partial class MainWindow : Window, IComponentConnector
 
 			SetStage(L("StgPartitionTarget"), 10.0);
 			diskpartPath = Path.Combine(Path.GetTempPath(), $"driveforge-diskpart-{Guid.NewGuid():N}.txt");
+			// Empty the disk first, and check it: a clean refused inside the script below would abort
+			// everything after it and leave the drive blank. See CleanDiskAsync.
+			await CleanDiskAsync(disk.Number);
 			await File.WriteAllTextAsync(diskpartPath, BuildWindowsToGoDiskpartScript(disk.Number, bootLetter, windowsLetter, windowsSizeMb, dataLetter), Encoding.ASCII);
 			await RunProcessAsync("diskpart.exe", "/s \"" + diskpartPath + "\"");
 			SetStage(L("StgApplyDism"), 20.0);
@@ -3144,7 +3147,9 @@ public partial class MainWindow : Window, IComponentConnector
 			"san policy=OnlineAll",
 			$"select disk {diskNumber}",
 			"detail disk",
-			"clean",
+			// `clean` is NOT in this script, on purpose: inside a script a refused clean aborts every line after
+			// it, so the stick is left emptied with nothing created on it. The caller empties the disk first,
+			// through CleanDiskAsync, which checks the result and escalates instead of giving up.
 			"rem MBR layout (no 'convert gpt') so legacy BIOS can boot it too",
 			"rem align=1024 forces a 1 MiB partition offset = 4K-aligned, for full SSD write performance",
 			"create partition primary size=350 align=1024",
@@ -3691,6 +3696,9 @@ public partial class MainWindow : Window, IComponentConnector
 				SetStage(L("StgCloneCancelHealth"), 0.0);
 				return;
 			}
+			// Empty the disk first, and check it: a clean refused inside the script below would abort
+			// everything after it and leave the drive blank. See CleanDiskAsync.
+			await CleanDiskAsync(targetDisk.Number);
 			await File.WriteAllTextAsync(diskpartPath, BuildRealNtfsUsbLayoutDiskpartScript(targetDisk.Number, bootLetter, windowsLetter, windowsSizeMb, extraPartitions), Encoding.ASCII);
 			diskpartOutput = await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(diskpartPath));
 			diskpartOk = true;
@@ -5242,6 +5250,9 @@ exit 0
 		}
 
 		SetStage(L("StgFormatTarget"), 10.0);
+		// Empty the disk first, and check it: a clean refused inside the script below would abort
+		// everything after it and leave the drive blank. See CleanDiskAsync.
+		await CleanDiskAsync(disk.Number);
 		await File.WriteAllTextAsync(diskpartPath, BuildRealNtfsUsbLayoutDiskpartScript(disk.Number, bootLetter, windowsLetter), Encoding.ASCII);
 		try { await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(diskpartPath)); }
 		finally { TryDeleteFile(diskpartPath); }   // delete the script even if diskpart throws, so it doesn't pile up in %TEMP%
@@ -5426,6 +5437,9 @@ exit 0
 
 			// 2. Format the target with the same GPT layout the WIM restore / clone use.
 			SetStage(L("StgFormatTarget"), 12.0);
+			// Empty the disk first, and check it: a clean refused inside the script below would abort
+			// everything after it and leave the drive blank. See CleanDiskAsync.
+			await CleanDiskAsync(disk.Number);
 			await File.WriteAllTextAsync(diskpartPath, BuildRealNtfsUsbLayoutDiskpartScript(disk.Number, bootLetter, windowsLetter), Encoding.ASCII);
 			try { await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(diskpartPath)); }
 			finally { TryDeleteFile(diskpartPath); }
@@ -6872,7 +6886,9 @@ exit 0
 		var lines = new List<string>
 		{
 			$"select disk {diskNumber}",
-			"clean",
+			// `clean` is NOT in this script, on purpose: inside a script a refused clean aborts every line after
+			// it, so the stick is left emptied with nothing created on it. The caller empties the disk first,
+			// through CleanDiskAsync, which checks the result and escalates instead of giving up.
 			// noerr because `convert mbr` has nothing to convert on a just-cleaned disk and refuses on some builds,
 			// aborting everything below. Tolerating it is safe HERE and only here: MBR is the layout this script
 			// wants, and MBR is exactly what `create partition` falls back to on an uninitialised disk. Do not copy
@@ -8786,15 +8802,12 @@ exit 0
 	// fills: list of passes — 0 = zeros, 1 = ones (0xFF), 2 = random. Empty = Quick (clean only).
 	private async Task RawWipeDiskAsync(DiskItem disk, int[] fills)
 	{
-		// Remove partitions/volumes so the physical sectors are free to overwrite (and = Quick wipe).
-		string dp = Path.Combine(Path.GetTempPath(), $"driveforge-wipe-{Guid.NewGuid():N}.txt");
-		try
-		{
-			SetStage(L("StgPrepDiskRemove"), 2.0);
-			await File.WriteAllTextAsync(dp, $"select disk {disk.Number}\r\nclean\r\nexit\r\n", Encoding.ASCII);
-			await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(dp));
-		}
-		finally { TryDeleteFile(dp); }
+		// Remove partitions/volumes so the physical sectors are free to overwrite (and = Quick wipe). Through
+		// CleanDiskAsync, which checks that the disk really was emptied: a refused clean used to abort the wipe
+		// with a hex code AFTER the partition table was gone - and this is the tool the SSD-erase warning sends
+		// flash drives to, so it is the last place that may fail that way.
+		SetStage(L("StgPrepDiskRemove"), 2.0);
+		await CleanDiskAsync(disk.Number);
 
 		if (fills == null || fills.Length == 0) { Volatile.Write(ref _progressDoneBytes, (long)(progressTotalGiB * 1073741824.0)); return; } // Quick
 
@@ -9518,7 +9531,10 @@ exit 0
 			StatusText.Text = L("StgPrepDisk"); Log(StatusText.Text);
 			// offline disk: stop Windows auto-mounting the ISO's own ESP as the raw write lays it down (a mounted FAT
 			// driver would write dirty-bit/FSINFO back over our bytes -> corrupt image + false verify FAIL). Back online in the caller.
-			await File.WriteAllTextAsync(dp, $"select disk {disk.Number}\r\nclean\r\noffline disk\r\nexit\r\n", Encoding.ASCII);
+			// The clean is its own step now, and a checked one: when it was the first line of this script a
+			// refusal took `offline disk` down with it, so the stick was left emptied and the write never ran.
+			await CleanDiskAsync(disk.Number);
+			await File.WriteAllTextAsync(dp, $"select disk {disk.Number}\r\noffline disk\r\nexit\r\n", Encoding.ASCII);
 			await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(dp));
 		}
 		finally { TryDeleteFile(dp); }
@@ -14788,13 +14804,10 @@ exit 0
 			// GPT above the 2 TB MBR ceiling, otherwise MBR - the friendlier default for removable media.
 			string style = disk.Size > 2L * 1024 * 1024 * 1024 * 1024
 				|| disk.PartitionStyle?.Equals("GPT", StringComparison.OrdinalIgnoreCase) == true ? "gpt" : "mbr";
-			await File.WriteAllTextAsync(scriptPath, $"select disk {disk.Number}\r\nclean\r\nexit\r\n", Encoding.ASCII);
-			string outp = await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(scriptPath));
+			string outp = await CleanDiskAsync(disk.Number);
 			if (!await EnsureDiskPartitionStyleAsync(disk.Number, style))
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
-			string script = $"select disk {disk.Number}\r\ncreate partition primary\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n";
-			await File.WriteAllTextAsync(scriptPath, script, Encoding.ASCII);
-			outp += await RunProcessCaptureAsync("diskpart.exe", "/s " + QuoteArgument(scriptPath));
+			outp += await CreateAndFormatAsync(disk.Number, fs, "DriveForge");
 			SetToolOutput("diskpart format\r\n\r\n" + outp);
 			Log($"Formatted Disk {disk.Number} as {fs}.");
 			await RefreshDisksAsync();
@@ -14979,7 +14992,7 @@ exit 0
 			// `clean` first, then the style obtained and CHECKED, then the partitions: asking `convert` for it
 			// fails on a disk with no partition table, and diskpart abandons the rest of the script at the first
 			// error - leaving the disk wiped with nothing on it.
-			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			string outp = await CleanDiskAsync(disk.Number);
 			if (!await EnsureDiskPartitionStyleAsync(disk.Number, style))
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
 			outp += await RunDiskpartAsync(sb.ToString());
@@ -15682,10 +15695,10 @@ exit 0
 			// created, which is the failure a user reported. The style is obtained with the call meant for an
 			// uninitialised disk, and then CHECKED. Note this is the tool people are sent to in order to RECOVER a
 			// disk left in that state, so it is the last place that may carry the fault.
-			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			string outp = await CleanDiskAsync(disk.Number);
 			if (!await EnsureDiskPartitionStyleAsync(disk.Number, style))
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
-			outp += await RunDiskpartAsync($"select disk {disk.Number}\r\ncreate partition primary\r\nformat fs=ntfs quick label=DriveForge\r\nassign\r\nexit\r\n");
+			outp += await CreateAndFormatAsync(disk.Number, "ntfs", "DriveForge");
 			SetToolOutput("diskpart initialize\r\n\r\n" + outp);
 			Log($"Initialized Disk {disk.Number} as {style}.");
 			await RefreshDisksAsync();
@@ -15712,7 +15725,7 @@ exit 0
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtConvert")));
 			// `clean` removes the partition table, so there is nothing left for `convert` to convert and it refuses
 			// on some builds. The new style is written with the call meant for an uninitialised disk, and verified.
-			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			string outp = await CleanDiskAsync(disk.Number);
 			if (!await EnsureDiskPartitionStyleAsync(disk.Number, target))
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, target.ToUpperInvariant()));
 			SetToolOutput("diskpart convert\r\n\r\n" + outp);
@@ -15926,6 +15939,132 @@ exit 0
 		catch { return null; }
 	}
 
+	// Number of partitions currently on a disk, or -1 when Windows will not say. The flows that empty a
+	// disk use it to CHECK that the clean really emptied it, instead of trusting diskpart's exit code.
+	private async Task<int> PartitionCountAsync(int diskNumber)
+	{
+		try
+		{
+			string s = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+				+ QuoteArgument($"@(Get-Partition -DiskNumber {diskNumber} -ErrorAction SilentlyContinue).Count"));
+			return int.TryParse(s.Trim(), out int v) ? v : -1;
+		}
+		catch { return -1; }
+	}
+
+	/// <summary>
+	/// Empties a disk - and, when Windows refuses halfway, does not walk away from a drive it has already
+	/// emptied.
+	///
+	/// `clean` is diskpart asking VDS to zero the start and the end of the disk. Measured on a plain 4 GB USB
+	/// flash drive: it is refused with ERROR_ACCESS_DENIED most times it runs while the stick still has a
+	/// mounted volume, and the System log says why - "Cannot zero sectors on disk ... Error code: 5". What
+	/// matters is the state it leaves behind: a canary file written before a refused clean was GONE after it,
+	/// with zero partitions on the disk. So the flows reported a hex error code for an operation that had
+	/// already destroyed the volume and created nothing to replace it - which is the same thing that happens
+	/// to a user as the bug v4.4.3 exists to fix, reached by a different route.
+	///
+	/// Measured ways through, in the order used here: carry on when the table is already gone (it is, and the
+	/// job can still be finished); then Clear-Disk, which reaches the disk through the storage provider
+	/// instead of diskpart; then a second `clean`, which succeeds straight after a refused one. Two things
+	/// that look like fixes are not, and are deliberately absent: dropping the drive letter first
+	/// (mountvol /p) leaves the device answering ERROR_NOT_READY until it is physically unplugged, and
+	/// `Set-Disk -IsOffline` is refused outright on removable media.
+	/// </summary>
+	private async Task<string> CleanDiskAsync(int diskNumber)
+	{
+		string script = $"select disk {diskNumber}\r\nclean\r\nexit\r\n";
+		var log = new StringBuilder();
+		bool refused = false;
+		try { log.Append(await RunDiskpartAsync(script)); }
+		catch (Exception ex) { refused = true; log.AppendLine(ex.Message); }
+
+		int left = await PartitionCountAsync(diskNumber);
+		if (left == 0)
+		{
+			// The refusal lands AFTER the partition table is gone. Stopping here is what handed the user an
+			// emptied drive and an error code; the operation they asked for can still be carried out.
+			if (refused) Log($"Disk {diskNumber}: clean reported an error, but the partition table is already gone - finishing the job instead of leaving the disk empty.");
+			return log.ToString();
+		}
+		// Nothing to verify with and no error either: the exit code is all there is, as before.
+		if (!refused && left < 0) return log.ToString();
+
+		log.AppendLine($"[DriveForge] clean left {left} partition(s) on Disk {diskNumber} - trying Clear-Disk.");
+		try
+		{
+			log.AppendLine(await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+				+ QuoteArgument($"Clear-Disk -Number {diskNumber} -RemoveData -RemoveOEM -Confirm:$false")));
+		}
+		catch (Exception ex) { log.AppendLine(ex.Message); }
+		if (await PartitionCountAsync(diskNumber) == 0)
+		{
+			Log($"Disk {diskNumber}: emptied by Clear-Disk after diskpart was refused.");
+			return log.ToString();
+		}
+
+		// A refused clean is followed by a successful one - measured, twice. Give the storage stack a moment.
+		await Task.Delay(2000);
+		log.AppendLine($"[DriveForge] Clear-Disk did not empty Disk {diskNumber} either - one more clean.");
+		try { log.Append(await RunDiskpartAsync(script)); }
+		catch (Exception ex) { log.AppendLine(ex.Message); }
+		if (await PartitionCountAsync(diskNumber) == 0)
+		{
+			Log($"Disk {diskNumber}: emptied on the second clean.");
+			return log.ToString();
+		}
+
+		throw new InvalidOperationException(string.Format(L("ErrCleanDisk"), diskNumber)
+			+ Environment.NewLine + Environment.NewLine + log.ToString().Trim());
+	}
+
+	// The number of the biggest partition on a disk, once Windows has actually surfaced a volume for it,
+	// or -1 if it never does. Only the repair below uses it, and only when diskpart has already created a
+	// partition it could not format.
+	private async Task<int> WaitForFormattablePartitionAsync(int diskNumber)
+	{
+		for (int i = 0; i < 30; i++)
+		{
+			try
+			{
+				string s = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+					+ QuoteArgument($"$p = Get-Partition -DiskNumber {diskNumber} -ErrorAction SilentlyContinue | Where-Object {{ $_.Size -gt 64MB }} | Sort-Object Size | Select-Object -Last 1; if ($p -and (Get-Volume -Partition $p -ErrorAction SilentlyContinue)) {{ $p.PartitionNumber }}"));
+				if (int.TryParse(s.Trim(), out int found) && found > 0) return found;
+			}
+			catch { }
+			await Task.Delay(500);
+		}
+		return -1;
+	}
+
+	/// <summary>
+	/// Creates the partition a flow asked for and formats it - and when diskpart creates the partition but
+	/// cannot format it, finishes the job instead of leaving a drive carrying an unreadable volume.
+	///
+	/// Measured by driving the app on a plain USB flash drive, in roughly one run in three and only ever
+	/// in a run where the partition style had to be rewritten first: `create partition primary` succeeds
+	/// and the `format` on the next line answers "There is no volume selected". The volume for that
+	/// partition exists 0.2 s later. The person is left with a volume that has no file system, a drive
+	/// letter on it, and a hex code - the same shape of harm as the rest of this release.
+	///
+	/// The repair waits for the volume to exist rather than sleeping for a guessed interval, and formats
+	/// the partition by the number Windows reports. Never a hardcoded 1: on a disk initialised as GPT,
+	/// partition 1 is the 15 MB Microsoft Reserved partition and formatting that would be wrong.
+	/// </summary>
+	private async Task<string> CreateAndFormatAsync(int diskNumber, string fs, string label)
+	{
+		string create = $"select disk {diskNumber}\r\ncreate partition primary\r\nformat fs={fs} quick label={label}\r\nassign\r\nexit\r\n";
+		try { return await RunDiskpartAsync(create); }
+		catch (Exception ex)
+		{
+			int part = await WaitForFormattablePartitionAsync(diskNumber);
+			if (part < 0) throw;   // nothing was created, or Windows never surfaced it - that is a real failure
+			Log($"Disk {diskNumber}: diskpart created the partition but could not format it; formatting partition {part} now that its volume exists.");
+			return ex.Message + Environment.NewLine + await RunDiskpartAsync(
+				$"select disk {diskNumber}\r\nselect partition {part}\r\nformat fs={fs} quick label={label}\r\nassign\r\nexit\r\n");
+		}
+	}
+
 	private async Task<bool> EnsureDiskPartitionStyleAsync(int diskNumber, string style)
 	{
 		async Task<string> Current() => (await RunProcessCaptureAsync("powershell.exe",
@@ -15938,6 +16077,32 @@ exit 0
 		{
 			await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
 				+ QuoteArgument($"Initialize-Disk -Number {diskNumber} -PartitionStyle {style} -Confirm:$false"));
+			now = await Current();
+		}
+		else if (await PartitionCountAsync(diskNumber) == 0)
+		{
+			// An emptied disk does not have to read RAW. Measured on a plain USB flash drive: after a clean that
+			// removed everything, Get-Disk still answered MBR with zero partitions - and it is not a stale
+			// reading, the host storage cache refresh agrees. Initialize-Disk then refuses the disk with "The
+			// disk has already been initialized", so this method used to give up and report that Windows would
+			// not give the drive a GPT table... on a drive that was blank by then. That is the same thing that
+			// happens to a user as the bug this release is about, one step further along.
+			//
+			// Set-Disk writes the table on an already-initialised disk. It is gated on the disk having NO
+			// partitions, so it can never rewrite the table of a disk that still holds something. The rescan
+			// after it is not decorative: measured, a create+format issued straight afterwards failed with
+			// ERROR_INVALID_PARAMETER and left an unformatted volume; with the rescan it succeeds and mounts.
+			//
+			// Zeroing the start of the disk to force RAW was tried and rejected: on that stick the table came
+			// back as MBR with a partition in it, and every step after it failed.
+			try
+			{
+				await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+					+ QuoteArgument($"Set-Disk -Number {diskNumber} -PartitionStyle {style}"));
+				try { await RunDiskpartAsync($"rescan\r\nexit\r\n"); } catch { }
+				await Task.Delay(2000);
+			}
+			catch (Exception ex) { Log($"Disk {diskNumber}: Set-Disk could not write a {style} table - {ex.Message}"); }
 			now = await Current();
 		}
 		Log($"Disk {diskNumber}: partition style is '{now}' after asking for {style}.");
@@ -15963,10 +16128,10 @@ exit 0
 			SetBusy(busy: true, string.Format(L("SsdWorking"), disk.Number));
 			// Three steps rather than one script, so the partition style is OBTAINED and CHECKED instead of being
 			// asked of `convert`, which refuses a just-cleaned disk on some builds and aborts everything after it.
-			await RunDiskpartAsync($"select disk {disk.Number}\r\nclean\r\nexit\r\n");
+			await CleanDiskAsync(disk.Number);
 			if (!await EnsureDiskPartitionStyleAsync(disk.Number, "GPT"))
 				throw new InvalidOperationException(string.Format(L("ErrSsdInit"), disk.Number));
-			await RunDiskpartAsync($"select disk {disk.Number}\r\ncreate partition primary\r\nformat fs=ntfs quick label=DriveForge\r\nassign\r\nexit\r\n");
+			await CreateAndFormatAsync(disk.Number, "ntfs", "DriveForge");
 			await RefreshDisksAsync();
 			var d2 = disks.FirstOrDefault(x => x.Number == disk.Number);
 			char letter = d2?.DriveLetters?.FirstOrDefault() ?? '\0';
@@ -15974,8 +16139,23 @@ exit 0
 			bool reTrimRan = false;
 			if (letter != '\0')
 			{
-				outp = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument($"Optimize-Volume -DriveLetter {letter} -ReTrim -Verbose"));
-				reTrimRan = true;
+				// Best effort, and deliberately NOT fatal. Measured on a plain USB flash drive: the drive answers
+				// "The volume optimization operation requested is not supported by the hardware backing the"
+				// "volume", powershell exits 1, and the whole erase was reported as FAILED - on a disk that had
+				// just been cleaned, formatted, mounted and was perfectly usable. Reproduced three times out of
+				// three. A drive that cannot TRIM is not an error; it is the case SsdDoneNoTrim exists for, so
+				// leave reTrimRan false and fall through to that warning instead of a stack trace. The refusal
+				// still goes into the tool output, so nothing is hidden from anyone who looks.
+				try
+				{
+					outp = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument($"Optimize-Volume -DriveLetter {letter} -ReTrim -Verbose"));
+					reTrimRan = true;
+				}
+				catch (Exception ex)
+				{
+					outp = ex.Message;
+					Log($"Disk {disk.Number}: the drive would not accept a ReTrim, so nothing was discarded - the erase was a quick format only, and the warning below says so.");
+				}
 			}
 			SetToolOutput("SSD erase (clean + quick format + ReTrim)\r\n\r\n" + outp);
 			// Only claim the controller actually DISCARDED the old blocks when this is really a TRIM-capable SSD AND ReTrim
