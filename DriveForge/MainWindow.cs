@@ -11145,9 +11145,15 @@ exit 0
 				long leftover = Math.Max(0, c.Size - res.Bytes);
 				c.Size = leftover; c.SizeText = FormatBytes(leftover);
 			}
-			ProgressBar.Value = 100.0;
+			// A run the person stopped is not a finished one. The bar must not read 100% and the line must not
+			// say "Done" while the items it never reached are still sitting in the list, ticked, looking as
+			// though they had been dealt with. doneCats counts the ones that actually completed.
+			int notCleaned = Math.Max(0, cats.Count - doneCats);
+			if (!stopRequested) ProgressBar.Value = 100.0;
 			RecomputeCleanTotal();
-			string doneMsg = string.Format(L("CleanDone"), FormatBytes(freed), filesDeleted);
+			string doneMsg = stopRequested
+				? string.Format(L("CleanStopped"), FormatBytes(freed), filesDeleted, notCleaned)
+				: string.Format(L("CleanDone"), FormatBytes(freed), filesDeleted);
 			if (binnedFiles > 0) doneMsg += " " + string.Format(L("CleanDoneRecycled"), FormatBytes(binnedBytes), binnedFiles);
 			if (CleanStatusText != null) CleanStatusText.Text = doneMsg;
 		}
@@ -11308,7 +11314,10 @@ exit 0
 			if (CleanStatusText != null) CleanStatusText.Text = L("SecureDelWorking");
 			bool overwrite = media == WipeMedia.Hdd && !noReach;
 			await Task.Run(() => SecureDeleteFile(path, overwrite));
-			if (CleanStatusText != null) CleanStatusText.Text = L("SecureDelDone");
+			// With no overwrite this was an ordinary delete, and calling it a secure one is the claim the
+			// dialog above had just declined to make. That dialog is read before deciding; this line is what
+			// the person is left looking at.
+			if (CleanStatusText != null) CleanStatusText.Text = L(overwrite ? "SecureDelDone" : "SecureDelDonePlain");
 		}
 		catch (Exception ex) { ShowError(L("SecureDelTitle"), ex); }
 		finally { _cleanBusy = false; SetBusy(busy: false); }

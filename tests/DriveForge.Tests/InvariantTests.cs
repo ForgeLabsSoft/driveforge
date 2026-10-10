@@ -1141,4 +1141,87 @@ public class InvariantTests
 			+ "a dying drive that is the difference between trying again and giving up on the drive:\n  "
 			+ string.Join("\n  ", problems));
 	}
+
+	/// <summary>Clean traces must not report a run the person stopped as a finished one.</summary>
+	[Fact]
+	public void AStoppedCleanIsNotReportedAsAFinishedOne()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "CleanRun_Click").ToArray();
+		Assert.True(found.Length == 1, $"Expected one CleanRun_Click, found {found.Length}.");
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		Assert.True(code.Contains("CleanStopped", StringComparison.Ordinal),
+			"A stopped clean still says \"Done\", while the categories it never reached sit in the list "
+			+ "still ticked, looking as though they had been dealt with.");
+		Assert.True(Regex.IsMatch(code, @"if\s*\(\s*!stopRequested\s*\)\s*ProgressBar\.Value\s*=\s*100"),
+			"The bar is driven to 100% even when the run was stopped, which is the same claim in the one "
+			+ "place a person looks first.");
+	}
+
+	/// <summary>
+	/// Secure delete must not claim a secure deletion it did not perform.
+	///
+	/// On an SSD, or on a compressed / sparse / encrypted file, an overwrite lands on NEW clusters and
+	/// leaves the original data where it was - so the flow correctly decides not to overwrite, and the
+	/// dialog beforehand says so. The line left on screen afterwards still read "File securely
+	/// deleted." The warning is read while deciding; the ending is what is remembered.
+	/// </summary>
+	[Fact]
+	public void SecureDeleteOnlyClaimsWhatItDid()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "CleanSecureDelete_Click").ToArray();
+		Assert.True(found.Length == 1, $"Expected one CleanSecureDelete_Click, found {found.Length}.");
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		Assert.True(Regex.IsMatch(code, @"L\(\s*overwrite\s*\?"),
+			"The ending does not depend on whether anything was actually overwritten, so a plain delete on "
+			+ "an SSD is announced as a secure erase - the exact claim the dialog above declined to make.");
+	}
+
+	/// <summary>
+	/// A flow that reports its own ending while polling Stop must have something to say about a stop.
+	///
+	/// Three flows were found reporting a stopped run as a finished one - the clean, the recovery into
+	/// a folder and the recovery into a zip - while the wipe, the free-space wipe, the shredder, the
+	/// imager and the deep scan all handled it. The convention existed; these had simply missed it.
+	///
+	/// The baseline below is the honest part. The rule was dry-run over the whole app before being
+	/// written, and eight further flows match the shape. They have NOT been audited - a stop may be
+	/// unreachable in some, or may throw rather than fall through to the message - so they are recorded
+	/// rather than blessed in silence or 'fixed' on a guess. Nothing NEW may join them, and working one
+	/// off the list means deleting its name here.
+	/// </summary>
+	[Fact]
+	public void AStoppedRunDoesNotAnnounceItselfAsFinished()
+	{
+		HashSet<string> notYetAudited = new HashSet<string>(StringComparer.Ordinal)
+		{
+			"RunSpeedTestAsync",
+			"StartButton_Click",
+			"BackupThisPcToImageAsync",
+			"RunExperimentalFullRootUsbCloneAsync",
+			"ExportBootableVhdxCoreAsync",
+			"MultiBootFlowAsync",
+			"MovePartitionFlow",
+			"MoveGptFlow",
+		};
+
+		List<string> fresh = new List<string>();
+		foreach (var m in SourceModel.Methods())
+		{
+			string code = string.Join("\n", m.Method.ToString().Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//")));
+			if (!code.Contains("stopRequested", StringComparison.Ordinal)) continue;
+			if (!Regex.IsMatch(code, @"L\(""\w*(?:Done|Finished|Complete)\w*""\)")) continue;        // does not report its own ending
+			if (Regex.IsMatch(code, @"L\(""\w*Stop\w*""\)")) continue;         // has something to say about a stop
+			if (notYetAudited.Contains(m.Name)) continue;
+			fresh.Add(m.Name);
+		}
+
+		Assert.True(fresh.Count == 0,
+			"These flows announce an ending while polling Stop, and have no wording for a stopped run, so a "
+			+ "run the person cut short reads as one that finished:\n  " + string.Join("\n  ", fresh.Distinct()));
+	}
 }
