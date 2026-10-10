@@ -13449,11 +13449,18 @@ exit 0
 			ok = rr.Ok; fail = rr.Fail;
 			int partialCount = rr.Partial;
 			int emptyCount = rr.Empty;
+			// Files after a Stop are never attempted: they are not ok, not partial, not failed. Without this the
+			// message read "Recovered 3 of 50 files" and nothing else, and a person reads that as "the other 47"
+			// could not be recovered - when they were never tested. The deep scan one step earlier already
+			// refuses to let a stopped run look like a complete one; this is the same thing for the recovery.
+			bool stopped = stopRequested;
+			int skipped = Math.Max(0, picked.Count - (rr.Ok + rr.Partial + rr.Fail));
 
 			ProgressBar.Value = 100.0;
 			SetBusy(busy: false);
 			NotifyOperationDone(ok > 0);
 			if (MessageBox.Show(string.Format(L("RfRecDoneHead"), ok, picked.Count, outDir)
+					+ (stopped && skipped > 0 ? string.Format(L("RfRecStoppedNote"), skipped) : "")
 					+ (emptyCount > 0 ? string.Format(L("RfRecEmptyNote"), emptyCount) : "")
 					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
 					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfRecOpenFolder"),

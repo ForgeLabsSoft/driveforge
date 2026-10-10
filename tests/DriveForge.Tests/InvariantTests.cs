@@ -1096,4 +1096,38 @@ public class InvariantTests
 			+ "over every sector and the other writes nothing at all, and the drive's owner is agreeing to "
 			+ "whichever sentence is on screen.");
 	}
+
+	/// <summary>
+	/// A recovery that was stopped must not read like one that finished.
+	///
+	/// The loop breaks out on Stop, and the files past that point are never attempted - they are not
+	/// counted as recovered, partial or failed. The message then said "Recovered 3 of 50 files" and
+	/// nothing more, and a person reads that as a verdict on the other 47. It is not one: they were
+	/// never tested. On a dying drive that is the difference between trying again and giving up on it.
+	///
+	/// The deep scan one step earlier already refuses to let a stopped run look complete, and says why
+	/// in its own comment - "the user reads '12 files found' as 'that's all there is' and stops
+	/// looking for the file that IS there". This is the same rule for the step after it.
+	/// </summary>
+	[Fact]
+	public void AStoppedRecoveryIsNotReportedAsAFinishedOne()
+	{
+		var found = SourceModel.Methods().Where(m => m.Name == "RecoverButton_Click").ToArray();
+		Assert.True(found.Length == 1, $"Expected one RecoverButton_Click, found {found.Length}.");
+		// Code only: the comments here quote the message this rule exists to prevent.
+		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		Assert.True(code.Contains("RfRecStoppedNote", StringComparison.Ordinal),
+			"A stopped recovery says nothing about the files it never reached, so the count of recovered "
+			+ "files reads as a verdict on all of them.");
+
+		Assert.True(Regex.IsMatch(code, @"stopped\s*&&"),
+			"The note about untouched files is not tied to the run having been stopped.");
+
+		Assert.True(Regex.IsMatch(code, @"picked\.Count\s*-\s*\(\s*rr\.Ok"),
+			"The number of untouched files is not derived from what was actually attempted. It has to be "
+			+ "the picked count minus the files that were recovered, partly recovered or failed - any other "
+			+ "number is a guess presented to someone deciding whether to give up on a drive.");
+	}
 }
