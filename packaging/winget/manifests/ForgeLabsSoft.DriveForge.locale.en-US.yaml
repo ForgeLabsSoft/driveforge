@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 
 PackageIdentifier: ForgeLabsSoft.DriveForge
-PackageVersion: 4.4.4
+PackageVersion: 4.4.5
 PackageLocale: en-US
 Publisher: ForgeLabsSoft
 PublisherUrl: https://github.com/ForgeLabsSoft
@@ -37,22 +37,27 @@ Tags:
 - portable
 - open-source
 ReleaseNotes: |-
-  Fixed: the same fault behind 4.4.3 was still in four more places, and one of them was the tool for
-  recovering from it.
+  Fixed: on a plain USB flash drive, a drive could be emptied and then told the operation had failed.
 
-  Quick partition, Convert MBR/GPT and "Initialize a blank / RAW disk" all emptied the disk and then asked
-  Windows to convert a partition table that no longer existed, which fails on Windows 11 26H2 and leaves the
-  drive blank. Quick format had the quiet version of it: it created a partition without asking for a table at
-  all, and Windows then makes an MBR one, so a 4 TB drive came back as a 2 TB volume and the operation
-  reported success.
+  Every destructive tool starts with the same command, and on a plain flash drive Windows often refuses it
+  with "Access is denied" - after the partition table is already gone. The tool then showed a hexadecimal
+  error code and created nothing, so the drive was left blank and the message explained nothing. Eleven
+  places started with that command, among them the SSD erase, Format, the full-overwrite Wipe and writing
+  an ISO to a stick.
 
-  All four now create the partition table with the call meant for a blank disk and check that they got it.
-  Two build-breaking rules were added so the pattern cannot return, and both were confirmed by deliberately
-  breaking the code.
+  They all now look at the disk instead of reading an exit code, and finish the job: when the partition
+  table is already gone they carry on, otherwise they try two further routes before stopping. If all of
+  them fail, the message says in plain language that nothing new was created and that unplugging the drive
+  and trying again usually clears it.
 
-  Verified on real hardware as well as in tests, including driving the application itself through the repair
-  on a USB-attached SSD, in both directions.
-ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.4.4
+  Four more faults in the same chain were found the same way and fixed: an emptied disk that still reported
+  its old partition table could never be given a new one; a drive that cannot TRIM failed the whole erase;
+  a partition that was created but not formatted was abandoned with no file system on it; and the progress
+  line called a flash drive an SSD immediately after warning that it is not one.
+
+  All of it was measured by driving the application on a real flash drive, and the erase was then run
+  through it four times from end to end.
+ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.4.5
 Documentations:
 - DocumentLabel: Wiki
   DocumentUrl: https://github.com/ForgeLabsSoft/driveforge/wiki
