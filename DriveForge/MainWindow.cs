@@ -12547,18 +12547,33 @@ exit 0
 			{
 				try
 				{
-					// Skip the CD/DVD type; everything else (fixed + removable) is fair game.
-					if (d.DriveType == DriveType.CDRom) continue;
-					if (!d.IsReady) continue;
-					string fmt = "";
-					try { fmt = d.DriveFormat; } catch { }
-					bool supported = string.Equals(fmt, "NTFS", StringComparison.OrdinalIgnoreCase)
-						|| string.Equals(fmt, "exFAT", StringComparison.OrdinalIgnoreCase)
-						|| string.Equals(fmt, "FAT32", StringComparison.OrdinalIgnoreCase)
-						|| string.Equals(fmt, "FAT", StringComparison.OrdinalIgnoreCase);
-					if (!supported) continue;
-					string label = string.IsNullOrWhiteSpace(d.VolumeLabel) ? "no label" : d.VolumeLabel;
-					RecoverVolumeBox.Items.Add($"{d.Name.TrimEnd('\\')}  ({label}, {fmt}, {FormatBytes(d.TotalSize)})");
+					// Fixed and removable only. A CD/DVD was already out; a mapped network drive was in fact being
+					// OFFERED - SMB reports NTFS and IsReady - and \\.\Z: cannot be opened for one, so Scan answered
+					// ErrOpenVolumeRead on something that was never scannable. NoRootDirectory is a letter with
+					// nothing behind it. Stopping here also keeps the device handle below off drives where a volume
+					// with no file system cannot arise.
+					if (d.DriveType != DriveType.Fixed && d.DriveType != DriveType.Removable) continue;
+					char dl = ParseVolumeLetter(d.Name);
+					string? fmt = dl == (char)0 ? null : RecoverableFsName(dl);
+					if (fmt == null)
+					{
+						// A volume Windows cannot mount is not a volume to hide - it is the one this screen exists
+						// for. Deep scan carves it by content and the whole-drive image copies it sector by sector;
+						// neither needs a file system, and both were unreachable, because every action on this
+						// screen starts from this list. Its size has to come from the device: there is no file
+						// system left to ask. A slot that cannot even be opened - an empty card reader - is still
+						// nothing to offer, so it stays out.
+						long raw = dl == (char)0 ? 0L : VolumeLengthBytes(dl);
+						if (raw <= 0L) continue;
+						RecoverVolumeBox.Items.Add(d.Name.TrimEnd(System.IO.Path.DirectorySeparatorChar) + "  (" + L("RfVolNoFs") + ", " + FormatBytes(raw) + ")");
+					}
+					else
+					{
+						string label = "";
+						try { label = d.VolumeLabel; } catch { }
+						if (string.IsNullOrWhiteSpace(label)) label = L("RfVolNoLabel");
+						RecoverVolumeBox.Items.Add($"{d.Name.TrimEnd('\\')}  ({label}, {fmt}, {FormatBytes(d.TotalSize)})");
+					}
 					if (ParseVolumeLetter(RecoverVolumeBox.Items[^1] as string) == prevLetter && prevLetter != '\0')
 						selectIndex = RecoverVolumeBox.Items.Count - 1;
 				}
@@ -12607,6 +12622,10 @@ exit 0
 		if (!IsAdministrator()) { MessageBox.Show(L("RfAdminScan"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		char letter = ParseVolumeLetter(RecoverVolumeBox?.SelectedItem as string);
 		if (letter == '\0') { MessageBox.Show(L("RfPickDrive"), L("RfFilesTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		// Nothing to read a file LIST from. Say so here rather than letting the scan open the volume and
+		// come back with ErrUnsupportedVolume, and name the one scan that does not need a file system.
+		if (RecoverableFsName(letter) == null)
+		{ MessageBox.Show(string.Format(L("RfNoFsUseDeep"), letter), L("RfFilesTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (SsdRecoveryBlocked(letter)) return;
 
 		_recoverCts?.Dispose(); _recoverCts = new CancellationTokenSource();
@@ -12632,7 +12651,7 @@ exit 0
 			_lastScan = scan;
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
-			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			WatchRecoverRows(scan.Files);
 			ProgressBar.Value = 100.0;
 			if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
 			UpdateProgressStats();   // the timer already stopped: without this the stats LINE keeps the last tick's percent next to a full bar
@@ -12666,6 +12685,10 @@ exit 0
 		if (!IsAdministrator()) { MessageBox.Show(L("RfAdminScan"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		char letter = ParseVolumeLetter(RecoverVolumeBox?.SelectedItem as string);
 		if (letter == '\0') { MessageBox.Show(L("RfPickDrive"), L("RfFilesTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
+		// Nothing to read a file LIST from. Say so here rather than letting the scan open the volume and
+		// come back with ErrUnsupportedVolume, and name the one scan that does not need a file system.
+		if (RecoverableFsName(letter) == null)
+		{ MessageBox.Show(string.Format(L("RfNoFsUseDeep"), letter), L("RfFilesTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		bool failed = false;
 		try
 		{
@@ -12680,7 +12703,7 @@ exit 0
 			_lastScan = scan;
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
-			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			WatchRecoverRows(scan.Files);
 			if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("RfRecycleFound"), scan.Files.Count);
 			SetBusy(busy: false);
 		}
@@ -12726,7 +12749,7 @@ exit 0
 			if (RecoverPreviewImage != null) RecoverPreviewImage.Source = null;
 			stopRequested = false; _progressFullRange = true; _progressFixedTotal = true;
 			// Byte-based progress so the bar runs smoothly to 100% with a real ETA + MB/s (no 99% plateau).
-			long dtotal; try { dtotal = new DriveInfo(letter + ":").TotalSize; } catch { dtotal = 0; }
+			long dtotal = VolumeTotalBytes(letter);
 			if (dtotal <= 0) dtotal = 256L << 30;
 			progressTotalGiB = dtotal / 1073741824.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
@@ -12740,7 +12763,7 @@ exit 0
 			_lastScan = scan;
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
-			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			WatchRecoverRows(scan.Files);
 			// A stopped scan only searched part of the drive — never claim 100% or a complete result for it, or the
 			// user reads "12 files found" as "that's all there is" and stops looking for the file that IS there.
 			if (scan.DeepPartial)
@@ -12795,15 +12818,21 @@ exit 0
 		RecoverTypeBox.SelectedIndex = prev >= 0 && prev < RecoverTypeBox.Items.Count ? prev : 0;
 	}
 
+	// How many rows the filter is letting through, or -1 when no filter is on. The Filter box used to
+	// give no feedback at all: one wrong letter emptied the grid while the line above it still read
+	// "12,431 deleted files" - two widgets, two answers, and the file looking lost.
+	private int _recoverShown = -1;
+
 	private void ApplyRecoverFilter()
 	{
+		_recoverShown = -1;
 		if (RecoverGrid?.ItemsSource == null) return;
 		var view = System.Windows.Data.CollectionViewSource.GetDefaultView(RecoverGrid.ItemsSource);
 		if (view == null) return;
 		string q = (RecoverSearchBox?.Text ?? "").Trim();
 		int ti = RecoverTypeBox?.SelectedIndex ?? 0;
 		string[] exts = ti > 0 && ti < RecoverTypeExts.Length ? RecoverTypeExts[ti] : System.Array.Empty<string>();
-		if (string.IsNullOrEmpty(q) && exts.Length == 0) { view.Filter = null; view.Refresh(); return; }
+		if (string.IsNullOrEmpty(q) && exts.Length == 0) { view.Filter = null; view.Refresh(); UpdateRecoverSelectionInfo(); return; }
 		view.Filter = o =>
 		{
 			var f = o as DeletedFile;
@@ -12813,6 +12842,27 @@ exit 0
 			return textOk && typeOk;
 		};
 		view.Refresh();
+		_recoverShown = VisibleRecoverFiles().Count();
+		UpdateRecoverSelectionInfo();
+	}
+
+	// One owner for "what the recovery will act on". Three places spelled this out, and the gallery
+	// spelled out a FOURTH answer by leaving Recoverable off: its tiles offered to recover rows the
+	// recovery would never look at, so ticking one lit the tile's border up and moved no number anywhere.
+	private IEnumerable<DeletedFile> PickedRecoverFiles() =>
+		_lastScan == null ? Enumerable.Empty<DeletedFile>() : _lastScan.Files.Where(f => f.Selected && f.Recoverable);
+
+	// Every scan wires its rows the same way, and six handlers spelled the wiring out. The handler also
+	// tests WHICH property changed now that a row's status changes after the grid is bound: it is the
+	// SELECTION line, and it walks the whole scan three times, so two thousand status stamps would
+	// otherwise set off two thousand of those walks.
+	private void WatchRecoverRows(IEnumerable<DeletedFile> rows)
+	{
+		foreach (var f in rows)
+			f.PropertyChanged += (_, ev) =>
+			{
+				if (ev.PropertyName == nameof(DeletedFile.Selected)) UpdateRecoverSelectionInfo();
+			};
 	}
 
 	private IEnumerable<DeletedFile> VisibleRecoverFiles()
@@ -12846,7 +12896,7 @@ exit 0
 	{
 		if (_suppressRecoverSelUpdate) return;
 		if (_lastScan == null || RecoverStatusText == null) return;
-		var sel = _lastScan.Files.Where(f => f.Selected && f.Recoverable).ToList();
+		var sel = PickedRecoverFiles().ToList();
 		int del = _lastScan.Files.Count(f => f.Deleted);
 		int onDrive = _lastScan.Files.Count - del;
 		RecoverButton.IsEnabled = sel.Count > 0 && !isBusy;
@@ -12857,6 +12907,10 @@ exit 0
 		// finally, so it is the one place that reliably keeps the "partial — rest not searched" warning visible;
 		// otherwise the one-shot message set right after the scan is instantly overwritten here.
 		if (_lastScan.DeepPartial) txt += " " + string.Format(L("RfDeepPartialSuffix"), FormatBytes(_lastScan.ResumeOffset));
+		// Same reasoning, same line: a result that stopped at the entry cap has an unknown amount missing,
+		// and "200000 files found." reads as "that is all there is" just as loudly as a stopped scan would.
+		if (_lastScan.Truncated) txt += " " + string.Format(L("RfCappedSuffix"), MaxRecoverEntries);
+		if (_recoverShown >= 0) txt += " " + string.Format(L("RfFilterShown"), _recoverShown, _lastScan.Files.Count);
 		RecoverStatusText.Text = txt;
 	}
 
@@ -12866,7 +12920,7 @@ exit 0
 		if (!IsAdministrator()) { MessageBox.Show(L("RfAdminImage"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		char letter = ParseVolumeLetter(RecoverVolumeBox?.SelectedItem as string);
 		if (letter == '\0') { MessageBox.Show(L("RfImgPick"), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		long total; try { total = new DriveInfo(letter + ":").TotalSize; } catch { total = 0; }
+		long total = VolumeTotalBytes(letter);
 		if (total <= 0) { MessageBox.Show(L("RfImgNoSize"), L("RfImgTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		var dlg = new Microsoft.Win32.SaveFileDialog { Filter = L("RfFltDiskImage") + " (*.img)|*.img", FileName = $"{letter}-image.img", Title = L("RfImgSaveTitle") };
@@ -13045,7 +13099,7 @@ exit 0
 			_lastScan = scan;
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
-			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			WatchRecoverRows(scan.Files);
 			// Don't paint a full bar for a scan the user STOPPED — it only searched part of the image. The partial
 			// warning is appended by UpdateRecoverSelectionInfo (called in the finally), since scan.DeepPartial is set.
 			if (!scan.DeepPartial) { ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%"; }
@@ -13220,6 +13274,49 @@ exit 0
 		return -1;
 	}
 
+	// The volume's length in bytes, asked of the DEVICE. DriveInfo.TotalSize comes from the file system,
+	// so it throws for exactly the volume this screen exists for - an unformatted or damaged one - and
+	// the deep scan then fell back to a guessed 256 GB: it would stop two thirds of the way down a 1 TB
+	// drive and report a finished scan, or run off the end of an 8 GB one.
+	private static long VolumeLengthBytes(char letter)
+	{
+		const uint IOCTL_DISK_GET_LENGTH_INFO = 0x0007405Cu;
+		try
+		{
+			using var h = CreateFile($"\\\\.\\{char.ToUpperInvariant(letter)}:", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
+			if (h.IsInvalid) return 0L;
+			byte[] outBuf = new byte[8];
+			if (DeviceIoControl(h, IOCTL_DISK_GET_LENGTH_INFO, null, 0, outBuf, outBuf.Length, out int got, IntPtr.Zero) && got >= 8)
+				return Math.Max(0L, BitConverter.ToInt64(outBuf, 0));
+		}
+		catch { }
+		return 0L;
+	}
+
+	/// <summary>A volume's total size: the file system's own number when there is one, the device's when there is not.</summary>
+	private static long VolumeTotalBytes(char letter)
+	{
+		try { long t = new DriveInfo(letter + ":").TotalSize; if (t > 0L) return t; } catch { }
+		return VolumeLengthBytes(letter);
+	}
+
+	// One answer to "can a list of files be read off this volume", returning the file system's name when
+	// yes and null when no. The picker used to hold the only copy of this test and simply dropped every
+	// volume that failed it - a RAW or unformatted one included, which is the case this screen exists for.
+	private static string? RecoverableFsName(char letter)
+	{
+		try
+		{
+			var d = new DriveInfo(letter + ":");
+			if (!d.IsReady) return null;
+			string fmt = d.DriveFormat;
+			foreach (string known in new[] { "NTFS", "exFAT", "FAT32", "FAT" })
+				if (string.Equals(fmt, known, StringComparison.OrdinalIgnoreCase)) return fmt;
+		}
+		catch { }
+		return null;
+	}
+
 	[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
 	private static extern bool GetVolumeNameForVolumeMountPoint(string lpszVolumeMountPoint, StringBuilder lpszVolumeName, uint cchBufferLength);
 
@@ -13293,8 +13390,16 @@ exit 0
 	private void RecoverGallery_Click(object sender, RoutedEventArgs e)
 	{
 		if (_lastScan == null) { return; }
-		var media = VisibleRecoverFiles().Where(f => IsPreviewableImage(f.Name)).ToList();
-		if (media.Count == 0) { if (RecoverStatusText != null) RecoverStatusText.Text = L("RfGalleryNone"); return; }
+		// Recoverable, like every other answer to what can be picked - and say which kind of empty this is:
+		// "no photos here" and "photos whose data is gone" are different news.
+		var photos = VisibleRecoverFiles().Where(f => IsPreviewableImage(f.Name)).ToList();
+		var media = photos.Where(f => f.Recoverable).ToList();
+		if (media.Count == 0)
+		{
+			if (RecoverStatusText != null)
+				RecoverStatusText.Text = L(photos.Count > 0 ? "RfGalleryNoneLeft" : "RfGalleryNone");
+			return;
+		}
 		ShowRecoverGallery(media);
 	}
 
@@ -13376,7 +13481,7 @@ exit 0
 	{
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (_lastScan == null) return;
-		var picked = _lastScan.Files.Where(f => f.Selected && f.Recoverable).ToList();
+		var picked = PickedRecoverFiles().ToList();
 		if (picked.Count == 0) { MessageBox.Show(L("RfPickFile"), L("RfFilesTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		string outDir;
@@ -13420,7 +13525,8 @@ exit 0
 					+ (stopped && skipped > 0 ? string.Format(L("RfRecStoppedNote"), skipped) : "")
 					+ (emptyCount > 0 ? string.Format(L("RfRecEmptyNote"), emptyCount) : "")
 					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
-					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfRecOpenFolder"),
+					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "")
+					+ (ok < picked.Count ? L("RfRecRetryNote") : "") + L("RfRecOpenFolder"),
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo(outDir) { UseShellExecute = true }); } catch { }
 		}
@@ -13445,6 +13551,7 @@ exit 0
 	private (int Ok, int Partial, int Fail, int Empty) RecoverPickedToDir(List<DeletedFile> picked, NtfsScanResult scan, string outDir)
 	{
 		int ok = 0, partial = 0, fail = 0, empty = 0;
+		var recovered = new List<DeletedFile>();   // the clean ones, unticked in one pass at the end
 		using var vr = OpenSource(scan);
 		var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		for (int i = 0; i < picked.Count; i++)
@@ -13468,18 +13575,33 @@ exit 0
 				outPath = Path.Combine(targetDir, $"{baseName} ({dup++}){ext}");
 			}
 			used.Add(outPath);
+			// What this row will say once the recovery has touched it. The four counters the caller prints
+			// cannot name a row, and this column was still showing the estimate from before the recovery ran,
+			// so a file that came back empty looked exactly like one that came out whole.
+			string key; string kind; int percent; bool clean = false;
 			try
 			{
 				long written = RecoverOne(vr, f, scan, outPath, out bool allZero);
 				// A short write means the data was unreadable or already overwritten. KEEP the partial file (half a
 				// photo still beats nothing) but never count it as a clean recovery — reporting truncated data as
 				// "recovered" is exactly what makes a user delete the only surviving copy.
-				if (f.Size > 0 && written < f.Size) partial++; else ok++;
+				bool whole = f.Size <= 0 || written >= f.Size;
+				if (!whole) partial++; else ok++;
 				// Counted SEPARATELY, not instead: the file was written at its full length, so it is not a partial
 				// recovery - it is a full-length recovery of nothing, and the user has to be told which one they got.
 				if (allZero) empty++;
+				// A full-length file of zeros is not a recovery either, so it does not get a clean row. It keeps its
+				// tick for the same reason a partial one does: the same row off a disk image of a failing drive is
+				// a different attempt, and the tick is what carries it there. RfStEmptyOut, not RfStEmpty: that one
+				// means the file was zero bytes before anyone deleted it, which is the opposite news.
+				key = allZero ? "RfStEmptyOut" : whole ? "RfStDone" : "RfStPartialOut";
+				// The percentage after a recovery is the fraction of the expected length that was actually written -
+				// a statement about the read, not a promise that a carved photo decodes.
+				kind = allZero ? "bad" : whole ? "good" : "warn";
+				percent = allZero ? 0 : whole ? 100 : (int)(f.Size > 0 ? written * 100L / f.Size : 0L);
+				clean = whole && !allZero;
 			}
-			catch
+			catch (Exception rex)
 			{
 				// Keep whatever reached the disk. A read that FAILS part-way is the same situation as one that comes
 				// up short - a dying drive - and the short-read path above deliberately keeps its partial file for
@@ -13487,12 +13609,41 @@ exit 0
 				// drive this tool exists for, and then reported the file as unrecoverable.
 				long salvaged = 0;
 				try { if (File.Exists(outPath)) salvaged = new FileInfo(outPath).Length; } catch { }
-				if (salvaged > 0) partial++;
-				else { fail++; try { if (File.Exists(outPath)) File.Delete(outPath); } catch { } }
+				if (salvaged > 0) { partial++; key = "RfStPartialOut"; kind = "warn"; percent = (int)(f.Size > 0 ? Math.Min(99L, salvaged * 100L / f.Size) : 0L); }
+				else
+				{
+					fail++; try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+					// RecoverOne's own refusal, in the row that caused it. It carries the one piece of advice that
+					// can fix this row - scan the drive again - and it has never reached anybody, because this
+					// catch turned it into fail++ and the counter has nowhere to put a sentence.
+					key = rex is NoRecoveryPayloadException ? "RfStNoPayload" : "RfStFailOut";
+					kind = "bad"; percent = 0;
+				}
 			}
+			if (clean) recovered.Add(f);
 			int pct = (int)((i + 1) * 100.0 / picked.Count);
-			Dispatcher.Invoke(() => ProgressBar.Value = pct);
+			// The stamp rides along in the round trip the progress bar already costs. Status raises its own
+			// PropertyChanged but not the selection line's, which only listens for Selected.
+			Dispatcher.Invoke(() =>
+			{
+				ProgressBar.Value = pct;
+				f.StatusKey = key; f.StatusKind = kind; f.RecoverPercent = percent;
+			});
 		}
+		// Untick the clean ones in ONE bulk pass, the way Select all/none already do: each untick raises
+		// PropertyChanged, and the selection line behind it walks the whole scan three times, so unticking
+		// 2,000 rows of a 200,000-row deep scan one at a time is the same O(n^2) freeze _suppressRecoverSelUpdate
+		// was introduced for. What stays ticked afterwards is exactly the set worth another attempt - which is
+		// what RfRecStoppedNote has been telling the user to do all along, while a stopped run in fact left
+		// every row ticked, the recovered ones included.
+		if (recovered.Count > 0)
+			Dispatcher.Invoke(() =>
+			{
+				_suppressRecoverSelUpdate = true;
+				try { foreach (var done in recovered) done.Selected = false; }
+				finally { _suppressRecoverSelUpdate = false; }
+				UpdateRecoverSelectionInfo();
+			});
 		return (ok, partial, fail, empty);
 	}
 
@@ -13501,7 +13652,7 @@ exit 0
 	{
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		if (_lastScan == null) return;
-		var picked = _lastScan.Files.Where(f => f.Selected && f.Recoverable).ToList();
+		var picked = PickedRecoverFiles().ToList();
 		if (picked.Count == 0) { MessageBox.Show(L("RfPickFile"), L("RfFilesTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		string zipPath;
@@ -13564,7 +13715,8 @@ exit 0
 					+ (stopped && skipped > 0 ? string.Format(L("RfRecStoppedNote"), skipped) : "")
 					+ (emptyCount > 0 ? string.Format(L("RfRecEmptyNote"), emptyCount) : "")
 					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
-					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "") + L("RfZipShowExplorer"),
+					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "")
+					+ (ok < picked.Count ? L("RfRecRetryNote") : "") + L("RfZipShowExplorer"),
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{zipPath}\"") { UseShellExecute = true }); } catch { }
 		}
@@ -13616,7 +13768,7 @@ exit 0
 			_lastScan = scan;
 			RecoverGrid.ItemsSource = scan.Files;
 			ApplyRecoverFilter();
-			foreach (var f in scan.Files) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			WatchRecoverRows(scan.Files);
 			PopulateRecoverTypes();
 			UpdateRecoverSelectionInfo();
 			if (RecoverStatusText != null) RecoverStatusText.Text = string.Format(L("SessionLoaded"), scan.Files.Count, string.IsNullOrEmpty(scan.ImagePath) ? scan.Letter + ":" : Path.GetFileName(scan.ImagePath));
@@ -13647,7 +13799,7 @@ exit 0
 			stopRequested = false; _progressFullRange = true; _progressFixedTotal = true;
 			long dtotal;
 			if (isImage) { try { dtotal = new FileInfo(loaded.ImagePath).Length; } catch { dtotal = 0; } }
-			else { try { dtotal = new DriveInfo(loaded.Letter + ":").TotalSize; } catch { dtotal = 0; } }
+			else dtotal = VolumeTotalBytes(loaded.Letter);
 			if (dtotal <= 0) dtotal = 256L << 30;
 			// The bar only ever ADVANCES (UpdateProgressStats never retreats it), so a resume started after any
 			// operation that ended at 100% used to show a full bar and "100%" for the entire scan — and because
@@ -13674,7 +13826,7 @@ exit 0
 			_lastScan = loaded;
 			RecoverGrid.ItemsSource = loaded.Files;
 			ApplyRecoverFilter();
-			foreach (var f in added) f.PropertyChanged += (_, __) => UpdateRecoverSelectionInfo();
+			WatchRecoverRows(added);
 			// Same honesty rule as the first pass: a stopped resume did not finish the drive either.
 			if (more.DeepPartial)
 			{
@@ -17453,6 +17605,16 @@ exit 0
 	private sealed class StoppedException : OperationCanceledException, IUserFacingMessage
 	{
 		public StoppedException(string message) : base(message) { }
+	}
+
+	// A row with no recovery payload at all. Its own type because the recovery writes this one into the
+	// row that caused it: the advice it carries - scan the drive again - is useless inside a failure
+	// count, which is where the bare catch in RecoverPickedToDir had been putting it since it was
+	// written. It inherits from the exception RecoverOne already threw, so nothing upstream changes
+	// behaviour because of it.
+	private sealed class NoRecoveryPayloadException : InvalidOperationException, IUserFacingMessage
+	{
+		public NoRecoveryPayloadException(string message) : base(message) { }
 	}
 
 	private void ShowError(string title, Exception ex)

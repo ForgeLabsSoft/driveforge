@@ -21,7 +21,7 @@ public partial class MainWindow
 	public sealed class DeletedFile : INotifyPropertyChanged
 	{
 		private bool _selected;
-		public bool Selected { get => _selected; set { if (_selected != value) { _selected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Selected))); } } }
+		public bool Selected { get => _selected; set { if (_selected != value) { _selected = value; Raise(nameof(Selected)); } } }
 		public bool Deleted { get; set; } = true;
 		public string Name { get; set; } = "";
 		public string Path { get; set; } = "";
@@ -29,13 +29,28 @@ public partial class MainWindow
 		public string SizeText { get; set; } = "";
 		public DateTime? ModifiedUtc { get; set; }
 		public string ModifiedText { get; set; } = "";
-		public string Status { get; set; } = "";
+		// The row's status is a dictionary KEY, never a finished sentence. Baked in at scan time it was
+		// pinned to the language of the scan: after an English scan, switching to Romanian translated the
+		// column HEADER and left every row under it in English, with nothing able to re-render them. A key
+		// also gives the recovery somewhere to write its verdict per row — until now that went into four
+		// integers and one modal, which can say "5 could not be read" but never WHICH five.
+		private string _statusKey = "";
+		private string _statusText = "";
+		public string StatusKey { get => _statusKey; set { _statusKey = value ?? ""; Raise(nameof(Status)); } }
+		// Only a pre-v3 .dfscan sets this: those rows carry the sentence their own scan rendered, in
+		// whatever language it ran in, and there is no key left to re-derive it from.
+		public string StatusText { get => _statusText; set { _statusText = value ?? ""; Raise(nameof(Status)); } }
+		public string Status => _statusKey.Length > 0 ? L(_statusKey) : _statusText;
 		public bool Recoverable { get; set; }
 		// Honest recoverability pill: StatusKind drives the colour dot (good/warn/bad/info), RecoverPercent the % text.
 		// We never assert 100% on a carved or undelete result — the data could be partially overwritten.
-		public string StatusKind { get; set; } = "info";
-		public int RecoverPercent { get; set; } = -1;
+		private string _statusKind = "info";
+		private int _recoverPercent = -1;
+		public string StatusKind { get => _statusKind; set { _statusKind = value; Raise(nameof(StatusKind)); } }
+		public int RecoverPercent { get => _recoverPercent; set { _recoverPercent = value; Raise(nameof(PercentText)); } }
 		public string PercentText => RecoverPercent >= 0 ? RecoverPercent + "%" : "";
+		/// <summary>Re-read the three rendered members without changing any of them — what a language change calls.</summary>
+		public void RaiseRendered() { Raise(nameof(Status)); Raise(nameof(StatusKind)); Raise(nameof(PercentText)); }
 		// Recycle Bin recoveries: the data still exists as a $R file — recover = copy this path (zero risk).
 		public string SourcePath = "";
 		// NTFS payload:
@@ -50,6 +65,7 @@ public partial class MainWindow
 		public bool Carved;
 		public long ByteOffset;
 		public event PropertyChangedEventHandler? PropertyChanged;
+		private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 	}
 
 	private sealed class NtfsScanResult
@@ -65,6 +81,13 @@ public partial class MainWindow
 		// Deep-scan checkpoint: byte offset where a (paused/stopped) carving scan left off, so it can resume later.
 		public long ResumeOffset;
 		public bool DeepPartial;      // true if a deep scan was stopped before reaching the end
+		// MaxRecoverEntries is a cap, not a result. Every scanner simply stops adding when it is reached,
+		// so the screen reported "200000 files found." — which reads as "that is all there is", the
+		// very lie DeepPartial exists to prevent one line above. Derived from the count so a new cap site
+		// cannot forget to set it; the NTFS scanner sets it explicitly as well, because its de-duplication
+		// pass can take the count back BELOW the cap after the truncation has already happened.
+		private bool _truncated;
+		public bool Truncated { get => _truncated || Files.Count >= MaxRecoverEntries; set => _truncated = value; }
 		// 512-byte boot sector captured at scan time — used to detect a stale session whose drive letter now points at a
 		// different disk (removable letters get reused), so recovery/resume doesn't touch the wrong volume.
 		public byte[]? BootSig;
@@ -101,6 +124,9 @@ public partial class MainWindow
 		// here used to reload those rows with an empty payload, which recovered every file as 0 bytes and still
 		// reported success. StatusKind/RecoverPercent carry the honest health pill, which was likewise being lost.
 		public string SourcePath { get; set; } = "";
+		// v3: the status KEY. Status keeps carrying the rendered sentence, both for an older DriveForge
+		// reading this file and for a v1/v2 file read by this one, where the key is all that is missing.
+		public string StatusKey { get; set; } = "";
 		public string StatusKind { get; set; } = "info";
 		public int RecoverPercent { get; set; } = -1;
 	}
@@ -109,7 +135,9 @@ public partial class MainWindow
 	{
 		// v2 added SourcePath/StatusKind/RecoverPercent. v1 files still load (their rows simply carry no SourcePath —
 		// RecoverOne refuses those loudly instead of writing a 0-byte file and calling it a success).
-		public int Version { get; set; } = 2;
+		// v3 added StatusKey, so a reloaded row's status re-renders in the language in use rather than
+		// staying in the one the scan ran in. A v1/v2 row keeps its stored sentence instead.
+		public int Version { get; set; } = 3;
 		public string Letter { get; set; } = "";
 		public string ImagePath { get; set; } = "";
 		public bool IsExFat { get; set; }
@@ -144,7 +172,7 @@ public partial class MainWindow
 				ResidentData = f.ResidentData != null ? Convert.ToBase64String(f.ResidentData) : "",
 				Runs = f.Runs.Select(r => new[] { r.Lcn, r.Count }).ToList(),
 				ExFat = f.ExFat, FirstCluster = f.FirstCluster, Contiguous = f.Contiguous, Carved = f.Carved, ByteOffset = f.ByteOffset,
-				SourcePath = f.SourcePath, StatusKind = f.StatusKind, RecoverPercent = f.RecoverPercent,
+				SourcePath = f.SourcePath, StatusKey = f.StatusKey, StatusKind = f.StatusKind, RecoverPercent = f.RecoverPercent,
 			});
 		File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(dto));
 	}
@@ -152,7 +180,7 @@ public partial class MainWindow
 	private NtfsScanResult LoadSession(string path)
 	{
 		var dto = System.Text.Json.JsonSerializer.Deserialize<SessionDto>(File.ReadAllText(path)) ?? throw new UserFacingIoException(L("ErrSessionBad"));
-		if (dto.Version > 2) throw new UserFacingIoException(string.Format(L("ErrSessionNewer"), dto.Version));
+		if (dto.Version > 3) throw new UserFacingIoException(string.Format(L("ErrSessionNewer"), dto.Version));
 		var scan = new NtfsScanResult
 		{
 			Letter = string.IsNullOrEmpty(dto.Letter) ? '\0' : dto.Letter[0],
@@ -168,7 +196,7 @@ public partial class MainWindow
 			{
 				Deleted = d.Deleted, Name = d.Name, Path = d.Path, Size = d.Size, SizeText = d.SizeText,
 				ModifiedUtc = DateTime.TryParse(d.ModifiedUtc, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt) ? dt : null,
-				ModifiedText = d.ModifiedText, Status = d.Status, Recoverable = d.Recoverable, Resident = d.Resident,
+				ModifiedText = d.ModifiedText, StatusKey = d.StatusKey ?? "", StatusText = d.Status ?? "", Recoverable = d.Recoverable, Resident = d.Resident,
 				ResidentData = string.IsNullOrEmpty(d.ResidentData) ? null : Convert.FromBase64String(d.ResidentData),
 				ExFat = d.ExFat, FirstCluster = d.FirstCluster, Contiguous = d.Contiguous, Carved = d.Carved, ByteOffset = d.ByteOffset,
 				SourcePath = d.SourcePath ?? "", StatusKind = string.IsNullOrEmpty(d.StatusKind) ? "info" : d.StatusKind,
@@ -410,6 +438,9 @@ public partial class MainWindow
 			}
 		}
 
+		// The collecting loop above stopped adding at the cap. Record it HERE, before the de-duplication pass:
+		// that pass can bring Files.Count back under the cap, at which point nothing is left to notice.
+		if (deleted.Count >= MaxRecoverEntries) result.Truncated = true;
 		// Resolve full paths from the parent chain (root = index 5).
 		foreach (var (f, parent) in deleted)
 		{
@@ -535,7 +566,7 @@ public partial class MainWindow
 						df.Resident = true; df.ResidentData = new byte[len];
 						Array.Copy(buf, c, df.ResidentData, 0, len);
 						df.Size = len; df.Recoverable = !compEnc;
-						df.Status = compEnc ? L("RfStCompEnc") : L("RfStResident");
+						df.StatusKey = compEnc ? "RfStCompEnc" : "RfStResident";
 						haveData = true;
 					}
 				}
@@ -547,13 +578,13 @@ public partial class MainWindow
 					df.Size = real;
 					bool sparse = df.Runs.Any(r => r.Lcn < 0);
 					df.Recoverable = !compEnc && df.Runs.Count > 0;
-					df.Status = compEnc ? L("RfStCompEnc") : sparse ? L("RfStSparse") : df.Runs.Count > 1 ? L("RfStFragmented") : L("RfStOk");
+					df.StatusKey = compEnc ? "RfStCompEnc" : sparse ? "RfStSparse" : df.Runs.Count > 1 ? "RfStFragmented" : "RfStOk";
 					haveData = true;
 				}
 			}
 			attrOff += attrLen;
 		}
-		if (!haveData) { df.Recoverable = false; df.Status = L("RfStNoData"); }
+		if (!haveData) { df.Recoverable = false; df.StatusKey = "RfStNoData"; }
 		df.Name = bestName;
 		df.SizeText = FormatBytes(df.Size);
 		if (df.ModifiedUtc.HasValue) df.ModifiedText = df.ModifiedUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
@@ -726,7 +757,7 @@ public partial class MainWindow
 								Size = dataLength, SizeText = FormatBytes(dataLength),
 								FirstCluster = firstCluster, Contiguous = noFatChain,
 								Recoverable = canRec,
-								Status = inUse ? L("RfStOnDrive") : (canRec ? (noFatChain ? L("RfStOk") : L("RfStChained")) : (dataLength == 0 ? L("RfStEmpty") : L("RfStWiped")))
+								StatusKey = inUse ? "RfStOnDrive" : (canRec ? (noFatChain ? "RfStOk" : "RfStChained") : (dataLength == 0 ? "RfStEmpty" : "RfStWiped"))
 							});
 						}
 					}
@@ -886,7 +917,7 @@ public partial class MainWindow
 						ModifiedUtc = FatDateTime(dir, p),
 						ModifiedText = FatDateTime(dir, p)?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "",
 						Recoverable = canRec,
-						Status = canRec ? L("RfStContiguous") : (size == 0 ? L("RfStEmpty") : L("RfStWiped"))
+						StatusKey = canRec ? "RfStContiguous" : (size == 0 ? "RfStEmpty" : "RfStWiped")
 					});
 				}
 			}
@@ -1011,7 +1042,7 @@ public partial class MainWindow
 						Deleted = true, Name = name, Path = string.IsNullOrEmpty(orig) ? name : orig,
 						Size = realSize, SizeText = FormatBytes(realSize),
 						ModifiedUtc = dt, ModifiedText = dt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "",
-						Recoverable = true, SourcePath = rPath, StatusKind = "good", RecoverPercent = 100, Status = L("RfStRecycle")
+						Recoverable = true, SourcePath = rPath, StatusKind = "good", RecoverPercent = 100, StatusKey = "RfStRecycle"
 					});
 				}
 				catch { }
@@ -1064,7 +1095,7 @@ public partial class MainWindow
 		long total = 0, pos = startOffset;
 		try
 		{
-			try { total = new DriveInfo(letter + ":").TotalSize; } catch { total = 0; }
+			total = VolumeTotalBytes(letter);
 			if (total <= 0) total = 256L << 30;
 			const int block = 32 << 20;
 			int maxHeader = CarveSigs.Max(s => s.Header.Length);
@@ -1113,7 +1144,7 @@ public partial class MainWindow
 						{
 							Carved = true, ByteOffset = fileStart, Size = len, SizeText = FormatBytes(len),
 							Name = $"deepscan_{count:D5}{ext}", Path = "(deep scan)",
-							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
+							Recoverable = true, StatusKey = "RfStCarved", StatusKind = "warn", RecoverPercent = 70
 						}); } // cap carved entries like every other scanner, so a noisy disk can't exhaust memory
 						skipUntil = Math.Max(skipUntil, fileStart + len); // carry the carved file's end across the 32 MB block boundary
 						long advance = (fileStart + len) - pos;
@@ -1208,7 +1239,7 @@ public partial class MainWindow
 						{
 							Carved = true, ByteOffset = fileStart, Size = len, SizeText = FormatBytes(len),
 							Name = $"deepscan_{count:D5}{ext}", Path = "(deep scan)",
-							Recoverable = true, Status = hit.Name, StatusKind = "warn", RecoverPercent = 70
+							Recoverable = true, StatusKey = "RfStCarved", StatusKind = "warn", RecoverPercent = 70
 						}); } // cap carved entries like every other scanner, so a noisy disk can't exhaust memory
 						skipUntil = Math.Max(skipUntil, fileStart + len); // carry the carved file's end across the 32 MB block boundary
 						long advance = (fileStart + len) - pos;
@@ -1620,7 +1651,7 @@ public partial class MainWindow
 				ModifiedUtc = FatDateTime(dir, p),
 				ModifiedText = FatDateTime(dir, p)?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "",
 				Recoverable = safeRecover,
-				Status = !deleted ? L("RfStOnDrive") : (canRec ? L("RfStContiguous") : (size == 0 ? L("RfStEmpty") : L("RfStWiped")))
+				StatusKey = !deleted ? "RfStOnDrive" : (canRec ? "RfStContiguous" : (size == 0 ? "RfStEmpty" : "RfStWiped"))
 			});
 		}
 	}
@@ -1682,9 +1713,11 @@ public partial class MainWindow
 		}
 		// No recovery payload at all — e.g. a Recycle Bin row reloaded from a v1 .dfscan, which stored no SourcePath.
 		// Refuse LOUDLY and BEFORE creating the output file: silently writing a 0-byte file that the caller counts as
-		// a success is what invites the user to delete the only surviving copy.
+		// a success is what invites the user to delete the only surviving copy. Its own exception type, because the
+		// caller writes this one into the row that caused it: the advice in it is useless inside a failure count,
+		// which is where the caller's bare catch has been putting it.
 		if (!f.Carved && !f.Resident && !f.ExFat && f.Runs.Count == 0 && f.Size > 0)
-			throw new InvalidOperationException("This entry carries no recovery data (it came from an older saved session). Re-scan the drive, then recover it.");
+			throw new NoRecoveryPayloadException(L("RfStNoPayload"));
 		using var outFs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
 		int clusterSize = g.ClusterSize;
 

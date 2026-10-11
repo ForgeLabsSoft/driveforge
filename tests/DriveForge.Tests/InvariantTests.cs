@@ -1730,11 +1730,16 @@ public class InvariantTests
 		["WriteNonResident"] = 2,
 		["AttachReadOnly"] = 1,
 
-		// Never reaches a dialog. EnableBitLockerAsync's two sentences go to the log - both call sites catch it
-		// and the end-of-run report carries a translated warning - and RecoverOne's is counted as one failed
-		// file among many. If either ever becomes something a user reads, this list is where that shows up.
+		// Never reaches a dialog. EnableBitLockerAsync's two sentences go to the log - both call sites catch
+		// it and the end-of-run report carries a translated warning. If that ever becomes something a user
+		// reads, this list is where it shows up.
+		//
+		// RecoverOne used to be here on the same grounds - its refusal was counted as one failed file among
+		// many - and that was the reason to rescue the sentence rather than record it: it carries the only
+		// advice that can fix the row it came from. It throws NoRecoveryPayloadException(L("RfStNoPayload"))
+		// now and the recovery writes it into that row's status. This rule is what noticed the entry had gone
+		// stale, on the first run after the change.
 		["EnableBitLockerAsync"] = 2,
-		["RecoverOne"] = 1,
 	};
 
 	/// <summary>
@@ -1922,5 +1927,187 @@ public class InvariantTests
 			"The cleaner must decide what is on screen in ONE place. Every other copy of that decision, and "
 				+ "every list walked without it, is a number this screen can promise and the run will not keep:"
 				+ "\n  " + string.Join("\n  ", complaints));
+	}
+
+	/// <summary>The recovery's verdict reaches the row it belongs to, not only a counter.</summary>
+	[Fact]
+	public void TheRecoveryWritesItsVerdictOnEveryRowItTouched()
+	{
+		var hit = SourceModel.Methods().Where(m => m.Name == "RecoverPickedToDir").ToArray();
+		Assert.True(hit.Length == 1, $"Expected one RecoverPickedToDir, found {hit.Length}.");
+		string code = string.Join("\n", hit[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		List<string> problems = new List<string>();
+		// One sentence for every outcome it counts: ok, partial and fail are the three ways a file can come
+		// out, empty is a fourth answer laid over them, and RecoverOne's own refusal is a fifth.
+		foreach (var (key, what) in new[]
+		{
+			("RfStDone", "a file that came out whole"),
+			("RfStPartialOut", "a file only part of which could be read"),
+			("RfStFailOut", "a file that could not be read at all"),
+			("RfStEmptyOut", "a file written at full length with nothing in it"),
+			("RfStNoPayload", "a row that carries no recovery data"),
+		})
+			if (!code.Contains(key, StringComparison.Ordinal))
+				problems.Add($"nothing is written on the row for {what} ({key})");
+
+		if (!Regex.IsMatch(code, @"\bf\.StatusKey\s*="))
+			problems.Add("no verdict is written on the row at all - the four counters the caller prints "
+				+ "cannot name one, and this column still showed the estimate from before the run");
+		if (!code.Contains("NoRecoveryPayloadException", StringComparison.Ordinal))
+			problems.Add("RecoverOne's refusal is not told apart from a read failure, so its advice - "
+				+ "scan the drive again - goes back into the failure count it spent its life in");
+
+		// Only a CLEAN recovery may untick a row. Whatever is still ticked when the summary closes is what
+		// RfRecStoppedNote tells the user to run again, and a partial or an empty file is exactly that.
+		if (!Regex.IsMatch(code, @"Selected\s*=\s*false"))
+			problems.Add("nothing unticks a recovered row, so a second run repeats the files that already "
+				+ "came out and RfRecStoppedNote's own advice cannot be followed");
+		if (!Regex.IsMatch(code, @"clean\s*=\s*whole\s*&&\s*!allZero"))
+			problems.Add("the test for a clean recovery is no longer 'came out whole and was not empty'");
+		if (!Regex.IsMatch(code, @"if\s*\(clean\)\s*recovered\.Add"))
+			problems.Add("rows are not gathered by that test before being unticked");
+		if (!Regex.IsMatch(code, @"_suppressRecoverSelUpdate\s*=\s*true"))
+			problems.Add("the bulk untick is not suppressed, and each untick walks the whole scan three times");
+
+		// And both summaries say where the per-file reason now is.
+		foreach (var caller in SourceModel.Methods()
+			.Where(m => m.Name != "RecoverPickedToDir"
+				&& m.Method.ToString().Contains("RecoverPickedToDir(", StringComparison.Ordinal)))
+		{
+			string cc = string.Join("\n", caller.Method.ToString().Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//")));
+			if (!cc.Contains("RfRecRetryNote", StringComparison.Ordinal))
+				problems.Add($"{caller.Name}: the summary never says the rows carry the per-file reason");
+		}
+
+		Assert.True(problems.Count == 0,
+			"Three came back empty, five could not be read - a count cannot say WHICH, and on a 2,000-row "
+				+ "deep scan that is the only thing the user needs:\n  " + string.Join("\n  ", problems));
+	}
+
+	/// <summary>One answer to what the recovery will act on, in one place.</summary>
+	[Fact]
+	public void OneAnswerToWhatTheRecoveryWillActOn()
+	{
+		// The predicate itself: one copy, in the helper that owns it.
+		List<string> owners = new List<string>();
+		foreach (var m in SourceModel.Methods())
+			if (Regex.IsMatch(m.Method.ToString(), @"Selected\s*&&\s*\w*\.?Recoverable"))
+				owners.Add($"{m.Name} ({SourceModel.Where(m.File, m.Method)})");
+		Assert.True(owners.Count == 1 && owners[0].StartsWith("PickedRecoverFiles", StringComparison.Ordinal),
+			"Selected && Recoverable is the answer to what the recovery will act on, and it belongs to "
+				+ "PickedRecoverFiles alone. Found in: " + string.Join(", ", owners));
+
+		// And everything that answers the question asks that helper - or asks Recoverable itself, where it is
+		// deciding about the VISIBLE rows rather than the picked ones.
+		string[] consumers = { "RecoverButton_Click", "RecoverZip_Click", 
+			"UpdateRecoverSelectionInfo", "RecoverGallery_Click", "RecoverSelectAll_Click" };
+		List<string> problems = new List<string>();
+		foreach (string name in consumers)
+		{
+			var hit = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			Assert.True(hit.Length == 1, $"Expected one {name}, found {hit.Length}.");
+			string code = string.Join("\n", hit[0].Method.ToString().Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//")));
+			if (!code.Contains("PickedRecoverFiles()", StringComparison.Ordinal)
+					&& !code.Contains("Recoverable", StringComparison.Ordinal))
+				problems.Add($"{name}: decides what can be recovered without asking whether the data is "
+					+ "still there");
+		}
+		Assert.True(problems.Count == 0,
+			"The gallery used to be this screen's fifth answer to that question: its tiles offered to recover "
+				+ "rows the recovery would never look at, so ticking one lit the tile's border up and moved no "
+				+ "number anywhere.\n  " + string.Join("\n  ", problems));
+	}
+
+	/// <summary>A row's status is a key the language can re-render, never a stored sentence.</summary>
+	[Fact]
+	public void ARowsStatusIsAKeyTheLanguageCanReRender()
+	{
+		List<string> problems = new List<string>();
+
+		// 1. Status is computed. A setter is all it takes for a scan to bake its own language back in.
+		var decls = SourceModel.Parsed
+			.SelectMany(p => p.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+				.Where(d => d.Identifier.Text == "Status" && d.Parent is ClassDeclarationSyntax c
+					&& c.Identifier.Text == "DeletedFile")
+				.Select(d => (p.File, Decl: d)))
+			.ToArray();
+		Assert.True(decls.Length == 1, $"Expected one DeletedFile.Status, found {decls.Length}.");
+		var (file, status) = decls[0];
+		if (status.AccessorList != null && status.AccessorList.Accessors.Any(a => a.Keyword.Text == "set"))
+			problems.Add($"{SourceModel.Where(file, status)}: Status is settable again, so a scan can store "
+				+ "a finished sentence in it");
+		if (!status.ToString().Contains("L(", StringComparison.Ordinal))
+			problems.Add("DeletedFile.Status does not render its key, so it cannot follow the language");
+
+		// 2. And nobody smuggles a rendered sentence in through the key.
+		foreach (var (f, root) in SourceModel.Parsed)
+			foreach (var a in root.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+			{
+				if (!a.Left.ToString().EndsWith("StatusKey", StringComparison.Ordinal)) continue;
+				if (a.Right.ToString().Contains("L(", StringComparison.Ordinal))
+					problems.Add($"{SourceModel.Where(f, a)}: puts a rendered sentence in StatusKey");
+			}
+
+		// 3. The language change re-reads the rows. Without this the column keeps whatever language the scan
+		//    ran in - which was the whole defect: the HEADER translated and the rows under it did not.
+		var apply = SourceModel.Methods().Where(m => m.Name == "ApplyLanguage").ToArray();
+		Assert.True(apply.Length == 1, $"Expected one ApplyLanguage, found {apply.Length}.");
+		string applyCode = string.Join("\n", apply[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+		if (!applyCode.Contains("RaiseRendered()", StringComparison.Ordinal))
+			problems.Add("ApplyLanguage does not re-read the Recover rows, so the Status column stays in "
+				+ "the language the scan ran in while its own header translates");
+
+		// 4. And re-reading means all three rendered members: the sentence, the dot and the percentage.
+		var raise = SourceModel.Methods().Where(m => m.Name == "RaiseRendered").ToArray();
+		Assert.True(raise.Length == 1, $"Expected one RaiseRendered, found {raise.Length}.");
+		foreach (string member in new[] { "Status", "StatusKind", "PercentText" })
+			if (!raise[0].Method.ToString().Contains($"nameof({member})", StringComparison.Ordinal))
+				problems.Add($"RaiseRendered does not raise {member}, so that part of the pill stays stale");
+
+		Assert.True(problems.Count == 0,
+			"The Status column was written at scan time and pinned to the language of the scan. Nothing could "
+				+ "re-render it, and nothing could change it after the recovery had run:\n  "
+				+ string.Join("\n  ", problems));
+	}
+
+	/// <summary>The one line that survives every repaint tells the whole truth about the result.</summary>
+	[Fact]
+	public void TheRecoverResultLineNamesEveryReasonItIsIncomplete()
+	{
+		// UpdateRecoverSelectionInfo runs on every selection change AND in each scan's finally, so it is the
+		// only place a warning survives; a one-shot message set right after a scan is overwritten here.
+		var hit = SourceModel.Methods().Where(m => m.Name == "UpdateRecoverSelectionInfo").ToArray();
+		Assert.True(hit.Length == 1, $"Expected one UpdateRecoverSelectionInfo, found {hit.Length}.");
+		string code = string.Join("\n", hit[0].Method.ToString().Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//")));
+
+		List<string> problems = new List<string>();
+		foreach (var (needle, what) in new[]
+		{
+			("RfDeepPartialSuffix", "a deep scan that was stopped before the end"),
+			("RfCappedSuffix", "a list that filled up at the entry cap"),
+			("RfFilterShown", "a filter hiding most of the rows"),
+		})
+			if (!code.Contains(needle, StringComparison.Ordinal))
+				problems.Add($"says nothing about {what} ({needle})");
+
+		// The cap has to be derived, not a flag a new scanner can forget to raise.
+		var trunc = SourceModel.Parsed
+			.SelectMany(p => p.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+				.Where(d => d.Identifier.Text == "Truncated"))
+			.ToArray();
+		Assert.True(trunc.Length == 1, $"Expected one Truncated property, found {trunc.Length}.");
+		if (!trunc[0].ToString().Contains("MaxRecoverEntries", StringComparison.Ordinal))
+			problems.Add("Truncated no longer derives from the entry cap, so a scanner that stops adding "
+				+ "can report a full list as a complete one");
+
+		Assert.True(problems.Count == 0,
+			"A result the user reads as complete when it is not is the difference between trying again and "
+				+ "giving up on the drive:\n  " + string.Join("\n  ", problems));
 	}
 }

@@ -276,7 +276,14 @@ public partial class MainWindow
 			if (ran != null) CleanStatusText.Text = ran;
 			else UpdateCleanAnalyzeLine(force: true);
 		}
-		if (!isBusy && _lastScan != null) UpdateRecoverSelectionInfo();
+		if (!isBusy && _lastScan != null)
+		{
+			UpdateRecoverSelectionInfo();
+			// Every row's status is a dictionary key now, so the whole column re-renders in the new language.
+			// It used to be a sentence baked in at scan time: the header above it translated (just below) and
+			// every row under that header stayed in whatever language the scan had run in.
+			foreach (var f in _lastScan.Files) f.RaiseRendered();
+		}
 		// The same trap, and it swallowed the whole Drive tools card. ToolHealthText, ToolDriveTitleText,
 		// ToolSerialText, ToolFirmwareText, ToolInterfaceText, ToolSizeText and ToolRecommendationDetailText are all
 		// control names AND string keys, so the loop above overwrote the selected drive's real readings with the
