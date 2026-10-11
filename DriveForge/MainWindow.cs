@@ -62,9 +62,6 @@ public partial class MainWindow : Window, IComponentConnector
 	private const int MaxReparseBuffer = 16 * 1024;
 
 	private sealed record ProcessResult(int ExitCode, string Output);
-
-	private sealed record BcdStoreInfo(string Path, string LoaderPath, string Mode);
-
 	// StatusKind ("good"/"warn"/"bad"/"info") is a stable, language-independent token that drives the
 	// Status column's colour (via XAML DataTriggers), so the visible Status text can be localized freely.
 	private sealed record SmartRow(string Id, string Name, string Value, string Status, string StatusKind);
@@ -199,8 +196,6 @@ public partial class MainWindow : Window, IComponentConnector
 
 
 	private sealed record NtfsCopyTestResult(string Source, string Target, long Files, long Directories, long Bytes, long Skipped, long ResumeSkippedFiles, long ResumeSkippedBytes, bool StopRequested, bool ResumeMode, long SecurityCopied, long SecurityErrors, long HardlinksDetected, long HardlinksRecreated, long HardlinkFallbackCopied, long ReparseCopied, long ReparseSkipped, long BackupFallbackCopied, long BackupFallbackFailed, long ValidatedFiles, long ValidatedDirectories, long ValidatedBytes, long ValidationMismatches, long ValidationTransientDifferences, int Errors, List<string> SampleErrors, List<string> SampleRecoveries, List<string> SampleWarnings, List<string> SampleValidationErrors, List<string> SampleTransientValidation);
-
-	private sealed record BootSafeStagingCheck(string Area, string RelativePath, bool Required, bool Exists, string Note);
 
 
 	private enum SpeedRating
@@ -2198,24 +2193,9 @@ public partial class MainWindow : Window, IComponentConnector
 		SelectDriveTool(ToolSpeed, 1, "Speed selected. Press Start to test read/write speed.");
 	}
 
-	private void SelectSmartTool_Click(object sender, RoutedEventArgs e)
-	{
-		SelectDriveTool(ToolSmart, 1, "SMART selected. Press Start to read detailed drive health data.");
-	}
-
 	private void SelectScanTool_Click(object sender, RoutedEventArgs e)
 	{
 		SelectDriveTool(ToolScan, 2, "Scan selected. Press Start to run a safe file-system scan.");
-	}
-
-	private void SelectRepairTool_Click(object sender, RoutedEventArgs e)
-	{
-		SelectDriveTool(ToolRepair, 3, "Repair selected. Press Start to run CHKDSK repair on the selected drive.");
-	}
-
-	private void SelectKitTool_Click(object sender, RoutedEventArgs e)
-	{
-		SelectDriveTool(ToolKit, 4, "Kit selected. Press Start to create the diagnostic tool kit.");
 	}
 
 	private async void SpeedTest_Click(object sender, RoutedEventArgs e)
@@ -6533,38 +6513,6 @@ exit 0
 			: "BitLocker: a custom unlock password was set (plus a recovery key as backup).");
 	}
 
-	// Runs a console tool, feeding the given lines to its stdin (used for manage-bde password prompts so
-	// the password never appears on a command line). Returns the exit code.
-	private async Task<int> RunProcessWithStdinAsync(string fileName, string arguments, IReadOnlyList<string> stdinLines, bool allowFailure = false)
-	{
-		var psi = new ProcessStartInfo
-		{
-			FileName = ResolveSystemTool(fileName),   // absolute System32 path: a bare name lets CWD win the search
-			Arguments = arguments,
-			UseShellExecute = false,
-			CreateNoWindow = true,
-			RedirectStandardInput = true,
-			RedirectStandardOutput = true,
-			RedirectStandardError = true
-		};
-		using var proc = Process.Start(psi);
-		foreach (string line in stdinLines)
-		{
-			await proc.StandardInput.WriteLineAsync(line);
-		}
-		proc.StandardInput.Close();
-		string output = await proc.StandardOutput.ReadToEndAsync();
-		string error = await proc.StandardError.ReadToEndAsync();
-		await proc.WaitForExitAsync();
-		string combined = (output + "\n" + error).Trim();
-		if (!string.IsNullOrWhiteSpace(combined)) Log(combined);
-		if (!allowFailure && proc.ExitCode != 0)
-		{
-			throw new InvalidOperationException(fileName + " exited with code " + proc.ExitCode);
-		}
-		return proc.ExitCode;
-	}
-
 	private bool ChooseBitLockerRecoveryFolder()
 	{
 		using Forms.FolderBrowserDialog folderBrowserDialog = new Forms.FolderBrowserDialog
@@ -6926,29 +6874,6 @@ exit 0
 		return string.Join(Environment.NewLine, lines);
 	}
 
-	private static string BuildCreateVhdxDiskpartScript(string vhdPath, char windowsLetter, long maximumMb)
-	{
-		return string.Join(Environment.NewLine, new string[13]
-		{
-			"san policy=OnlineAll",
-			$"create vdisk file=\"{vhdPath}\" maximum={maximumMb} type=expandable",
-			$"select vdisk file=\"{vhdPath}\"",
-			"attach vdisk",
-			"attributes disk clear readonly noerr",
-			"online disk noerr",
-			"attributes disk clear readonly noerr",
-			"convert mbr noerr",
-			"create partition primary",
-			// 64K NTFS clusters: far fewer metadata updates for the many-small-file Windows apply => faster write on
-			// USB (a Windows-To-Go staple). Windows boots fine from 64K; the only tradeoff is a little slack space and
-			// that classic NTFS-compressed files restore uncompressed (Windows uses cluster-independent WOF anyway).
-			"format quick fs=ntfs unit=64K label=\"Windows\"",
-			$"assign letter={windowsLetter}",
-			"detail vdisk",
-			"exit"
-		});
-	}
-
 	private static string BuildDetachVhdxDiskpartScript(string vhdPath)
 	{
 		return string.Join(Environment.NewLine, new string[3]
@@ -6958,131 +6883,6 @@ exit 0
 			"exit"
 		});
 	}
-
-	private long EstimateVhdxMaximumMb(DiskItem disk)
-	{
-		long minimum = 64L * 1024L * 1024L * 1024L;
-		long preferred = Math.Max(minimum, GetCurrentWindowsUsedBytes() + 24L * 1024L * 1024L * 1024L);
-		long maximumOnDisk = Math.Max(minimum, disk.Size - 2L * 1024L * 1024L * 1024L);
-		long selectedBytes = Math.Min(preferred, maximumOnDisk);
-		return Math.Max(32768L, selectedBytes / 1024L / 1024L);
-	}
-
-	private async Task ConfigureNativeVhdxBootAsync(char bootLetter, string relativeVhdPath)
-	{
-		string vhdDevice = $"vhd=[locate]\\{relativeVhdPath}";
-		BcdStoreInfo[] stores =
-		{
-			new BcdStoreInfo($"{bootLetter}:\\EFI\\Microsoft\\Boot\\BCD", "\\Windows\\system32\\winload.efi", "UEFI"),
-			new BcdStoreInfo($"{bootLetter}:\\Boot\\BCD", "\\Windows\\system32\\winload.exe", "BIOS")
-		};
-		bool configuredAnyStore = false;
-		foreach (BcdStoreInfo storeInfo in stores.Where(item => File.Exists(item.Path)))
-		{
-			configuredAnyStore = true;
-			string loaderId = await FindWindowsLoaderIdAsync(storeInfo.Path);
-			await SetBcdValueAsync(storeInfo.Path, loaderId, "device", vhdDevice);
-			await SetBcdValueAsync(storeInfo.Path, loaderId, "osdevice", vhdDevice);
-			await SetBcdValueAsync(storeInfo.Path, loaderId, "path", storeInfo.LoaderPath);
-			await SetBcdValueAsync(storeInfo.Path, loaderId, "systemroot", "\\Windows");
-			await SetBcdValueAsync(storeInfo.Path, loaderId, "detecthal", "Yes", allowFailure: true);
-			await SetBcdValueAsync(storeInfo.Path, "{bootmgr}", "default", loaderId, allowFailure: true);
-			await RunBcdEditAsync(storeInfo.Path, "/displayorder", loaderId, "/addfirst", allowFailure: true);
-			await SetBcdValueAsync(storeInfo.Path, "{bootmgr}", "timeout", "5", allowFailure: true);
-			Log($"{storeInfo.Mode} native VHDX boot configured: loader {loaderId}, VHDX {vhdDevice}");
-			await RunBcdEditAsync(storeInfo.Path, "/enum", "osloader", allowFailure: true);
-		}
-		if (!configuredAnyStore)
-		{
-			throw new InvalidOperationException("BCD boot store was not created on the USB boot partition.");
-		}
-	}
-
-	private static bool IsCurrentFirmwareUefi()
-	{
-		try
-		{
-			using RegistryKey key = Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Control");
-			object value = key?.GetValue("PEFirmwareType");
-			if (value != null && int.TryParse(value.ToString(), out int firmwareType))
-			{
-				return firmwareType == 2;
-			}
-		}
-		catch
-		{
-		}
-		return true;
-	}
-
-	private async Task<string> FindWindowsLoaderIdAsync(string storePath)
-	{
-		try
-		{
-			ProcessResult result = await RunProcessWithArgumentListInternalAsync("bcdedit.exe", new[] { "/store", storePath, "/enum", "osloader" });
-			string loaderId = ExtractWindowsLoaderId(result.Output);
-			if (!string.IsNullOrWhiteSpace(loaderId))
-			{
-				return loaderId;
-			}
-		}
-		catch (Exception ex)
-		{
-			Log("Could not enumerate BCD loaders, using {default}: " + ex.Message);
-		}
-		return "{default}";
-	}
-
-	private async Task SetBcdValueAsync(string storePath, string objectId, string element, string value, bool allowFailure = false)
-	{
-		await RunBcdEditAsync(storePath, "/set", objectId, element, value, allowFailure);
-	}
-
-	private async Task RunBcdEditAsync(string storePath, string command, string arg1, string arg2 = null, string arg3 = null, bool allowFailure = false)
-	{
-		List<string> arguments = new List<string> { "/store", storePath, command, arg1 };
-		if (!string.IsNullOrWhiteSpace(arg2))
-		{
-			arguments.Add(arg2);
-		}
-		if (!string.IsNullOrWhiteSpace(arg3))
-		{
-			arguments.Add(arg3);
-		}
-		await RunProcessWithArgumentListAsync("bcdedit.exe", arguments, allowFailure);
-	}
-
-	private static string ExtractWindowsLoaderId(string bcdOutput)
-	{
-		string currentId = "";
-		string bestId = "";
-		bool currentIsWindowsLoader = false;
-		foreach (string rawLine in bcdOutput.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-		{
-			string line = rawLine.Trim();
-			Match identifierMatch = Regex.Match(line, @"^identifier\s+(\{(?:[0-9a-fA-F-]{36}|default|current)\})$", RegexOptions.IgnoreCase);
-			if (identifierMatch.Success)
-			{
-				if (currentIsWindowsLoader && !string.IsNullOrWhiteSpace(currentId))
-				{
-					bestId = currentId;
-				}
-				currentId = identifierMatch.Groups[1].Value;
-				currentIsWindowsLoader = false;
-				continue;
-			}
-			if (!string.IsNullOrWhiteSpace(currentId) && line.StartsWith("path", StringComparison.OrdinalIgnoreCase) && line.Contains("winload", StringComparison.OrdinalIgnoreCase))
-			{
-				currentIsWindowsLoader = true;
-			}
-		}
-		if (currentIsWindowsLoader && !string.IsNullOrWhiteSpace(currentId))
-		{
-			bestId = currentId;
-		}
-		return bestId;
-	}
-
 	private async Task DetachVhdxAsync(string vhdPath)
 	{
 		string detachScriptPath = Path.Combine(Path.GetTempPath(), $"driveforge-detach-vhdx-{Guid.NewGuid():N}.txt");
@@ -17362,9 +17162,6 @@ exit 0
 	private static extern SafeFileHandle CreateFile(string lpFileName, uint dwDesiredAccess, FileShare dwShareMode, IntPtr lpSecurityAttributes, FileMode dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
 	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out ByHandleFileInformation lpFileInformation);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
 	private static extern bool DeviceIoControl(SafeFileHandle hDevice, uint dwIoControlCode, byte[]? lpInBuffer, int nInBufferSize, byte[]? lpOutBuffer, int nOutBufferSize, out int lpBytesReturned, IntPtr lpOverlapped);
 
 	[DllImport("kernel32.dll")]
@@ -17399,8 +17196,6 @@ exit 0
 	[StructLayout(LayoutKind.Sequential)]
 	private struct FFileTime { public uint Low; public uint High; }
 
-	private static FFileTime ToFFileTime(DateTime utc) { long t = utc.ToFileTimeUtc(); return new FFileTime { Low = (uint)t, High = (uint)(t >> 32) }; }
-
 	[StructLayout(LayoutKind.Sequential)]
 	private struct Luid
 	{
@@ -17421,21 +17216,6 @@ exit 0
 	{
 		public uint LowDateTime;
 		public uint HighDateTime;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	private struct ByHandleFileInformation
-	{
-		public uint FileAttributes;
-		public FileTimeNative CreationTime;
-		public FileTimeNative LastAccessTime;
-		public FileTimeNative LastWriteTime;
-		public uint VolumeSerialNumber;
-		public uint FileSizeHigh;
-		public uint FileSizeLow;
-		public uint NumberOfLinks;
-		public uint FileIndexHigh;
-		public uint FileIndexLow;
 	}
 
 	[StructLayout(LayoutKind.Sequential)]
@@ -17574,11 +17354,6 @@ exit 0
 		if (backslashes > 0) sb.Append('\\', backslashes * 2);   // double a trailing run so it can't escape the closing quote
 		sb.Append('"');
 		return sb.ToString();
-	}
-
-	private static string QuoteCmd(string value)
-	{
-		return "\"" + value.Replace("\"", "\"\"") + "\"";
 	}
 
 	private static string PsQuote(string value)

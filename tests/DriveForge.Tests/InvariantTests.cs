@@ -1558,4 +1558,59 @@ public class InvariantTests
 		Assert.True(raw.Count == 0,
 			"These put a placeholder on screen instead of a value:\n  " + string.Join("\n  ", raw));
 	}
+
+	/// <summary>
+	/// No shipped member is left with nobody calling it.
+	///
+	/// C# warns about an unused private field (CS0169) and says nothing at all about an unused private
+	/// method, so dead code accumulates silently. One sweep found eighteen members across 225 lines,
+	/// among them BuildCreateVhdxDiskpartScript - a builder of a destructive `create partition / format`
+	/// script that nothing ran - and three tool-selector click handlers whose buttons had been taken out
+	/// of the XAML. Removing five of them orphaned five more, so the sweep had to be repeated until a
+	/// pass came up empty.
+	///
+	/// It matters beyond tidiness, and today is the evidence: both partition findings were unreachable
+	/// branches. PtCreateFailed existed in seventeen languages and could not be reached, and the delete
+	/// flow's unreachable branch pointed at PtResizeFailed - a message about RESIZING - for a failed
+	/// deletion. Nobody had ever seen either, because nobody could.
+	///
+	/// A name mentioned anywhere else counts as used, including in a comment and including XAML
+	/// (Click="Handler"), so a wired handler or a reflected helper is never flagged. That is deliberately
+	/// loose: this rule should never be the reason a live member is deleted.
+	/// </summary>
+	[Fact]
+	public void NoShippedMemberIsLeftWithNobodyCallingIt()
+	{
+		// Everything the project can refer to a name from.
+		var blobs = new List<string>();
+		foreach (string path in Directory.EnumerateFiles(Mw.RepoRoot, "*.*", SearchOption.AllDirectories))
+		{
+			string ext = Path.GetExtension(path);
+			if (ext != ".cs" && ext != ".xaml") continue;
+			string rel = Path.GetRelativePath(Mw.RepoRoot, path).Replace('\\', '/');
+			if (rel.Contains("/bin/") || rel.Contains("/obj/") || rel.StartsWith("bin/")
+				|| rel.StartsWith("obj/")) continue;
+			blobs.Add(File.ReadAllText(path));
+		}
+		Assert.True(blobs.Count > 5,
+			$"only {blobs.Count} source files found - the scan is not looking where it should.");
+		
+		var dead = new List<string>();
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			if (name == "<anonymous>") continue;
+			var mods = method.Modifiers.Select(m => m.Text).ToList();
+			if (!mods.Contains("private") && !mods.Contains("internal")) continue;
+			// A constructor is called by `new Type(...)`, which does not carry the member's name.
+			if (method is ConstructorDeclarationSyntax) continue;
+			
+			int uses = blobs.Sum(b => Regex.Matches(b, @"\b" + Regex.Escape(name) + @"\b").Count);
+			if (uses > 1) continue;
+			dead.Add($"{SourceModel.Where(file, method)} {name}");
+		}
+		Assert.True(dead.Count == 0,
+			"Nothing refers to these. Dead code is where a wrong thing hides unnoticed - delete them, then"
+				+ " check again, because removing one orphans whatever only it called:\n  "
+				+ string.Join("\n  ", dead));
+	}
 }
