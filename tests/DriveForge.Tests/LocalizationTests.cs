@@ -563,6 +563,65 @@ public class LocalizationTests
 			+ $" different size, or none:\n  " + string.Join("\n  ", wrong));
 	}
 
+	/// <summary>
+	/// A flow that recycles never reports a size as freed.
+	///
+	/// A recycled file is still on the volume - Windows moves it into $Recycle.Bin on the same clusters -
+	/// so free space does not change by a byte. File.Exists goes false, which is what made this easy to
+	/// get wrong: the disk-space analyzer counted every vanished file into a total it called "freed", in
+	/// all seventeen languages, on the one screen whose entire purpose is reclaiming space. The same
+	/// message sat beside an Undo button, and one dialog earlier the app had said the files could be
+	/// restored from the bin - a claim that cannot hold at the same time as the other.
+	///
+	/// The app had the answer already. The Clean screen, in the same tab control, branches on whether it
+	/// recycled or deleted and has a string for it: "no space is freed until you empty it". So this is a
+	/// rule and not a correction - two flows recycle, and they disagreed.
+	///
+	/// It reads the ENGLISH value, like its siblings here: every key in this file is written in English
+	/// first and translated in a batch of seventeen, and PlaceholderSetsMatchEnglishInEveryLanguage
+	/// already holds the shapes together. A translation that invented the claim on its own would get
+	/// past this; a key added to a recycling flow would not.
+	/// </summary>
+	[Fact]
+	public void RecyclingIsNeverReportedAsFreeingSpace()
+	{
+		// FOF_ALLOWUNDO (SHFileOperation) and RecycleOption.SendToRecycleBin are the two ways the app asks
+		// for the bin. Everything else deletes for real and may say freed.
+		var recycling = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("FOF_ALLOWUNDO")
+				|| m.Method.ToString().Contains("SendToRecycleBin"))
+			.ToList();
+		Assert.True(recycling.Count > 0, "No recycling flow found - this rule has stopped looking at anything.");
+		
+		// The key may be used in a helper the flow calls (the undo toast is one), so take one step in.
+		var bodies = new List<(string Where, string Code)>();
+		foreach (var (file, method, name) in recycling)
+		{
+			bodies.Add((name, method.ToString()));
+			foreach (string called in Regex.Matches(method.ToString(), @"\b([A-Z][A-Za-z0-9_]*)\s*\(")
+				.Select(m => m.Groups[1].Value).Distinct())
+				foreach (var (_, m2, n2) in SourceModel.Methods())
+					if (n2 == called) bodies.Add(($"{name} -> {n2}", m2.ToString()));
+		}
+		
+		var offenders = new List<string>();
+		foreach (var (where, code) in bodies)
+			foreach (Match use in Regex.Matches(code, @"L\(\s*""([A-Za-z0-9_]+)"""))
+			{
+				string key = use.Groups[1].Value;
+				if (!Strings[Base].TryGetValue(key, out string? en)) continue;
+				// A SIZE claimed as freed - the placeholder next to the word is what makes it a claim about
+				// this operation. CleanDoneRecycled's own "no space is freed until you empty it" says the
+				// word and is the opposite of the defect, which is why adjacency and not the word is the test.
+				if (Regex.IsMatch(en, @"freed\s*\{\d\}|\{\d\}\s*(?:of\s+)?freed", RegexOptions.IgnoreCase))
+					offenders.Add($"{where} -> {key}: \"{en}\"");
+			}
+		Assert.True(offenders.Count == 0,
+			"These flows send files to the Recycle Bin, where those files keep using the same space,"
+				+ " and then report that space as freed:\n  "
+				+ string.Join("\n  ", offenders.Distinct()));
+	}
+
 	/// <summary>A declaration that holds text. Nothing else is followed back.</summary>
 	private static bool IsString(string? declaredType) =>
 		declaredType is "string" or "string?" or "String" or "String?";

@@ -12291,17 +12291,24 @@ exit 0
 			}
 			finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(pFrom); }
 			// Ground truth: a file the user KEPT (declined the nuke warning) still exists; only files that are actually
-			// gone count toward freed/undo. This also stops the undo toast from promising recovery for a file that was
-			// permanently deleted rather than recycled.
-			long freed = 0; int n = 0;
+			// gone count toward the total and the undo. This also stops the undo toast from promising recovery for a
+			// file that was permanently deleted rather than recycled.
+			//
+			// It is `removed`, not `freed`, and that is the whole point: the operation above passes
+			// FOF_ALLOWUNDO, so a file goes to $Recycle.Bin on the SAME volume. File.Exists goes false and not
+			// one cluster comes back. Reporting it as freed contradicted the confirmation shown a moment earlier
+			// ("...to the Recycle Bin? You can restore them from there") and the Undo button the toast carries,
+			// and it is the opposite of what the Clean screen next door says for the same case
+			// (CleanDoneRecycled, "no space is freed until you empty it").
+			long removed = 0; int n = 0;
 			var gone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 			foreach (var (p, s) in paths)
 			{
 				bool exists; try { exists = File.Exists(p); } catch { exists = true; }
-				if (!exists) { freed += s; n++; gone.Add(p); }
+				if (!exists) { removed += s; n++; gone.Add(p); }
 			}
-			if (AnalyzeStatusText != null) AnalyzeStatusText.Text = string.Format(L("AnalyzeDeleteDone"), n, FormatBytes(freed));
-			if (n > 0) { _lastDeletedBatch = gone.ToList(); ShowUndoToast(n, freed); }
+			if (AnalyzeStatusText != null) AnalyzeStatusText.Text = string.Format(L("AnalyzeDeleteDone"), n, FormatBytes(removed));
+			if (n > 0) { _lastDeletedBatch = gone.ToList(); ShowUndoToast(n, removed); }
 			// Filter against the deleted set (no per-row File.Exists stat on the UI thread).
 			if (BigFilesGrid?.ItemsSource is IEnumerable<BigFileRow> bf2) BigFilesGrid.ItemsSource = bf2.Where(x => !gone.Contains(x.FullPath)).ToList();
 			if (DupesGrid?.ItemsSource is IEnumerable<DupRow> dr2)
@@ -12318,10 +12325,10 @@ exit 0
 	private List<string> _lastDeletedBatch = new();
 	private System.Windows.Threading.DispatcherTimer? _undoTimer;
 
-	private void ShowUndoToast(int n, long freed)
+	private void ShowUndoToast(int n, long removedBytes)
 	{
 		if (AnalyzeUndoBar == null) return;
-		if (AnalyzeUndoText != null) AnalyzeUndoText.Text = string.Format(L("AnDeletedToast"), n, FormatBytes(freed));
+		if (AnalyzeUndoText != null) AnalyzeUndoText.Text = string.Format(L("AnDeletedToast"), n, FormatBytes(removedBytes));
 		AnalyzeUndoBar.Visibility = Visibility.Visible;
 		_undoTimer ??= new System.Windows.Threading.DispatcherTimer();
 		_undoTimer.Stop();
