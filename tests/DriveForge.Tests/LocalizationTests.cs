@@ -1006,11 +1006,57 @@ public class LocalizationTests
 	// whose label reads something different ("Restaurează imagine", "イメージを復元"). They now carry a reference,
 	// [[SbRestoreT]], resolved at display time from the same key the sidebar draws its label from.
 
-	private static readonly string[] TaskNameKeys =
+	// Names that are the same word in every language: a sentence carrying one of these is not quoting a
+	// label, it is using the word. Without this, "der Download hat zu fruh aufgehort" reads as German prose
+	// naming an English button.
+	private static readonly HashSet<string> UntranslatedNames = new(StringComparer.Ordinal)
 	{
-		"SbCreateT", "SbClonePortableT", "SbCloneInternalT", "SbExportVhdxT", "SbBackupT", "SbRestoreT",
-		"SbLinuxT", "SbDownloadIsoT", "SbMultiBootT", "SbToolsT", "SbRecoverT", "SbCleanT", "StartBackup",
+		"DriveForge", "Windows", "BitLocker", "Hyper-V", "NTFS", "exFAT", "FAT32", "USB", "SSD", "HDD",
+		"ISO", "WIM", "ESD", "VHDX", "VHD", "SMART", "TRIM", "CHKDSK", "DISM", "MBR", "GPT", "UEFI",
+		"BIOS", "Linux", "Ventoy", "Rufus", "Explorer", "Microsoft", "GitHub", "ZIP", "PowerShell",
 	};
+
+	/// <summary>
+	/// What makes a string a LABEL - something a sentence could point a reader at - rather than a list of
+	/// which labels anyone remembered to check. Every clause below removed a measured false positive:
+	///
+	/// * length: a one-word key is usually a word, and a paragraph is never a button.
+	/// * no placeholder and no newline: a format string or a dialog body is not a label.
+	/// * TWO WORDS at least. This is the one that matters. A single English word inside German, Italian or
+	///   Dutch prose is a loanword - "Der Download hat zu fruh aufgehort", "SMART-Attribute" - and one
+	///   message points at VirtualBox's own Settings menu, not ours.
+	/// * not a name that is identical in every language (see UntranslatedNames).
+	/// </summary>
+	private static bool IsLabelLike(string english) =>
+		english.Length >= 9 && english.Length <= 46
+		&& !english.Contains('{') && !english.Contains("\\n") && !english.Contains("[[")
+		&& english.Trim().Contains(' ')
+		&& !UntranslatedNames.Contains(english.Trim());
+
+	/// <summary>The label text, and the same without a trailing parenthetical: a sentence quotes
+	/// "RUNNING WINDOWS", not "RUNNING WINDOWS (no format/erase)".</summary>
+	private static IEnumerable<string> LabelForms(string label)
+	{
+		string t = label.Trim();
+		if (t.Length >= 9) yield return t;
+		string trimmed = Regex.Replace(t, @"\s*\([^)]*\)\s*$", "").Trim();
+		if (trimmed.Length >= 9 && trimmed != t) yield return trimmed;
+	}
+
+	/// <summary>`needle` inside `hay` on word boundaries, so "DriveForge - format" does not match inside
+	/// "DriveForge - formatare".</summary>
+	private static bool NamesIt(string hay, string needle)
+	{
+		for (int i = hay.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+			 i = hay.IndexOf(needle, i + 1, StringComparison.Ordinal))
+		{
+			char before = i > 0 ? hay[i - 1] : ' ';
+			int j = i + needle.Length;
+			char after = j < hay.Length ? hay[j] : ' ';
+			if (!char.IsLetterOrDigit(before) && !char.IsLetterOrDigit(after)) return true;
+		}
+		return false;
+	}
 
 	[Fact]
 	public void EveryTaskReferenceResolvesToARealKey()
@@ -1028,55 +1074,132 @@ public class LocalizationTests
 	}
 
 	[Fact]
-	public void ASentenceNamingAnotherTaskShowsThatLanguagesName()
+	public void EverySentenceWithAReferenceShowsThatLanguagesLabel()
 	{
-		// End to end, through L() itself: no reference may survive to the screen, and the name that appears must be
-		// the one this language puts on the button.
+		// End to end, through L() itself, for EVERY sentence that points at a control - not one hand-picked key,
+		// which is what this checked before while two hundred sentences elsewhere wrote their names out by hand.
+		//
+		// This is the half its sibling above cannot see. That one catches a sentence that kept the ENGLISH name;
+		// this one catches a sentence that names the control SOMETHING ELSE ENTIRELY - the Romanian multi-boot
+		// message said "Test de pornire" for a button whose Romanian label reads "Test boot", and no search for
+		// English text could ever have found it.
+		//
+		// ENGLISH declares the pointers. The first version of this test looped over the strings that still
+		// CONTAIN a reference, and was green under all eight mutations: deleting the reference from a
+		// translation takes that string out of the loop, so the single edit the rule exists to catch was the
+		// one edit it could not see. A rule must be told what to expect by something the mutation cannot erase.
+		var declared = Strings[Base]
+			.SelectMany(e => Regex.Matches(e.Value, @"\[\[([A-Za-z0-9_]+)\]\]")
+				.Select(m => (Key: e.Key, Name: m.Groups[1].Value)))
+			.Distinct()
+			.ToArray();
+		Assert.True(declared.Length >= 10,
+			$"Only {declared.Length} English sentences declare a reference - the pointers have gone missing.");
+
 		List<string> bad = new List<string>();
+		int checksRun = 0;
 		try
 		{
 			foreach (string lang in Strings.Keys)
 			{
 				UseLanguage(lang);
-				string shown = Mw.Call<string>("L", "ExportVhdxBackupHint");
-				if (shown.Contains("[[")) bad.Add($"{lang}: an unexpanded reference reached the text - {shown}");
-				foreach (string nameKey in new[] { "SbRestoreT", "SbBackupT" })
-					if (Strings[lang].TryGetValue(nameKey, out string? name) && !shown.Contains(name))
-						bad.Add($"{lang}: does not name the task as this language does (expected \"{name}\").");
+				foreach (var (key, nameKey) in declared)
+				{
+					// A key missing in this language falls back to English inside L(); AllKeysExistInEveryLanguage
+					// reports that, and repeating it here would only add noise.
+					if (!Strings[lang].ContainsKey(key)) continue;
+					if (!Strings[lang].TryGetValue(nameKey, out string? label)) continue;
+					string shown = Mw.Call<string>("L", key);
+					if (shown.Contains("[["))
+						bad.Add($"{lang}/{key}: an unexpanded reference reached the text - {shown}");
+					checksRun++;
+					if (!shown.Contains(label, StringComparison.Ordinal))
+						bad.Add($"{lang}/{key} does not show this language's label for {nameKey} "
+							+ $"(expected \"{label}\"): {shown}");
+				}
 			}
 		}
 		finally { UseLanguage("en"); }
 
-		Assert.True(bad.Count == 0, "Task references are not resolving per language:\n  " + string.Join("\n  ", bad));
+		// A table that silently emptied would make this test pass by checking nothing.
+		Assert.True(checksRun >= 150, $"Only {checksRun} reference renders were checked - the sentences that name a control by reference have gone missing.");
+		Assert.True(bad.Count == 0, "References are not resolving to this language's label:\n  " + string.Join("\n  ", bad));
 	}
 
 	[Fact]
-	public void NoTranslationNamesATaskInEnglishWhenItRenamesIt()
+	public void NoTranslationNamesAControlInEnglishWhenItRenamesIt()
 	{
-		// The rule that found this. If a language renames a task, no other string in that language may still carry
-		// the English name - the reader would be sent to a button that is not there under that label.
+		// The rule that found this. If a language renames a control, no other string in that language may still
+		// carry the English name - the reader would be sent to a button that is not there under that label.
+		//
+		// This used to run over THIRTEEN HAND-WRITTEN sidebar task names, and was green while 212 sites were
+		// broken: DkSystemDisk, OpenImageButton, TbExportVhdx, StartClone, AnalyzeKeepFirstButton,
+		// DiagDriveToTestLabel, TbTestBoot and ChkCleanRecycle were all outside the list. Four of the thirteen
+		// names did not exist either (SbClonePortableT for SbClonePT, and three more), and TryGetValue skipped
+		// them in silence - a third of the reach aimed at nothing. A predicate has no names to get wrong.
 		List<string> bad = new List<string>();
 
-		foreach (string nameKey in TaskNameKeys)
+		foreach (KeyValuePair<string, string> label in Strings[Base])
 		{
-			if (!Strings[Base].TryGetValue(nameKey, out string? english) || english.Length < 6) continue;
+			string nameKey = label.Key;
+			string english = label.Value;
+			if (!IsLabelLike(english)) continue;
 
 			foreach (string lang in OtherLanguages)
 			{
 				// Only when this language actually uses a different label.
 				if (!Strings[lang].TryGetValue(nameKey, out string? local) || local == english) continue;
+				// ...and not when this language's own label still carries the English name inside it, which is
+				// how Indonesian writes "Recycle Bin (semua drive)". Then the sentence matches the screen.
+				if (LabelForms(english).Any(f => local.Contains(f, StringComparison.Ordinal))) continue;
 
 				foreach (KeyValuePair<string, string> entry in Strings[lang])
 				{
 					if (entry.Key == nameKey) continue;                       // the name itself
-					if (!entry.Value.Contains(english, StringComparison.Ordinal)) continue;
-					bad.Add($"{lang}/{entry.Key} names the task in English (\"{english}\"), but this language calls "
-						+ $"it \"{local}\". Use [[{nameKey}]] so it follows the label.");
+					if (entry.Value.Contains("[[", StringComparison.Ordinal)) continue;   // already a reference
+					if (!LabelForms(english).Any(f => NamesIt(entry.Value, f))) continue;
+					bad.Add($"{lang}/{entry.Key} names the control in English (\"{english}\"), but this language "
+						+ $"calls it \"{local}\". Use [[{nameKey}]] so it follows the label.");
 				}
 			}
 		}
 
 		Assert.True(bad.Count == 0,
 			"Translations send the reader to a button by its English name:\n  " + string.Join("\n  ", bad));
+	}
+
+	/// <summary>
+	/// Both renderers have to expand references, not just L().
+	///
+	/// MEASURED ON SCREEN, in Romanian, after the two rules above were green: the duplicate-files hint read
+	/// 'apasă „[[AnalyzeKeepFirstButton]]”' — the raw markup, on a panel, to a user. ApplyLanguage writes the
+	/// dictionary value STRAIGHT into every control whose Name matches a key, so references only ever worked for
+	/// the keys that happen to be rendered through L() in code, and nothing anywhere recorded which keys those
+	/// were. The suite could not see it: its own checks call L().
+	///
+	/// A string does not know which renderer will pick it up, so every renderer has to behave the same way.
+	/// </summary>
+	[Fact]
+	public void EveryRendererExpandsReferences()
+	{
+		var problems = new List<string>();
+		foreach (string name in new[] { "ApplyLanguage", "ApplyToolTips" })
+		{
+			var found = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			if (found.Length != 1)
+			{
+				problems.Add($"expected one {name}, found {found.Length}");
+				continue;
+			}
+			string code = found[0].Method.ToString();
+			bool expands = Regex.IsMatch(code, @"TaskRefPattern\s*\.\s*Replace")
+				|| Regex.IsMatch(code, @"\bExpandTaskRefs\s*\(")
+				|| Regex.IsMatch(code, @"=\s*L\(");
+			if (!expands)
+				problems.Add($"{name} hands text to controls without expanding [[Key]], so a sentence that names "
+					+ "another control reaches the screen as literal markup");
+		}
+		Assert.True(problems.Count == 0,
+			"A renderer that does not expand references:\n  " + string.Join("\n  ", problems));
 	}
 }

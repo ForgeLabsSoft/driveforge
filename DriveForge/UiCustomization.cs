@@ -235,9 +235,18 @@ public partial class MainWindow
 			dict = Strings["en"];
 		}
 		Dictionary<string, string> fallback = Strings["en"];
+		// Resolved against THIS dictionary, not through L(): the parameter decides the language here, and a
+		// renderer that reads a global instead of its own argument is one refactor away from being wrong.
+		string Text(string k) => dict.TryGetValue(k, out string? dv) ? dv
+			: fallback.TryGetValue(k, out string? ev) ? ev : k;
 		foreach (string key in fallback.Keys)
 		{
-			string text = dict.TryGetValue(key, out string? v) ? v : fallback[key];
+			// Expand [[OtherKey]] here too. This loop wrote the RAW dictionary value into the control, so a
+			// sentence that names another control by reference - the mechanism that exists precisely so the name
+			// follows the language - reached the screen as literal markup: the duplicate-files hint read
+			// 'apasă „[[AnalyzeKeepFirstButton]]”'. References only ever worked for keys rendered through L(),
+			// and nothing said which keys those were. One level, like ExpandTaskRefs, so none can loop.
+			string text = TaskRefPattern.Replace(Text(key), m => Text(m.Groups[1].Value));
 			object? control = FindName(key);
 			switch (control)
 			{
