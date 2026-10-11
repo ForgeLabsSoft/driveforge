@@ -15702,11 +15702,26 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtCreate")));
+			int partsBefore = await PartitionCountAsync(disk.Number);
 			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\ncreate partition primary{sizeClause}\r\nformat fs={fs} quick label=DriveForge\r\nassign\r\nexit\r\n");
 			SetToolOutput("diskpart create partition\r\n\r\n" + outp);
-			Log($"Created partition on Disk {disk.Number} ({fs}).");
+			Log($"Create partition on Disk {disk.Number} ({fs}): diskpart finished.");
 			await RefreshDisksAsync();
-			bool ok = true; // diskpart returned a zero exit (RunDiskpartAsync throws otherwise); don't parse the word "successfully", which is localized and never matches on the 16 non-English UI languages. The raw output is shown below regardless.
+			// diskpart exits 0 even when it DECLINED the operation, and its result text is localized so it
+			// cannot be parsed - the same wall the Resize flow hit, and the same way through it: measure.
+			// A partition that was created is visible in the partition COUNT, whatever language Windows speaks.
+			// Windows refusing to say (-1) is not evidence of failure, so that case keeps the old benefit of
+			// the doubt, exactly as the resize flow's `measured` does.
+			int partsAfter = await PartitionCountAsync(disk.Number);
+			// A table change can lag the diskpart exit by a moment, and a false failure is a wrong claim too.
+			if (partsBefore >= 0 && partsAfter >= 0 && !(partsAfter > partsBefore))
+			{
+				await Task.Delay(1500);
+				partsAfter = await PartitionCountAsync(disk.Number);
+			}
+			bool measured = partsBefore >= 0 && partsAfter >= 0;
+			bool ok = !measured || (partsAfter > partsBefore);
+			Log($"Disk {disk.Number}: {partsBefore} -> {partsAfter} partitions (measured={measured}, ok={ok}).");
 			MessageBox.Show((ok ? string.Format(L("PtCreateDone"), disk.Number) : L("PtCreateFailed")) + "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
 				L("PtCreate"), MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
@@ -15738,12 +15753,29 @@ exit 0
 		try
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtDelete")));
+			int partsBefore = await PartitionCountAsync(disk.Number);
 			string outp = await RunDiskpartAsync($"select volume {letter}\r\ndelete volume override\r\nexit\r\n");
 			SetToolOutput("diskpart delete volume\r\n\r\n" + outp);
-			Log($"Deleted volume {letter}: on Disk {disk.Number}.");
+			Log($"Delete volume {letter}: on Disk {disk.Number}: diskpart finished.");
 			await RefreshDisksAsync();
-			bool ok = true; // diskpart returned a zero exit (RunDiskpartAsync throws otherwise); don't parse the word "successfully", which is localized and never matches on the 16 non-English UI languages. The raw output is shown below regardless.
-			MessageBox.Show((ok ? string.Format(L("PtDeleteDone"), letter) : L("PtResizeFailed")) + "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
+			// diskpart exits 0 even when it DECLINED the operation, and its result text is localized so it
+			// cannot be parsed - the same wall the Resize flow hit, and the same way through it: measure.
+			// A partition that went away is visible in the partition COUNT, whatever language Windows speaks.
+			// Windows refusing to say (-1) is not evidence of failure, so that case keeps the old benefit of
+			// the doubt, exactly as the resize flow's `measured` does.
+			int partsAfter = await PartitionCountAsync(disk.Number);
+			// A table change can lag the diskpart exit by a moment, and a false failure is a wrong claim too.
+			if (partsBefore >= 0 && partsAfter >= 0 && !(partsAfter < partsBefore))
+			{
+				await Task.Delay(1500);
+				partsAfter = await PartitionCountAsync(disk.Number);
+			}
+			bool measured = partsBefore >= 0 && partsAfter >= 0;
+			bool ok = !measured || (partsAfter < partsBefore);
+			Log($"Disk {disk.Number}: {partsBefore} -> {partsAfter} partitions (measured={measured}, ok={ok}).");
+			// ...and a failed deletion gets a message about deletion. This branch pointed at PtResizeFailed,
+			// which it could never reach to be noticed.
+			MessageBox.Show((ok ? string.Format(L("PtDeleteDone"), letter) : string.Format(L("PtDeleteFailed"), letter)) + "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
 				L("PtDelete"), MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrDelete"), ex); }

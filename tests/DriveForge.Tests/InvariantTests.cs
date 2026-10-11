@@ -1283,4 +1283,71 @@ public class InvariantTests
 		Assert.True(Regex.IsMatch(code, @"bool\s+measured\s*=[^;]*\bmbps\s*>"),
 			"Which ending the estimate uses must be decided by the measured speed itself:\n" + code);
 	}
+
+	/// <summary>
+	/// A verdict is never a constant.
+	///
+	/// Create partition and Delete volume each wrote <c>bool ok = true;</c> and then chose between a
+	/// Done and a Failed message with it. PtCreateFailed exists in all seventeen languages - "Could not
+	/// create a partition - there may be no unallocated space on the disk" - and could not be reached, so
+	/// a Create on a disk with no unallocated space answered "Done. A new partition was created".
+	/// Delete was worse: there was no PtDeleteFailed at all, and its unreachable branch pointed at
+	/// PtResizeFailed, so a failed deletion would have said diskpart could not RESIZE the volume. Dead
+	/// code is where a wrong message hides.
+	///
+	/// The comment defending the constant was half right: diskpart's output is localized, so the word
+	/// "successfully" cannot be parsed in sixteen of seventeen languages. The conclusion does not
+	/// follow. The Resize flow in the same screen had already answered it by measuring the volume before
+	/// and after, and these now count partitions the same way.
+	///
+	/// What this looks for is the mechanism, not the two sites: a bool local initialised to a literal,
+	/// used as the condition of a conditional whose branches look up text. Deriving the flag from
+	/// something measured is what makes a verdict a verdict.
+	///
+	/// It does NOT check that the measurement is compared the right way round - inverting one of these
+	/// (Create looking for FEWER partitions) passes, and was run to confirm it. That is deliberate: the
+	/// direction is semantic, asserting it here would be copying the implementation into the test, and an
+	/// inverted comparison announces itself on the first run by failing every success. A constant does the
+	/// opposite - it never fails, so nobody ever sees the branch behind it.
+	/// </summary>
+	[Fact]
+	public void AVerdictIsNeverAConstant()
+	{
+		var offenders = new List<string>();
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			// bool locals that start life as a literal true/false.
+			var constants = new HashSet<string>(StringComparer.Ordinal);
+			foreach (var v in method.DescendantNodes().OfType<VariableDeclaratorSyntax>())
+			{
+				if ((v.Parent as VariableDeclarationSyntax)?.Type.ToString() != "bool") continue;
+				if (v.Initializer?.Value is LiteralExpressionSyntax lit
+					&& (lit.Token.IsKind(SyntaxKind.TrueKeyword) || lit.Token.IsKind(SyntaxKind.FalseKeyword)))
+					constants.Add(v.Identifier.Text);
+			}
+			if (constants.Count == 0) continue;
+			
+			// A later assignment from something real is the flag being decided, which is the point.
+			foreach (var asg in method.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+				if (asg.Left is IdentifierNameSyntax lid && asg.Right is not LiteralExpressionSyntax)
+					constants.Remove(lid.Identifier.Text);
+			
+			foreach (var cond in method.DescendantNodes().OfType<ConditionalExpressionSyntax>())
+			{
+				if (cond.Condition is not IdentifierNameSyntax flag
+					|| !constants.Contains(flag.Identifier.Text)) continue;
+				// Only when the two branches are TEXT the user reads - a constant flag picking between two
+				// code paths is an ordinary switch, not a verdict.
+				var keys = Regex.Matches(cond.ToString(), "L\\(\\s*\"([A-Za-z0-9_]+)\"")
+					.Select(m => m.Groups[1].Value).ToList();
+				if (keys.Count < 2) continue;
+				string between = string.Join(" and ", keys);
+				offenders.Add($"{SourceModel.Where(file, cond)} in {name}: {flag.Identifier.Text}"
+					+ $" is a literal, choosing between {between}");
+			}
+		}
+		Assert.True(offenders.Count == 0,
+			"A success/failure message is being chosen by a flag that cannot be false, which makes the other"
+				+ " message dead code:\n  " + string.Join("\n  ", offenders));
+	}
 }
