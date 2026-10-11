@@ -231,14 +231,12 @@ public class LocalizationTests
 	[Fact]
 	public void NoNewOrphanKeys()
 	{
-		// Measured baseline. These are dead today — delete the key and its 17 translations, then delete it here.
-		var baseline = new HashSet<string>
-		{
-			"AnSet", "Mb023", "RfSameDrive", "RfZipSameDrive", "Step1Title", "Step1Desc",
-			"AnalyzeTreemapHeader", "AnalyzeDeleteConfirm", "PredReasonSectors", "A11yMenu",
-			"MvNeedTable", "MvGptUnsupported", "PtLostMounted", "SbSettingsS",
-			"InternalDiskCheck", "RepairToolButton",
-		};
+		// The baseline is empty, and that is the point: it held sixteen keys with the instruction to
+		// delete them, and they were deleted (272 translations with them). A key nothing shows is text
+		// that gets translated, reviewed and carried forever while reaching nobody - and it reads as live
+		// to the next person who greps for a message and finds it. Keep this empty: wire a new key up or
+		// delete it, rather than recording it here.
+		var baseline = new HashSet<string>();
 
 		string allCode = string.Join("\n", SourceModel.SourceFiles.Select(File.ReadAllText));
 		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
