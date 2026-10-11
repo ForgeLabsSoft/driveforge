@@ -1436,4 +1436,126 @@ public class InvariantTests
 				+ " announces a disk state without the reading that would show it happened:\n  "
 				+ string.Join("\n  ", missing));
 	}
+
+	/// <summary>Highest {N} in a format string, plus one. 0 when it has no placeholders.</summary>
+	private static int HolesIn(string text)
+	{
+		int highest = -1;
+		foreach (Match m in Regex.Matches(text, @"\{(\d+)"))
+			highest = Math.Max(highest, int.Parse(m.Groups[1].Value));
+		return highest + 1;
+	}
+
+	/// <summary>The English text of a key, or null when there is no such key.</summary>
+	private static string? EnglishOf(string key)
+	{
+		var en = ((Dictionary<string, Dictionary<string, string>>)Mw.Field("Strings"))["en"];
+		return en.TryGetValue(key, out string? v) ? v : null;
+	}
+
+	/// <summary>
+	/// A formatted string gets exactly the arguments its placeholders need.
+	///
+	/// Too few and string.Format throws FormatException at the moment the message is built - which is
+	/// the moment an operation is reporting its result, so the app throws instead of telling the user
+	/// what happened. Nothing in the compiler sees this: the key is a string and the count lives in a
+	/// dictionary. Too many is harmless to run but means the text lost a placeholder it was written for,
+	/// so it is reported separately rather than ignored.
+	///
+	/// Only calls whose key is a plain literal can be checked; L(cond ? "A" : "B") is counted against
+	/// BOTH keys, which is correct - the call has one argument list and either key may be the one used.
+	/// </summary>
+	[Fact]
+	public void EveryFormattedKeyGetsTheArgumentsItNeeds()
+	{
+		var tooFew = new List<string>();
+		var tooMany = new List<string>();
+		foreach (var (file, root) in SourceModel.Parsed)
+		{
+			foreach (var call in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+			{
+				// string.Format(...) or String.Format(...)
+				if (call.Expression is not MemberAccessExpressionSyntax ma
+					|| ma.Name.Identifier.Text != "Format"
+					|| ma.Expression.ToString() is not ("string" or "String")) continue;
+				var args = call.ArgumentList.Arguments;
+				if (args.Count == 0) continue;
+				
+				// The first argument has to be an L(...) lookup for this to be checkable.
+				if (args[0].Expression is not InvocationExpressionSyntax look
+					|| (look.Expression as IdentifierNameSyntax)?.Identifier.Text != "L") continue;
+				var keys = Regex.Matches(look.ToString(), "\"([A-Za-z0-9_]+)\"")
+					.Select(m => m.Groups[1].Value).Distinct().ToList();
+				if (keys.Count == 0) continue;
+				
+				int given = args.Count - 1;
+				foreach (string key in keys)
+				{
+					string? text = EnglishOf(key);
+					if (text == null) continue;   // EveryLiteralKeyReferencedInCodeExists reports a missing key
+					int needed = HolesIn(text);
+					if (given < needed)
+						tooFew.Add($"{SourceModel.Where(file, call)} {key}: needs {needed}, given {given}");
+					else if (given > needed)
+						tooMany.Add($"{SourceModel.Where(file, call)} {key}: needs {needed}, given {given}");
+				}
+			}
+		}
+		Assert.True(tooFew.Count == 0,
+			"string.Format would throw FormatException here - the app would fall over while reporting a"
+				+ $" result:\n  " + string.Join("\n  ", tooFew));
+		Assert.True(tooMany.Count == 0,
+			"These pass more arguments than the text has placeholders, so something the code meant to show is"
+				+ $" not being shown:\n  " + string.Join("\n  ", tooMany));
+	}
+
+	/// <summary>
+	/// A key with placeholders is never shown without being formatted.
+	///
+	/// L("Key") on a key whose text contains {0} puts the braces on screen. It cannot throw and it cannot
+	/// fail a build; it just reads as a bug to whoever sees it. The companion rule above catches the
+	/// opposite mistake.
+	///
+	/// A bare L() whose result is handed to string.Format, or concatenated into one, is fine - that is
+	/// the formatting happening one step later - so a lookup sitting inside a string.Format call anywhere
+	/// up its ancestry is not counted.
+	/// </summary>
+	[Fact]
+	public void AKeyWithPlaceholdersIsNeverShownRaw()
+	{
+		var raw = new List<string>();
+		foreach (var (file, root) in SourceModel.Parsed)
+		{
+			foreach (var look in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+			{
+				if ((look.Expression as IdentifierNameSyntax)?.Identifier.Text != "L") continue;
+				var keys = Regex.Matches(look.ToString(), "\"([A-Za-z0-9_]+)\"")
+					.Select(m => m.Groups[1].Value).Distinct().ToList();
+				if (keys.Count == 0) continue;
+				
+				// Inside a string.Format anywhere above? Then it is being formatted.
+				bool formatted = false;
+				for (SyntaxNode? p = look.Parent; p != null; p = p.Parent)
+				{
+					if (p is InvocationExpressionSyntax inv
+						&& inv.Expression is MemberAccessExpressionSyntax m2
+						&& m2.Name.Identifier.Text == "Format"
+						&& m2.Expression.ToString() is "string" or "String")
+					{ formatted = true; break; }
+				}
+				if (formatted) continue;
+				
+				foreach (string key in keys)
+				{
+					string? text = EnglishOf(key);
+					if (text == null || HolesIn(text) == 0) continue;
+					int holes = HolesIn(text);
+					raw.Add($"{SourceModel.Where(file, look)} {key}: {holes} placeholder(s), shown unformatted"
+						+ $" - \"{text}\"");
+				}
+			}
+		}
+		Assert.True(raw.Count == 0,
+			"These put a placeholder on screen instead of a value:\n  " + string.Join("\n  ", raw));
+	}
 }
