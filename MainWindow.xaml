@@ -410,6 +410,15 @@
                 <Button Name="ScanToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectScanTool_Click" ToolTip="Check the file system for errors with CHKDSK /scan (read-only).">
                   <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE8FE;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbScan" Text="Scan" Foreground="White" VerticalAlignment="Center" /></StackPanel>
                 </Button>
+                <Button Name="SmartToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectSmartTool_Click" ToolTip="Read the drive&apos;s SMART / reliability counters in full and show them as a table. Read-only.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE9D2;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbSmart" Text="SMART" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="RepairToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectRepairTool_Click" ToolTip="Run CHKDSK /r /x: fixes file-system errors and checks readable sectors. Locks the drive and can take hours.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE90F;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbRepair" Text="Repair" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
+                <Button Name="KitToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SelectKitTool_Click" ToolTip="Create a folder of ready-to-run CHKDSK scripts and a simple write-speed test, with a README. Writes nothing to the drive being checked.">
+                  <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE7B8;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbKit" Text="Kit" Foreground="White" VerticalAlignment="Center" /></StackPanel>
+                </Button>
                 <Button Name="SurfaceToolButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Margin="0,0,0,4" Padding="9,7" Style="{StaticResource GhostButtonStyle}" Click="SurfaceTest_Click" ToolTip="Read every sector to find bad / unreadable blocks (read-only surface test).">
                   <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE9D9;" FontFamily="Segoe MDL2 Assets" FontSize="15" Foreground="White" VerticalAlignment="Center" Margin="0,0,9,0" /><TextBlock Name="TbSurface" Text="Surface" Foreground="White" VerticalAlignment="Center" /></StackPanel>
                 </Button>
@@ -645,7 +654,7 @@
                       </Border>
                       <TextBlock Name="ScanStatusText" Text="No scan has been run yet." Margin="0,0,0,8" TextWrapping="Wrap" />
                       <ProgressBar Name="ScanProgressBar" Height="14" Minimum="0" Maximum="100" Value="0" Margin="0,0,0,8" />
-                      <TextBlock Name="ScanAdviceText" Text="Scan checks logical file-system problems. For a deep physical surface test, a dedicated third-party surface-scan tool can be used." TextWrapping="Wrap" />
+                      <TextBlock Name="ScanAdviceText" Text="The scan checks the file system's bookkeeping for logical problems, not the disk surface. To read every sector and find bad or unreadable blocks, run the [[TbSurface]] test in this same panel." TextWrapping="Wrap" />
                     </StackPanel>
                   </TabItem>
                   <TabItem Name="TabDetails" Header="Details">

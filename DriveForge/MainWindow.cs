@@ -2185,17 +2185,37 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void SelectHealthTool_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolHealth, 0, "Health selected. Press Start to read the health report.");
+		SelectDriveTool(ToolHealth, 0);
 	}
 
 	private void SelectSpeedTool_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolSpeed, 1, "Speed selected. Press Start to test read/write speed.");
+		SelectDriveTool(ToolSpeed, 1);
 	}
 
 	private void SelectScanTool_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolScan, 2, "Scan selected. Press Start to run a safe file-system scan.");
+		SelectDriveTool(ToolScan, 2);
+	}
+
+	// These three were removed as dead code earlier today, and the dead part was the BUTTON, not the
+	// tool: ToolStartButton_Click has always dispatched to SMART, Repair and the diagnostic kit, and
+	// DScanOfflineAdvice tells the user in so many words to "press Repair". git shows MainWindow.xaml
+	// never referenced these handlers in the repo's history, so the three features shipped with no way
+	// in at all.
+	private void SelectSmartTool_Click(object sender, RoutedEventArgs e)
+	{
+		SelectDriveTool(ToolSmart, 3);
+	}
+
+	private void SelectRepairTool_Click(object sender, RoutedEventArgs e)
+	{
+		SelectDriveTool(ToolRepair, 2);
+	}
+
+	private void SelectKitTool_Click(object sender, RoutedEventArgs e)
+	{
+		SelectDriveTool(ToolKit, 3);
 	}
 
 	private async void SpeedTest_Click(object sender, RoutedEventArgs e)
@@ -2204,13 +2224,13 @@ public partial class MainWindow : Window, IComponentConnector
 		// flows raise busy without greying the button out. The guard belongs HERE and not in RunSpeedTestAsync, which
 		// is also called with auto:true from the pre-flight INSIDE an operation, where busy is legitimately true.
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		SelectDriveTool(ToolSpeed, 1, "Speed test selected. Press Start to run it again, or wait for the current test to finish.");
+		SelectDriveTool(ToolSpeed, 1, again: true);
 		await RunSpeedTestAsync(auto: false);
 	}
 
 	private async void HealthCheck_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolHealth, 0, "Health report selected. Press Start to run it again.");
+		SelectDriveTool(ToolHealth, 0, again: true);
 		if (!(DiskBox.SelectedItem is DiskItem disk))
 		{
 			return;
@@ -2253,19 +2273,19 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void ScanErrors_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolScan, 2, "File-system scan selected. Press Start to scan the selected drive.");
+		SelectDriveTool(ToolScan, 2, again: true);
 		await RunChkdskForSelectedDriveAsync(repair: false);
 	}
 
 	private async void RepairSectors_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolRepair, 3, "Repair scan selected. Press Start to run the repair scan.");
+		SelectDriveTool(ToolRepair, 2, again: true);
 		await RunChkdskForSelectedDriveAsync(repair: true);
 	}
 
 	private async void SmartDetails_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolSmart, 1, "SMART details selected. Press Start to read SMART data again.");
+		SelectDriveTool(ToolSmart, 3, again: true);
 		if (!(DiskBox.SelectedItem is DiskItem disk))
 		{
 			return;
@@ -2301,7 +2321,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void CreateDiagnosticKit_Click(object sender, RoutedEventArgs e)
 	{
-		SelectDriveTool(ToolKit, 4, "Diagnostic kit selected. Press Start to create the tool kit again.");
+		SelectDriveTool(ToolKit, 3, again: true);
 		try
 		{
 			SetToolStatus(L("StKitCreating"));
@@ -2325,11 +2345,34 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private void SelectDriveTool(int tool, int tabIndex, string status)
+	/// <summary>The key the tool's own button is labelled from. The status line uses the same one, so the
+	/// two cannot drift apart.</summary>
+	private static string ToolLabelKey(int tool) => tool switch
+	{
+		ToolSpeed => "TbSpeed",
+		ToolSmart => "TbSmart",
+		ToolScan => "TbScan",
+		ToolRepair => "TbRepair",
+		ToolKit => "TbKit",
+		_ => "TbHealth",
+	};
+
+	/// <summary>
+	/// Selects a diagnostic tool: remembers it for the Start button, opens the tab its output lands on,
+	/// names it in the status line and rings its button.
+	///
+	/// The status line used to be a sentence passed in by each caller, and all nine of them were English
+	/// literals - so with the app in Romanian, pressing Scan said "Scan selected. Press Start to run a
+	/// safe file-system scan." in English. Found by driving the live app in Romanian;
+	/// NoStatusLineIsWrittenInEnglishFromCode could not see it, because it matches a literal assigned to
+	/// a widget and this one travelled through a method first.
+	/// </summary>
+	private void SelectDriveTool(int tool, int tabIndex, bool again = false)
 	{
 		selectedDriveTool = tool;
 		SelectDriveToolTab(tabIndex);
-		SetToolStatus(status);
+		SetToolStatus(string.Format(L(again ? "DToolSelectedAgain" : "DToolSelected"),
+			L(ToolLabelKey(tool))));
 		HighlightToolButton(tool);
 	}
 
@@ -2339,7 +2382,8 @@ public partial class MainWindow : Window, IComponentConnector
 		var blue = FindResource("BlueBrush") as System.Windows.Media.Brush;
 		var map = new (System.Windows.Controls.Button? btn, int t)[]
 		{
-			(HealthToolButton, ToolHealth), (SpeedToolButton, ToolSpeed), (ScanToolButton, ToolScan)
+			(HealthToolButton, ToolHealth), (SpeedToolButton, ToolSpeed), (ScanToolButton, ToolScan),
+			(SmartToolButton, ToolSmart), (RepairToolButton, ToolRepair), (KitToolButton, ToolKit)
 		};
 		foreach (var (btn, t) in map)
 		{
@@ -3944,7 +3988,13 @@ public partial class MainWindow : Window, IComponentConnector
 			progressDoneGiB = ok ? progressTotalGiB : Math.Max(progressTotalGiB * 0.85, 0.85);
 			SetStage(ok ? L("StgCloneDone") : L("StgCloneDoneReview"), 100.0);
 			SetToolOutput(reportText);
-			SelectDriveTool(ToolSmart, 5, ok ? "Faithful clone complete." : "Faithful clone complete. Open the report for details.");
+			// Show the report that SetToolOutput just filled - it lives on the Details tab - and say the clone
+			// finished. This used to go through SelectDriveTool, which made three mistakes at once: it asked
+			// for tab 5 (there are four), it set the selected DIAGNOSTIC tool to SMART as a side effect of
+			// finishing a clone (so the next press of Start ran SMART details), and it passed the status line
+			// in English. StgCloneDone/StgCloneDoneReview already say it in all seventeen languages.
+			SelectDriveToolTab(3);
+			SetToolStatus(L(ok ? "StgCloneDone" : "StgCloneDoneReview"));
 			Log(reportText);
 			// A clean success has no report on disk this run — clear any stale pointer from an earlier failed run so
 			// "Open Report" never opens an unrelated old report.
