@@ -1613,4 +1613,58 @@ public class InvariantTests
 				+ " check again, because removing one orphans whatever only it called:\n  "
 				+ string.Join("\n  ", dead));
 	}
+
+	/// <summary>
+	/// Every tool the Start button can run is selectable from a button on screen.
+	///
+	/// Three were not. ToolStartButton_Click dispatches on selectedDriveTool and has always had cases
+	/// for ToolSmart, ToolRepair and ToolKit - and selectedDriveTool could only become one of those
+	/// three inside the very handlers that switch reaches. Circular, so unreachable: git shows
+	/// MainWindow.xaml never referenced their handlers in the repo's history. Three implemented
+	/// features, with code, a dispatcher case and seventeen languages of strings, and no way in. The
+	/// app even said "Recommended next step: press Repair."
+	///
+	/// Nothing caught it. The dead-code rule could not: those handlers ARE referenced - by the
+	/// dispatcher - so they counted as used. Being referenced is not being reachable, and that is the
+	/// gap this closes.
+	///
+	/// A tool counts as selectable when some method that calls SelectDriveTool(ThatTool, ...) is wired
+	/// to a Click in the XAML. One hop only - a chain of code-only callers would still be unreachable
+	/// by the same argument, so one hop is the honest test.
+	/// </summary>
+	[Fact]
+	public void EveryToolTheStartButtonRunsIsSelectableOnScreen()
+	{
+		string code = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		
+		// The constants the dispatcher switches on.
+		var tools = Regex.Matches(code, @"private const int (Tool[A-Za-z]+) = \d+;")
+			.Select(m => m.Groups[1].Value).Distinct().ToList();
+		Assert.True(tools.Count >= 5, $"only {tools.Count} Tool* constants found - the scan is wrong.");
+		
+		// Click="Handler" in the XAML.
+		var wired = Regex.Matches(xaml, @"Click=""([A-Za-z0-9_]+)""")
+			.Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+		
+		var unreachable = new List<string>();
+		foreach (string tool in tools)
+		{
+			// Methods whose body selects this tool.
+			var setters = SourceModel.Methods()
+				.Where(m => Regex.IsMatch(m.Method.ToString(), @"SelectDriveTool\(\s*" + tool + @"\b"))
+				.Select(m => m.Name).Distinct().ToList();
+			if (setters.Count == 0)
+			{
+				unreachable.Add($"{tool}: nothing calls SelectDriveTool({tool}, ...)");
+				continue;
+			}
+			if (setters.Any(wired.Contains)) continue;
+			unreachable.Add($"{tool}: selected only by {string.Join(", ", setters)}, and no Click in the"
+				+ " XAML reaches any of them");
+		}
+		Assert.True(unreachable.Count == 0,
+			"The Start button dispatches to these, and the user has no way to select them:\n  "
+				+ string.Join("\n  ", unreachable));
+	}
 }
