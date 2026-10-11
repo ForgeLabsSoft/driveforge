@@ -1667,4 +1667,164 @@ public class InvariantTests
 			"The Start button dispatches to these, and the user has no way to select them:\n  "
 				+ string.Join("\n  ", unreachable));
 	}
+
+	/// <summary>The sentences the app is allowed to throw in English, by the method that throws them.
+	///
+	/// Every one of these is the output, the exit code or the missing artefact of an external tool -
+	/// DISM, wimlib, VSS, bcdboot, Ventoy, the GPT writer, a child process - which is a diagnostic for a
+	/// bug report, not advice a person can act on. ShowError now labels them in the user's own language
+	/// ("Technical detail:") instead of letting them look like the app speaking.
+	///
+	/// Everything a person CAN act on went into the dictionary: the thirty keys this list is the
+	/// complement of. A new English sentence in any other method, or one more in one of these, fails.
+	/// </summary>
+	private static readonly Dictionary<string, int> DiagnosticThrowers = new(StringComparer.Ordinal)
+	{
+		// An external tool's own diagnostic - its exit code, its stderr, or the artefact it failed to produce.
+		// Translating DISM's or wimlib's output would be translating a label on top of English anyway, and the
+		// text that matters for a bug report is the tool's, verbatim.
+		["CreateWindowsToGoFromImageAsync"] = 1,
+		["CreateShadowCopyAsync"] = 1,
+		["GetDosDeviceTarget"] = 1,
+		["EnsureVentoyAsync"] = 3,
+		["MultiBootFlowAsync"] = 1,
+		["RunVentoyAsync"] = 1,
+		["StreamCloneWithWimlibAsync"] = 4,
+		["ExportBootableVhdxCoreAsync"] = 6,
+		["RestoreWimToDriveAsync"] = 2,
+		["RestoreVhdxToDriveAsync"] = 3,
+		["RunExperimentalFullRootUsbCloneAsync"] = 2,
+		["RunProcessAsync"] = 1,
+		["RunProcessCaptureAsync"] = 1,
+		["RunProcessWithArgumentListAsync"] = 1,
+
+		// Raw on-disk structures: an LBA, a VCN gap, a short read, a Win32 error from CreateFile. Nobody can act
+		// on these except by sending them in, and the vocabulary ($DATA, $ATTRIBUTE_LIST, GPT entry table) has no
+		// translation worth having. W is WriteGpt's local write helper.
+		["ReadFull"] = 1,
+		["ReadGpt"] = 1,
+		["WriteGpt"] = 2,
+		["W"] = 1,
+		["RawWriteImageToDiskAsync"] = 2,
+		["VerifyRawWrite"] = 2,
+		["CopyStreamViaApi"] = 2,
+		["WriteFileWithMeta"] = 3,
+		["WriteNonResident"] = 2,
+		["AttachReadOnly"] = 1,
+
+		// Never reaches a dialog. EnableBitLockerAsync's two sentences go to the log - both call sites catch it
+		// and the end-of-run report carries a translated warning - and RecoverOne's is counted as one failed
+		// file among many. If either ever becomes something a user reads, this list is where that shows up.
+		["EnableBitLockerAsync"] = 2,
+		["RecoverOne"] = 1,
+	};
+
+	/// <summary>
+	/// A thrown message is either translated or a recorded diagnostic - never a stray English sentence.
+	///
+	/// ShowError prints ex.Message verbatim under a translated title, so a thrown English sentence lands
+	/// on screen in English however the app is set. Eighty-four did, and nothing here could see them:
+	/// every localisation rule in this suite matches text assigned to a widget or handed to MessageBox,
+	/// and a thrown message takes neither route. Tracing (not counting) was the only way to tell the
+	/// ones a user reads from the ones a nearer catch swallows.
+	/// </summary>
+	[Fact]
+	public void EveryThrownSentenceIsTranslatedOrARecordedDiagnostic()
+	{
+		var found = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (ObjectCreationExpressionSyntax oc in root.DescendantNodes()
+					.OfType<ObjectCreationExpressionSyntax>())
+			{
+				// `throw new X(...)` as a statement AND as an expression (`?? throw new IOException(...)`),
+				// and an exception that is never thrown at all but handed straight to ShowError, which prints
+				// its Message exactly the same way. The first version of this rule checked only the throws and
+				// walked past `ShowError(L("ErrDownload"), new Exception("The download stalled - no data
+				// arrived for 60 seconds..."))`, which is as user-facing as text gets.
+				if (oc.Parent is not ThrowStatementSyntax && oc.Parent is not ThrowExpressionSyntax
+						&& !IsShowErrorArgument(oc)) continue;
+				if (!oc.Type.ToString().EndsWith("Exception", StringComparison.Ordinal)) continue;
+				ExpressionSyntax? first = oc.ArgumentList?.Arguments.FirstOrDefault()?.Expression;
+				if (first is null) continue;
+				// A message built from L(...) is translated by construction, whatever else is concatenated on.
+				if (SourceModel.Calls(first, "L").Any()) continue;
+				string literal = LiteralPartsOf(first);
+				if (!ReadsAsASentence(literal)) continue;
+				string owner = OwningMethodName(oc);
+				if (!found.TryGetValue(owner, out List<string> list))
+					found[owner] = list = new List<string>();
+				list.Add($"{SourceModel.Where(file, oc)}  {Trim120(literal)}");
+			}
+
+		var complaints = new List<string>();
+		foreach (var pair in found.OrderBy(p => p.Key, StringComparer.Ordinal))
+		{
+			int allowed = DiagnosticThrowers.TryGetValue(pair.Key, out int n) ? n : 0;
+			if (pair.Value.Count == allowed) continue;
+			complaints.Add(allowed == 0
+				? $"{pair.Key} throws {pair.Value.Count} English sentence(s) and is not a recorded diagnostic "
+					+ $"thrower:\n      " + string.Join("\n      ", pair.Value)
+				: $"{pair.Key} throws {pair.Value.Count} English sentence(s), {allowed} recorded:\n      "
+					+ string.Join("\n      ", pair.Value));
+		}
+		foreach (string gone in DiagnosticThrowers.Keys.Where(k => !found.ContainsKey(k))
+				.OrderBy(k => k, StringComparer.Ordinal))
+			complaints.Add($"{gone} is recorded as a diagnostic thrower but throws no English sentence any "
+				+ "more - take it off the list");
+
+		Assert.True(complaints.Count == 0,
+			"ShowError prints ex.Message verbatim, so these land on screen in English under a translated "
+				+ "title. Use L(\"Key\") for anything a person can act on; add the method to "
+				+ "DiagnosticThrowers only when the text is a tool's own diagnostic.\n  "
+				+ string.Join("\n  ", complaints));
+	}
+
+	/// <summary>The string-literal text in an expression: a literal, an interpolated string's text runs,
+	/// or either side of a concatenation. Interpolation holes contribute nothing.</summary>
+	private static string LiteralPartsOf(ExpressionSyntax e) => e switch
+	{
+		LiteralExpressionSyntax lit when lit.Token.IsKind(SyntaxKind.StringLiteralToken) => lit.Token.ValueText,
+		InterpolatedStringExpressionSyntax interp => string.Concat(interp.Contents
+			.OfType<InterpolatedStringTextSyntax>().Select(t => t.TextToken.ValueText)),
+		BinaryExpressionSyntax bin when bin.IsKind(SyntaxKind.AddExpression) =>
+			LiteralPartsOf(bin.Left) + " " + LiteralPartsOf(bin.Right),
+		ParenthesizedExpressionSyntax p => LiteralPartsOf(p.Expression),
+		_ => "",
+	};
+
+	/// <summary>Two runs of two or more letters, separated by something that is not a letter. A bare
+	/// token ("NTFS", "RAW") is not a sentence and is not worth a translation key.</summary>
+	private static bool ReadsAsASentence(string text) =>
+		Regex.IsMatch(text, @"[A-Za-z]{2,}[^A-Za-z]+[A-Za-z]{2,}");
+
+	private static string OwningMethodName(SyntaxNode node)
+	{
+		for (SyntaxNode n = node; n != null; n = n.Parent)
+		{
+			if (n is MethodDeclarationSyntax md) return md.Identifier.Text;
+			if (n is LocalFunctionStatementSyntax lf) return lf.Identifier.Text;
+			if (n is ConstructorDeclarationSyntax cd) return cd.Identifier.Text;
+			if (n is AccessorDeclarationSyntax ad) return ad.Keyword.Text;
+		}
+		return "<file scope>";
+	}
+
+	/// <summary>Is this `new SomeException(...)` an argument of a ShowError call? ShowError prints
+	/// ex.Message whether the exception was thrown or built on the spot.</summary>
+	private static bool IsShowErrorArgument(SyntaxNode node)
+	{
+		for (SyntaxNode n = node; n != null; n = n.Parent)
+		{
+			if (n is InvocationExpressionSyntax inv)
+				return (inv.Expression as IdentifierNameSyntax)?.Identifier.Text == "ShowError";
+			if (n is BlockSyntax || n is StatementSyntax && n is not ExpressionStatementSyntax) return false;
+		}
+		return false;
+	}
+
+	private static string Trim120(string s)
+	{
+		string t = Regex.Replace(s, @"\s+", " ").Trim();
+		return t.Length > 120 ? t.Substring(0, 120) : t;
+	}
 }

@@ -151,8 +151,8 @@ public partial class MainWindow
 
 	private NtfsScanResult LoadSession(string path)
 	{
-		var dto = System.Text.Json.JsonSerializer.Deserialize<SessionDto>(File.ReadAllText(path)) ?? throw new IOException("Empty or invalid session file.");
-		if (dto.Version > 2) throw new IOException($"This .dfscan was made by a newer DriveForge (format v{dto.Version}). Update DriveForge to open it.");
+		var dto = System.Text.Json.JsonSerializer.Deserialize<SessionDto>(File.ReadAllText(path)) ?? throw new UserFacingIoException(L("ErrSessionBad"));
+		if (dto.Version > 2) throw new UserFacingIoException(string.Format(L("ErrSessionNewer"), dto.Version));
 		var scan = new NtfsScanResult
 		{
 			Letter = string.IsNullOrEmpty(dto.Letter) ? '\0' : dto.Letter[0],
@@ -221,7 +221,7 @@ public partial class MainWindow
 	private VolumeReader OpenVolume(char letter)
 	{
 		var h = CreateFile($"\\\\.\\{char.ToUpperInvariant(letter)}:", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException($"Could not open volume {letter}: for reading (run as administrator).");
+		if (h.IsInvalid) throw new UserFacingIoException(string.Format(L("ErrOpenVolumeRead"), letter));
 		return new VolumeReader(h);
 	}
 
@@ -230,7 +230,7 @@ public partial class MainWindow
 	private VolumeReader OpenPhysicalDisk(int diskNumber)
 	{
 		var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException($"Could not open physical drive {diskNumber} for reading (run as administrator).");
+		if (h.IsInvalid) throw new UserFacingIoException(string.Format(L("ErrOpenDiskNumRead"), diskNumber));
 		return new VolumeReader(h);
 	}
 
@@ -248,7 +248,7 @@ public partial class MainWindow
 			if (!cur.AsSpan().SequenceEqual(g.BootSig))
 			{
 				vr.Dispose();
-				throw new IOException($"The volume at {g.Letter}: is not the one this session was scanned from — its drive letter now points to a different disk. Recovery was stopped to avoid reading the wrong data. Reconnect the original drive, or re-scan.");
+				throw new UserFacingIoException(string.Format(L("ErrWrongDiskRecover"), g.Letter));
 			}
 		}
 		return vr;
@@ -344,7 +344,7 @@ public partial class MainWindow
 	{
 		int bytesPerSector = BitConverter.ToUInt16(boot, 0x0B);
 		int sectorsPerCluster = boot[0x0D];
-		if (bytesPerSector == 0 || sectorsPerCluster == 0) throw new IOException("Unreadable NTFS boot sector.");
+		if (bytesPerSector == 0 || sectorsPerCluster == 0) throw new UserFacingIoException(string.Format(L("ErrBootSector"), "NTFS"));
 		int clusterSize = bytesPerSector * sectorsPerCluster;
 		long mftStartCluster = BitConverter.ToInt64(boot, 0x30);
 		sbyte cpr = unchecked((sbyte)boot[0x40]);
@@ -634,7 +634,7 @@ public partial class MainWindow
 		// a corrupt boot could otherwise make `1 << shift` negative or huge, and that value becomes a VolumeReader.Read
 		// length -> OverflowException/OutOfMemory that aborts the scan. Mirrors ScanFat32's boot-sector guard.
 		if (bytesPerSectorShift < 9 || bytesPerSectorShift > 12 || sectorsPerClusterShift > 25 - bytesPerSectorShift)
-			throw new IOException("Unreadable exFAT boot sector.");
+			throw new UserFacingIoException(string.Format(L("ErrBootSector"), "exFAT"));
 		int bytesPerSector = 1 << bytesPerSectorShift;
 		int clusterSize = bytesPerSector << sectorsPerClusterShift;
 		long fatOffsetSec = BitConverter.ToUInt32(boot, 0x50);
@@ -797,7 +797,7 @@ public partial class MainWindow
 		int numFats = boot[0x10];
 		long fatSize32 = BitConverter.ToUInt32(boot, 0x24);
 		long rootCluster = BitConverter.ToUInt32(boot, 0x2C);
-		if (bytesPerSector == 0 || sectorsPerCluster == 0 || fatSize32 == 0) throw new IOException("Unreadable FAT32 boot sector.");
+		if (bytesPerSector == 0 || sectorsPerCluster == 0 || fatSize32 == 0) throw new UserFacingIoException(string.Format(L("ErrBootSector"), "FAT32"));
 		int clusterSize = bytesPerSector * sectorsPerCluster;
 		long fatOffset = (long)reservedSectors * bytesPerSector;
 		long dataOffset = (reservedSectors + (long)numFats * fatSize32) * bytesPerSector; // byte offset of cluster #2
@@ -1059,7 +1059,7 @@ public partial class MainWindow
 		// Resuming a saved deep-scan session: refuse if the drive letter now points at a different disk than it did when
 		// the scan was started (removable letters get reused), so we never scan/recover from the wrong drive.
 		if (expectedBootSig != null && expectedBootSig.Length == 512 && !curBoot.AsSpan().SequenceEqual(expectedBootSig))
-		{ vr.Dispose(); throw new IOException($"The volume at {letter}: is not the one this deep-scan session was started on — its drive letter now points to a different disk. Resuming was stopped to avoid scanning the wrong drive."); }
+		{ vr.Dispose(); throw new UserFacingIoException(string.Format(L("ErrWrongDiskDeep"), letter)); }
 		result.BootSig = curBoot;
 		long total = 0, pos = startOffset;
 		try
@@ -1482,7 +1482,7 @@ public partial class MainWindow
 		int numFats = boot[0x10];
 		int rootEntCount = BitConverter.ToUInt16(boot, 0x11);
 		int sectorsPerFat = BitConverter.ToUInt16(boot, 0x16);
-		if (bytesPerSector == 0 || sectorsPerCluster == 0 || sectorsPerFat == 0) throw new IOException("Unreadable FAT boot sector.");
+		if (bytesPerSector == 0 || sectorsPerCluster == 0 || sectorsPerFat == 0) throw new UserFacingIoException(string.Format(L("ErrBootSector"), "FAT"));
 		int clusterSize = bytesPerSector * sectorsPerCluster;
 		long fatOffset = (long)reservedSectors * bytesPerSector;
 		int rootDirSectors = ((rootEntCount * 32) + (bytesPerSector - 1)) / bytesPerSector;
@@ -1651,7 +1651,7 @@ public partial class MainWindow
 			isExFat ? ScanExFat(letter, vr, boot, ct, progress) :
 			isFat32 ? ScanFat32(letter, vr, boot, ct, progress) :
 			isFat16 ? ScanFat16(letter, vr, boot, ct, progress) :
-			throw new IOException("This source is not a supported volume (NTFS, exFAT, FAT32, FAT16 or FAT12).");
+			throw new UserFacingIoException(L("ErrUnsupportedVolume"));
 		r.BootSig = boot; // fingerprint for stale-session (wrong-disk) detection at recover time
 		return r;
 	}

@@ -145,7 +145,7 @@ public partial class MainWindow
 		{
 			long covered = 0; foreach (var (lcn, cnt) in mftRuns) if (lcn >= 0) covered += cnt;
 			if (covered * (long)clusterSize < mftRealSize)
-				throw new IOException("This volume's $MFT is fragmented across an $ATTRIBUTE_LIST; the raw engine reads only the base MFT run list and would silently drop files. Use the standard/DISM engine (uncheck the raw engine) for this volume.");
+				throw new UserFacingIoException(L("ErrRawEngineMft"));
 		}
 	}
 
@@ -583,10 +583,10 @@ public partial class MainWindow
 		using var vr = OpenVolume(sourceLetter);
 		byte[] boot = vr.Read(0, 512);
 		if (boot.Length < 0x50 || boot[3] != (byte)'N' || boot[4] != (byte)'T' || boot[5] != (byte)'F' || boot[6] != (byte)'S')
-			throw new IOException("The snapshot volume is not NTFS — the raw engine only clones NTFS Windows volumes.");
+			throw new UserFacingIoException(L("ErrRawEngineNotNtfs"));
 		int bytesPerSector = BitConverter.ToUInt16(boot, 0x0B);
 		int sectorsPerCluster = boot[0x0D];
-		if (bytesPerSector == 0 || sectorsPerCluster == 0) throw new IOException("Unreadable NTFS boot sector.");
+		if (bytesPerSector == 0 || sectorsPerCluster == 0) throw new UserFacingIoException(string.Format(L("ErrBootSector"), "NTFS"));
 		int clusterSize = bytesPerSector * sectorsPerCluster;
 		long mftStartCluster = BitConverter.ToInt64(boot, 0x30);
 		sbyte cpr = unchecked((sbyte)boot[0x40]);

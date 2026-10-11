@@ -1060,7 +1060,7 @@ public partial class MainWindow : Window, IComponentConnector
 				int lastPct = -1;
 				while ((read = fs.Read(buf, 0, buf.Length)) > 0)
 				{
-					if (stopRequested) throw new OperationCanceledException("Checksum stopped.");
+					if (stopRequested) throw new StoppedException(L("OpStopped"));
 					sha.TransformBlock(buf, 0, read, null, 0);
 					done += read;
 					int pct = total > 0 ? (int)(done * 100 / total) : 0;
@@ -2545,7 +2545,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		else
 		{
-			await RunRequiredPreflightAsync(diskItem);
+			if (!await RunRequiredPreflightAsync(diskItem)) return;
 			if (IsExperimentalNtfsMode(ModeBox.SelectedIndex))
 			{
 					if (!await ConfirmOperationSummary(diskItem))
@@ -2991,7 +2991,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// erases the whole target, destroying the source image (and invalidating an ISO mount). This is the same
 			// guard the WIM-restore and FFU paths already have; the Windows-To-Go path was missing it.
 			if (PhysicalDiskOfPath(path) == disk.Number)
-				throw new InvalidOperationException("The image file is stored ON the drive you're creating Windows To Go on — this would erase the image itself. Move it to another drive first. No changes were made.");
+				throw new UserFacingException(L("ErrImageOnTarget"));
 
 			string imageFile = path;
 			if (Path.GetExtension(path).Equals(".iso", StringComparison.OrdinalIgnoreCase))
@@ -3011,10 +3011,8 @@ public partial class MainWindow : Window, IComponentConnector
 			long requiredBytes = EstimateRequiredBytes();
 			if (requiredBytes > 0 && disk.Size < requiredBytes)
 			{
-				throw new InvalidOperationException(
-					"The selected drive is too small for this image.\n\nRequired: " + FormatBytes(requiredBytes) +
-					"\nSelected drive: " + FormatBytes(disk.Size) +
-					"\n\nNo changes were made — the drive was not formatted.");
+				throw new UserFacingException(string.Format(L("ErrDriveTooSmall"),
+					FormatBytes(requiredBytes), FormatBytes(disk.Size)));
 			}
 
 			// Target health gate before the destructive format (same as the faithful clone).
@@ -3399,7 +3397,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			else
 			{
-				throw new InvalidOperationException("The backup image file was not created.");
+				throw new UserFacingException(L("ErrBackupNotCreated"));
 			}
 		}
 		catch (Exception ex)
@@ -3595,10 +3593,8 @@ public partial class MainWindow : Window, IComponentConnector
 			long requiredBytes = EstimateRequiredBytes();
 			if (requiredBytes > 0 && targetDisk.Size < requiredBytes)
 			{
-				throw new InvalidOperationException(
-					"The selected drive is too small for this clone.\n\nRequired: " + FormatBytes(requiredBytes) +
-					"\nSelected drive: " + FormatBytes(targetDisk.Size) +
-					"\n\nNo changes were made — the drive was not formatted.");
+				throw new UserFacingException(string.Format(L("ErrDriveTooSmall"),
+					FormatBytes(requiredBytes), FormatBytes(targetDisk.Size)));
 			}
 
 			if (!await ConfirmTargetHealthAsync(targetDisk))
@@ -3687,9 +3683,8 @@ public partial class MainWindow : Window, IComponentConnector
 					foreach (var s in sized) need += s.Bytes;
 					if (need > mbrUsable)
 					{
-						throw new InvalidOperationException(
-							"The target is too small to also clone the other data partitions.\n\nRequired: " + FormatBytes(need) +
-							"\nTarget: " + FormatBytes(targetDisk.Size) + "\n\nUncheck 'Also clone the other data partitions' or use a larger drive. No changes were made.");
+						throw new UserFacingException(string.Format(L("ErrTargetTooSmallExtra"),
+							FormatBytes(need), FormatBytes(targetDisk.Size)));
 					}
 					windowsSizeMb = (int)(winBytesPlan / (1024 * 1024));
 					for (int i = 0; i < sized.Count; i++)
@@ -3802,13 +3797,13 @@ public partial class MainWindow : Window, IComponentConnector
 			// "completed" clone (copyOk only checks a few early boot files/dirs that are created first).
 			if (useRawEngine && (stopRequested || internalOperationStopped))
 			{
-				throw new OperationCanceledException("Clone stopped by the user before the copy finished — the target is incomplete.");
+				throw new StoppedException(L("OpStoppedPartial"));
 			}
 			// A mid-copy disk-full leaves the tree partial while the few early boot files still pass copyOk — fail loudly
 			// instead of finalizing an incomplete clone as "completed".
 			if (useRawEngine && rawStats != null && rawStats.DiskFull > 0)
 			{
-				throw new InvalidOperationException("The target ran out of space during the raw clone — the clone is incomplete. Use a larger drive.");
+				throw new UserFacingException(L("ErrOutOfSpaceTarget"));
 			}
 			copyOk = File.Exists(Path.Combine(realWindowsFolder, "System32", "winload.efi")) &&
 				File.Exists(Path.Combine(realWindowsFolder, "System32", "config", "SYSTEM")) &&
@@ -5219,11 +5214,11 @@ exit 0
 	{
 		if (!File.Exists(wimPath))
 		{
-			throw new InvalidOperationException("The selected image file no longer exists.");
+			throw new UserFacingException(L("ErrImageGone"));
 		}
 		if (PhysicalDiskOfPath(wimPath) == disk.Number)
 		{
-			throw new InvalidOperationException("The image file is stored ON the drive you're restoring to — restoring would erase the image itself. Move the image to another drive first. No changes were made.");
+			throw new UserFacingException(L("ErrImageOnTarget"));
 		}
 		char currentTargetLetter = GetFirstUsableDriveLetter(disk);
 		char bootLetter = GetFreeDriveLetter(currentTargetLetter);
@@ -5258,10 +5253,8 @@ exit 0
 		// only marginally larger than the image isn't formatted and then failed with ENOSPC mid-apply.
 		if (imageBytes > 0 && disk.Size < (long)(imageBytes * 1.25) + 512L * 1024 * 1024)
 		{
-			throw new InvalidOperationException(
-				"The selected drive is too small for this image.\n\nImage content: " + FormatBytes(imageBytes) +
-				"\nSelected drive: " + FormatBytes(disk.Size) +
-				"\n\nNo changes were made — the drive was not formatted.");
+			throw new UserFacingException(string.Format(L("ErrDriveTooSmall"),
+				FormatBytes(imageBytes), FormatBytes(disk.Size)));
 		}
 
 		// The restore builds an MBR layout (BuildRealNtfsUsbLayoutDiskpartScript), whose single Windows partition tops out
@@ -5270,7 +5263,7 @@ exit 0
 		// disk-headroom margin (which would wrongly reject a ~1.8 TiB image that fits fine). Content past the ceiling would
 		// pass the disk.Size gate and then ENOSPC AFTER the wipe, so reject it here, before anything destructive.
 		if (imageBytes > 0 && imageBytes > 2199023255040L - 512L * 1024 * 1024)
-			throw new InvalidOperationException("This image's content is larger than the ~2 TB an MBR restore layout supports, so it cannot be restored to this drive. No changes were made — the drive was not formatted.");
+			throw new UserFacingException(L("ErrMbrTooBig"));
 
 		// Target health gate before the destructive format.
 		if (!await ConfirmTargetHealthAsync(disk))
@@ -5287,7 +5280,7 @@ exit 0
 		try { await RunProcessCaptureAsync(wimlibPath, "verify " + QuoteArgument(wimPath)); }
 		catch (Exception vex)
 		{
-			throw new InvalidOperationException("The backup image failed its integrity check — it may be corrupt or incomplete. The target drive was NOT formatted.\n\n" + vex.Message);
+			throw new UserFacingException(L("ErrImageBadCheck") + Environment.NewLine + Environment.NewLine + L("ErrDetail") + Environment.NewLine + vex.Message);
 		}
 
 		SetStage(L("StgFormatTarget"), 10.0);
@@ -5368,7 +5361,7 @@ exit 0
 					Thread.Sleep(250);
 				}
 				if (volume == null)
-					throw new InvalidOperationException("No Windows partition (>1 GB) was found inside the image.");
+					throw new UserFacingException(L("ErrVhdxNoWinPart"));
 				// The attach suppressed automount (NO_DRIVE_LETTER), so the volume has no active letter — always
 				// assign our own reserved letter (GetFreeDriveLetter picks Z..G, never a system letter like C:).
 				VirtDisk.AssignDriveLetter(winLetter, volume);
@@ -5411,9 +5404,9 @@ exit 0
 	private async Task RestoreVhdxToDriveAsync(string vhdPath, DiskItem disk)
 	{
 		if (!File.Exists(vhdPath))
-			throw new InvalidOperationException("The selected image file no longer exists.");
+			throw new UserFacingException(L("ErrImageGone"));
 		if (PhysicalDiskOfPath(vhdPath) == disk.Number)
-			throw new InvalidOperationException("The image file is stored ON the drive you're restoring to — restoring would erase the image itself. Move the image to another drive first. No changes were made.");
+			throw new UserFacingException(L("ErrImageOnTarget"));
 
 		char currentTargetLetter = GetFirstUsableDriveLetter(disk);
 		char bootLetter = GetFreeDriveLetter(currentTargetLetter);
@@ -5454,7 +5447,7 @@ exit 0
 			vhdxWinLetter = await AttachVhdxReadOnlyAndAssignAsync(vhdPath, vhdxWinLetter);
 			string vhdxWinRoot = vhdxWinLetter + ":\\";
 			if (!File.Exists(Path.Combine(vhdxWinRoot, "Windows", "System32", "config", "SYSTEM")))
-				throw new InvalidOperationException("The VHDX does not contain a Windows installation (no SYSTEM hive on its Windows partition). Nothing was written to the target.");
+				throw new UserFacingException(L("ErrImageNoWindows"));
 
 			// Capacity + MBR-ceiling gate, now that the image is mounted so we can measure its ACTUAL used data (not the
 			// .vhdx file size — a fixed VHDX's file is its full provisioned size, far bigger than the data the raw engine
@@ -5467,11 +5460,10 @@ exit 0
 				var vhdxWinDrive = new DriveInfo(vhdxWinLetter + ":\\");
 				vhdxUsedBytes = vhdxWinDrive.TotalSize - vhdxWinDrive.TotalFreeSpace;
 				if (vhdxUsedBytes > 0 && disk.Size < (long)(vhdxUsedBytes * 1.25) + 512L * 1024 * 1024)
-					throw new InvalidOperationException(
-						"The selected drive is too small for this image.\n\nImage content: " + FormatBytes(vhdxUsedBytes) +
-						"\nSelected drive: " + FormatBytes(disk.Size) + "\n\nNo changes were made — the drive was not formatted.");
+					throw new UserFacingException(string.Format(L("ErrDriveTooSmall"),
+						FormatBytes(vhdxUsedBytes), FormatBytes(disk.Size)));
 				if (vhdxUsedBytes > 2199023255040L - 512L * 1024 * 1024)
-					throw new InvalidOperationException("This image's content (" + FormatBytes(vhdxUsedBytes) + ") is larger than the ~2 TB an MBR restore layout supports, so it cannot be restored to this drive. No changes were made — the drive was not formatted.");
+					throw new UserFacingException(L("ErrMbrTooBig"));
 			}
 			catch (InvalidOperationException) { throw; }
 			catch { }
@@ -5504,9 +5496,9 @@ exit 0
 				finally { _suppressLineProgress = false; rawPollCts.Cancel(); try { await rawPoll; } catch { } }
 			}
 			if (stopRequested || internalOperationStopped)
-				throw new OperationCanceledException("Restore stopped before the copy finished — the drive is incomplete.");
+				throw new StoppedException(L("OpStoppedPartial"));
 			if (rawStats != null && rawStats.DiskFull > 0)
-				throw new InvalidOperationException("The target ran out of space during the copy — the restore is incomplete.");
+				throw new UserFacingException(L("ErrOutOfSpaceTarget"));
 			bool copyOk = File.Exists(Path.Combine(realWindowsFolder, "System32", "winload.efi"))
 				&& File.Exists(Path.Combine(realWindowsFolder, "System32", "config", "SYSTEM"));
 			if (!copyOk)
@@ -5567,7 +5559,7 @@ exit 0
 	{
 		if (!Path.GetExtension(path).Equals(".ffu", StringComparison.OrdinalIgnoreCase))
 		{
-			throw new InvalidOperationException("Restore clone mode requires a full clone file with .ffu extension.");
+			throw new UserFacingException(L("ErrFfuExtension"));
 		}
 
 		// The .ffu must NOT live on the disk we're about to rewrite: DISM /Apply-FFU cleans the whole PhysicalDrive,
@@ -5575,7 +5567,7 @@ exit 0
 		// already guards this at RestoreWimToDriveAsync; the FFU path was missing it.)
 		if (PhysicalDiskOfPath(path) == disk.Number)
 		{
-			throw new InvalidOperationException("The clone image is stored ON the drive you're restoring to — restoring would erase the image itself. Move it to another drive first. No changes were made.");
+			throw new UserFacingException(L("ErrImageOnTarget"));
 		}
 
 		// Validate the .ffu parses as a real FFU BEFORE the destructive apply. DISM /Apply-FFU cleans the whole
@@ -5587,8 +5579,9 @@ exit 0
 		try { await RunProcessCaptureAsync("dism.exe", "/Get-ImageInfo /ImageFile:" + QuoteArgument(path) + " /Index:1"); }
 		catch (Exception vex)
 		{
-			throw new InvalidOperationException(
-				"This .ffu could not be read as a valid FFU image — it may be corrupt or incomplete. No changes were made — the drive was not written.\n\n" + vex.Message);
+			throw new UserFacingException(L("ErrFfuUnreadable")
+				+ Environment.NewLine + Environment.NewLine + L("ErrDetail") + Environment.NewLine
+				+ vex.Message);
 		}
 
 		// Capacity: an FFU is a whole-disk block image that DISM restores at the ORIGINAL captured disk's geometry, so the
@@ -5632,7 +5625,7 @@ exit 0
 		bool restoredOk = int.TryParse(partCheck.Trim(), out int partCount) && partCount > 0;
 		if (!restoredOk)
 		{
-			throw new InvalidOperationException("FFU restore finished but no partitions were found on the target disk. The image may be invalid or the write failed.");
+			throw new UserFacingException(L("ErrFfuNoPartitions"));
 		}
 		Log($"Full clone restored to PhysicalDrive{disk.Number} — {partCount} partition(s) present after restore.");
 	}
@@ -5720,18 +5713,16 @@ exit 0
 		if (!string.Equals(actualSha256, ExpectedWimlibSha256, StringComparison.OrdinalIgnoreCase))
 		{
 			TryDeleteFile(zipPath);
-			throw new InvalidOperationException(
-				"The downloaded clone engine (wimlib) failed its integrity check and was rejected.\n\n" +
-				"Expected SHA-256: " + ExpectedWimlibSha256 + "\nActual SHA-256: " + actualSha256 +
-				"\n\nThe download may be corrupted or blocked. Check your connection and try again.");
+			throw new UserFacingException(L("ErrEngineChecksum")
+				+ Environment.NewLine + Environment.NewLine + L("ErrDetail") + Environment.NewLine
+				+ "Expected SHA-256: " + ExpectedWimlibSha256 + Environment.NewLine
+				+ "Actual SHA-256: " + actualSha256);
 		}
 		Log("Clone engine integrity verified (SHA-256 matches the official wimlib 1.14.4 build).");
 		ZipFile.ExtractToDirectory(zipPath, toolRoot, overwriteFiles: true);
 		if (!TryLockVerifiedWimlib(exePath, dllPath))
 		{
-			throw new FileNotFoundException(
-				"Could not prepare the streaming clone engine: the files extracted from the verified archive did not " +
-				"match their expected SHA-256. Something is modifying " + toolRoot + " while DriveForge is using it.");
+			throw new UserFacingIoException(string.Format(L("ErrEngineExtract"), toolRoot));
 		}
 		Log("Streaming clone engine prepared and locked: " + wimlibVerifiedPath);
 		return wimlibVerifiedPath!;
@@ -6266,7 +6257,17 @@ exit 0
 		return result;
 	}
 
-	private async Task RunRequiredPreflightAsync(DiskItem disk)
+	/// <summary>
+	/// Runs the checks the Start button requires. Returns false when the drive is refused, having already
+	/// told the user why.
+	///
+	/// It used to THROW the health refusal, and StartButton_Click's try has only a finally - so nothing
+	/// caught it and App's DispatcherUnhandledException handler took over: refusing to write to an
+	/// unhealthy drive answered with the crash dialog ("DriveForge hit an unexpected error"), a path to
+	/// crash.log and an invitation to open an issue, all in English. A refusal now reads like the four
+	/// refusals above it in StartButton_Click: a plain translated message, and no operation.
+	/// </summary>
+	private async Task<bool> RunRequiredPreflightAsync(DiskItem disk)
 	{
 		Log("Preflight: checking disk type, health, space, and speed.");
 		UpdateDiskSummary();
@@ -6276,8 +6277,11 @@ exit 0
 		}
 		if (!string.Equals(disk.HealthStatus, "Healthy", StringComparison.OrdinalIgnoreCase) && !string.Equals(disk.HealthStatus, "Unknown", StringComparison.OrdinalIgnoreCase))
 		{
-			throw new InvalidOperationException("The selected drive health is not OK: " + disk.RawHealth);
+			MessageBox.Show(string.Format(L("PfHealthNotOk"), disk.RawHealth), "DriveForge",
+				MessageBoxButton.OK, MessageBoxImage.Warning);
+			return false;
 		}
+		return true;
 	}
 
 	// Health gate before the destructive diskpart 'clean': reads SMART/reliability counters and, if the
@@ -7775,7 +7779,7 @@ exit 0
 		// no error, no retry, and the only clue buried in the log. Throw instead, so the caller's honest failure path
 		// (error status + bounded auto-retry) runs. A real machine running Windows always has at least one disk.
 		if (text == "[]" && !raw.TrimStart().StartsWith("[") && !raw.TrimStart().StartsWith("{"))
-			throw new InvalidOperationException("Windows returned no disk information. Get-Disk may be unavailable (WinPE without the StorageWMI component) or the Virtual Disk service may not be running.\r\n" + raw.Trim());
+			throw new UserFacingException(L("ErrNoDiskInfo") + Environment.NewLine + Environment.NewLine + L("ErrDetail") + Environment.NewLine + raw.Trim());
 		List<DiskItem> list = new List<DiskItem>();
 		using JsonDocument jsonDocument = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "[]" : text);
 		JsonElement rootElement = jsonDocument.RootElement;
@@ -7859,7 +7863,7 @@ exit 0
 		string text = (await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(value))).Split(new char[2] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.Trim() ?? "";
 		if (text.Length == 0)
 		{
-			throw new InvalidOperationException("Could not mount ISO image.");
+			throw new UserFacingException(L("ErrIsoMountFailed"));
 		}
 		Log("ISO mounted at " + text + ":\\");
 		return text + ":\\";
@@ -7891,7 +7895,7 @@ exit 0
 		{
 			return text2;
 		}
-		throw new FileNotFoundException("Could not find sources\\install.wim or sources\\install.esd.");
+		throw new UserFacingIoException(L("ErrNoInstallImage"));
 	}
 
 	private async Task<List<EditionItem>> GetImageEditionsAsync(string imageFile)
@@ -7929,7 +7933,7 @@ exit 0
 				return c;
 			}
 		}
-		throw new InvalidOperationException("No free drive letters are available.");
+		throw new UserFacingException(L("ErrNoDriveLetters"));
 	}
 
 	private string lastReportPath = "";
@@ -8690,7 +8694,7 @@ exit 0
 		{
 			using SafeFileHandle h = CreateFile($"\\\\.\\PhysicalDrive{disk.Number}",
 				0x40000000u /*GENERIC_WRITE*/, 0x3u /*share R/W*/, IntPtr.Zero, 3u /*OPEN_EXISTING*/, 0u, IntPtr.Zero);
-			if (h.IsInvalid) throw new IOException("Could not open the disk for writing (error " + Marshal.GetLastWin32Error() + "). Close any program using it and retry.");
+			if (h.IsInvalid) throw new UserFacingIoException(string.Format(L("ErrOpenDiskWrite"), Marshal.GetLastWin32Error()));
 			using var fs = new FileStream(h, FileAccess.Write);
 			byte[] buffer = new byte[chunk];
 			foreach (int fill in fills)
@@ -9416,7 +9420,7 @@ exit 0
 		{
 			using SafeFileHandle h = CreateFile($"\\\\.\\PhysicalDrive{disk.Number}",
 				0x40000000u /*GENERIC_WRITE*/, 0x3u, IntPtr.Zero, 3u /*OPEN_EXISTING*/, 0u, IntPtr.Zero);
-			if (h.IsInvalid) throw new IOException("Could not open the disk for writing (error " + Marshal.GetLastWin32Error() + ").");
+			if (h.IsInvalid) throw new UserFacingIoException(string.Format(L("ErrOpenDiskWrite"), Marshal.GetLastWin32Error()));
 			using var dst = new FileStream(h, FileAccess.Write);
 			using var src = new FileStream(isoPath, FileMode.Open, FileAccess.Read, FileShare.Read, 8 * 1024 * 1024);
 			int chunk = 8 * 1024 * 1024;
@@ -10124,9 +10128,9 @@ exit 0
 			}
 
 			if (stopRequested || internalOperationStopped)
-				throw new OperationCanceledException("Export stopped before the copy finished — the VHDX is incomplete.");
+				throw new StoppedException(L("OpStoppedPartial"));
 			if (rawStats != null && rawStats.DiskFull > 0)
-				throw new InvalidOperationException("The VHDX ran out of space during the copy — the export is incomplete. Free up space on the destination drive.");
+				throw new UserFacingException(L("ErrOutOfSpaceTarget"));
 			// The Fast Clone engine cannot read EFS-encrypted files (it has no key), so it SKIPS them. Surface the
 			// count so the user is warned the VHDX is missing those files instead of silently losing them.
 			efsSkipped = rawStats?.EfsSkipped ?? 0;
@@ -13834,9 +13838,9 @@ exit 0
 			long done = 0; int read;
 			while (true)
 			{
-				if (stopRequested) throw new OperationCanceledException("Download stopped.");
+				if (stopRequested) throw new StoppedException(L("OpStopped"));
 				while (isPaused && !stopRequested) await Task.Delay(150);   // honor the Pause button
-				if (stopRequested) throw new OperationCanceledException("Download stopped.");
+				if (stopRequested) throw new StoppedException(L("OpStopped"));
 				// Idle/stall guard: abort this read if no bytes arrive within 60s (a dead mirror), so Stop stays responsive.
 				using (var readCts = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
 					read = await src.ReadAsync(buf, 0, buf.Length, readCts.Token);
@@ -13854,7 +13858,7 @@ exit 0
 			await fs.FlushAsync();
 			fs.Dispose();
 			if (total.HasValue && total.Value > 0 && done != total.Value)
-				throw new IOException($"Download incomplete: got {FormatBytes(done)} of {FormatBytes(total.Value)}. The file was not saved.");
+				throw new UserFacingIoException(string.Format(L("ErrDownloadIncomplete"), FormatBytes(done), FormatBytes(total.Value)));
 			File.Move(part, dest, true);
 			ProgressBar.Value = 100.0;
 			SetBusy(busy: false);
@@ -13869,7 +13873,7 @@ exit 0
 		{
 			failed = true; NotifyOperationDone(false);
 			try { if (File.Exists(part)) File.Delete(part); } catch { } // never leave a truncated/partial file behind
-			{ if (ex is OperationCanceledException) { if (!stopRequested) ShowError(L("ErrDownload"), new Exception("The download stalled - no data arrived for 60 seconds; it was stopped and the partial file removed.")); else Log("Download stopped by user; partial file removed."); } else ShowError(L("ErrDownload"), ex); }
+			{ if (ex is OperationCanceledException) { if (!stopRequested) ShowError(L("ErrDownload"), new UserFacingException(L("ErrDownloadStalled"))); else Log("Download stopped by user; partial file removed."); } else ShowError(L("ErrDownload"), ex); }
 		}
 		finally
 		{
@@ -14310,7 +14314,7 @@ exit 0
 	private (long readBytes, int bad, long badBytes, bool stopped, string detail) RunSurfaceScanCore(DiskItem disk)
 	{
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{disk.Number}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException("Could not open the disk for reading.");
+		if (h.IsInvalid) throw new UserFacingIoException(L("ErrOpenDiskRead"));
 		using var fs = new FileStream(h, FileAccess.Read);
 		int block = 8 * 1024 * 1024;
 		byte[] buf = new byte[block];
@@ -15072,7 +15076,7 @@ exit 0
 	{
 		var list = new List<MbrEntry>();
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException("Could not open the disk for reading (run as administrator).");
+		if (h.IsInvalid) throw new UserFacingIoException(L("ErrOpenDiskRead"));
 		using var fs = new FileStream(h, FileAccess.Read);
 		byte[] mbr = new byte[512]; fs.Seek(0, SeekOrigin.Begin); ReadFull(fs, mbr, 512);
 		for (int i = 0; i < 4; i++)
@@ -15094,7 +15098,7 @@ exit 0
 	{
 		const int SS = 512;
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", 0xC0000000u /*GENERIC_READ|WRITE*/, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException("Could not open the disk read/write (error " + Marshal.GetLastWin32Error() + ").");
+		if (h.IsInvalid) throw new UserFacingIoException(string.Format(L("ErrOpenDiskWrite"), Marshal.GetLastWin32Error()));
 		using var fs = new FileStream(h, FileAccess.ReadWrite);
 		long chunkSectors = 16384; // 8 MiB
 		byte[] buf = new byte[chunkSectors * SS];
@@ -15147,7 +15151,7 @@ exit 0
 	private void UpdateMbrEntryStart(int diskNumber, int entryIndex, long newStartLBA)
 	{
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", 0xC0000000u, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException("Could not open the disk to update the partition table.");
+		if (h.IsInvalid) throw new UserFacingIoException(string.Format(L("ErrOpenDiskWrite"), Marshal.GetLastWin32Error()));
 		using var fs = new FileStream(h, FileAccess.ReadWrite);
 		byte[] mbr = new byte[512]; fs.Seek(0, SeekOrigin.Begin); ReadFull(fs, mbr, 512);
 		int eo = 446 + entryIndex * 16;
@@ -15334,7 +15338,7 @@ exit 0
 	{
 		var g = new GptInfo();
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException("Could not open the disk for reading (run as administrator).");
+		if (h.IsInvalid) throw new UserFacingIoException(L("ErrOpenDiskRead"));
 		using var fs = new FileStream(h, FileAccess.Read);
 		// ONE aligned read covering both candidate layouts, then probe in memory. Reading 512 bytes from offset 512
 		// is not sector-aligned on a 4Kn disk, and this handle does unbuffered I/O — so the 512 attempt did not just
@@ -15350,7 +15354,7 @@ exit 0
 			Array.Copy(head, cand, hdr, 0, cand);
 			ss = cand; g.PrimaryHeader = hdr; break;
 		}
-		if (ss == 0) throw new IOException("No GPT header found on this disk.");
+		if (ss == 0) throw new UserFacingIoException(L("ErrNoGptHeader"));
 		g.SectorSize = ss;
 		var ph = g.PrimaryHeader;
 		g.HeaderSize = (int)BitConverter.ToUInt32(ph, 12);
@@ -15855,7 +15859,7 @@ exit 0
 	{
 		var list = new List<FoundPart>();
 		using var h = CreateFile($"\\\\.\\PhysicalDrive{diskNumber}", GenericRead, 0x3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero);
-		if (h.IsInvalid) throw new IOException("Could not open the disk for reading (run as administrator).");
+		if (h.IsInvalid) throw new UserFacingIoException(L("ErrOpenDiskRead"));
 		using var fs = new FileStream(h, FileAccess.Read);
 		long step = 1L << 20; // partitions align to 1 MiB on modern disks
 		long total = diskSize > 0 ? diskSize : 256L << 30;
@@ -16287,7 +16291,7 @@ exit 0
 		}
 		else
 		{
-			ShowError(L("ErrLogsFolder"), new InvalidOperationException("Could not write the log file to the Desktop."));
+			ShowError(L("ErrLogsFolder"), new UserFacingException(L("ErrLogWriteFailed")));
 		}
 	}
 
@@ -17357,10 +17361,55 @@ exit 0
 		ToolOutputBox.ScrollToEnd();
 	}
 
+	/// <summary>Marks a failure whose message is already in the user's language, so ShowError prints it
+	/// as it is - with no technical-detail label - and offers no bug report.</summary>
+	private interface IUserFacingMessage { }
+
+	/// <summary>A refusal the user can act on, already translated. It stays an InvalidOperationException
+	/// because flows like the VHDX restore use that type to tell a refusal apart from a probe failure
+	/// (`catch (InvalidOperationException) { throw; } catch { }`): a refusal that changed type would be
+	/// swallowed by that second catch and the restore would run on to a drive it had just refused.</summary>
+	private sealed class UserFacingException : InvalidOperationException, IUserFacingMessage
+	{
+		public UserFacingException(string message) : base(message) { }
+	}
+
+	/// <summary>The same, for the disk-access refusals thrown as IOException, which keep that type so
+	/// every `catch (IOException)` around them behaves exactly as before.</summary>
+	private sealed class UserFacingIoException : IOException, IUserFacingMessage
+	{
+		public UserFacingIoException(string message) : base(message) { }
+	}
+
+	/// <summary>A stop the user asked for, carrying a translated message. Derives from
+	/// OperationCanceledException so the typed catches that already recognise a cancel still do.</summary>
+	private sealed class StoppedException : OperationCanceledException, IUserFacingMessage
+	{
+		public StoppedException(string message) : base(message) { }
+	}
+
 	private void ShowError(string title, Exception ex)
 	{
 		Log(title + ": " + ex.Message);
-		MessageBox.Show(title + ":" + Environment.NewLine + ex.Message, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Hand);
+		// A Stop is not a failure. Three flows unwound by throwing OperationCanceledException with no typed
+		// catch ahead of the broad one, so Stop answered with a red error box and then asked for a bug report
+		// about something the user cancelled on purpose. stopRequested is required: a cancellation nobody
+		// asked for - the download stall guard's 60-second token - is a real failure and must still look it.
+		if (ex is OperationCanceledException && stopRequested)
+		{
+			MessageBox.Show(ex is StoppedException ? ex.Message : L("OpStopped"), "DriveForge",
+				MessageBoxButton.OK, MessageBoxImage.Information);
+			return;
+		}
+		// ex.Message is printed verbatim and most of it cannot be translated: a framework message, a Win32
+		// message, the output of a tool that failed. The title above it IS translated, so without a label the
+		// dialog reads as though the English sentence were the app speaking. Naming that line in the user's
+		// own language is the only fix that reaches all of them.
+		bool translated = ex is IUserFacingMessage;
+		MessageBox.Show(title + ":" + Environment.NewLine
+				+ (translated ? "" : Environment.NewLine + L("ErrDetail") + Environment.NewLine)
+				+ ex.Message, "DriveForge", MessageBoxButton.OK,
+			translated ? MessageBoxImage.Warning : MessageBoxImage.Hand);
 		// Offer to report ONLY when an operation was actually running. A catch block runs before its finally, so
 		// isBusy is still true for a genuine operation failure, and false for the trivial ones (a page that would
 		// not open, a dialog that was declined) which must not nag. This is where the useful reports come from:
@@ -17370,7 +17419,10 @@ exit 0
 		// _refreshOwnsBusy: a disk rescan raises busy but is not an operation the user started; a failing scan at
 		// startup would otherwise ask for a bug report before they had done anything at all.
 		// headlessRun: a scheduled unattended clone must never block on a dialog nobody is there to answer.
-		if (!isBusy || stopRequested || headlessRun || _refreshOwnsBusy || _reportOffered) return;
+		// IUserFacingMessage: a refusal is the app working correctly. Asking for a bug report about
+		// "The selected image file no longer exists." trains people to ignore the offer.
+		if (!isBusy || stopRequested || headlessRun || _refreshOwnsBusy || _reportOffered
+				|| ex is IUserFacingMessage) return;
 		_reportOffered = true;   // one offer per operation — a failing loop cannot queue up a stack of prompts
 		if (MessageBox.Show(L("RepOffer"), "DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Question,
 				MessageBoxResult.No) == MessageBoxResult.Yes)
