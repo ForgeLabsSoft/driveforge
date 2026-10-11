@@ -15725,8 +15725,13 @@ exit 0
 			SetToolOutput("diskpart create partition\r\n\r\n" + outp);
 			Log($"Create partition on Disk {disk.Number} ({fs}): diskpart finished.");
 			await RefreshDisksAsync();
-			// diskpart exits 0 even when it DECLINED the operation, and its result text is localized so it
-			// cannot be parsed - the same wall the Resize flow hit, and the same way through it: measure.
+			// diskpart's exit code is not a uniform signal, and the text that would say is localized. Measured
+			// on real hardware (MBR disk, zero usable space, diskpart 10.0.26100.1150): `create partition
+			// primary` answers "There is not enough usable space for this operation" and exits 0x8004240F, so
+			// THAT refusal does throw and never reaches here. But `format fs=fat32` above 32 GB fails and exits
+			// 0 - recorded twice in this file, and the reason its guard exists. Which kind a refusal is cannot
+			// be read off the exit code, so the state gets read back. Same wall the Resize flow hit, same way
+			// through it: measure.
 			// A partition that was created is visible in the partition COUNT, whatever language Windows speaks.
 			// Windows refusing to say (-1) is not evidence of failure, so that case keeps the old benefit of
 			// the doubt, exactly as the resize flow's `measured` does.
@@ -15776,8 +15781,13 @@ exit 0
 			SetToolOutput("diskpart delete volume\r\n\r\n" + outp);
 			Log($"Delete volume {letter}: on Disk {disk.Number}: diskpart finished.");
 			await RefreshDisksAsync();
-			// diskpart exits 0 even when it DECLINED the operation, and its result text is localized so it
-			// cannot be parsed - the same wall the Resize flow hit, and the same way through it: measure.
+			// diskpart's exit code is not a uniform signal, and the text that would say is localized. Measured
+			// on real hardware (MBR disk, zero usable space, diskpart 10.0.26100.1150): `create partition
+			// primary` answers "There is not enough usable space for this operation" and exits 0x8004240F, so
+			// THAT refusal does throw and never reaches here. But `format fs=fat32` above 32 GB fails and exits
+			// 0 - recorded twice in this file, and the reason its guard exists. Which kind a refusal is cannot
+			// be read off the exit code, so the state gets read back. Same wall the Resize flow hit, same way
+			// through it: measure.
 			// A partition that went away is visible in the partition COUNT, whatever language Windows speaks.
 			// Windows refusing to say (-1) is not evidence of failure, so that case keeps the old benefit of
 			// the doubt, exactly as the resize flow's `measured` does.

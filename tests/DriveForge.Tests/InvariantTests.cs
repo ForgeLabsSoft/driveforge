@@ -1354,10 +1354,19 @@ public class InvariantTests
 	/// <summary>
 	/// A disk's new state is read back before it is announced - and read back for the thing claimed.
 	///
-	/// diskpart exits 0 on operations it declined. That is not a guess: this file says so in its own
-	/// comments in four places, and the Resize flow was rebuilt around it - "the only locale-safe way to
-	/// know whether anything actually changed is to compare the real volume size before/after". Parsing
-	/// the output instead is not available, because it is localized in sixteen of the seventeen languages.
+	/// diskpart's exit code does not tell you whether it did the thing.
+	///
+	/// Not uniformly, which is the awkward part. Measured on real hardware - an MBR disk with zero usable
+	/// space, diskpart 10.0.26100.1150 - `create partition primary` answers "There is not enough usable
+	/// space for this operation" and exits 0x8004240F, so that refusal throws and is reported. But
+	/// `format fs=fat32` above 32 GB fails and exits 0; that is recorded twice in MainWindow.cs and is
+	/// why its guard exists. An earlier version of this comment claimed the exit-0 behaviour as the rule
+	/// rather than one case of it, and the measurement above is what corrected it.
+	///
+	/// So: which kind of refusal happened cannot be read off the exit code, and the text that would say
+	/// is localized in sixteen of the seventeen languages. The Resize flow reached the same conclusion
+	/// first - "the only locale-safe way to know whether anything actually changed is to compare the real
+	/// volume size before/after".
 	///
 	/// Set active read nothing at all and announced the flag unconditionally. Quick partition named a
 	/// COUNT it never counted, three lines under a comment explaining that diskpart abandons the rest of
@@ -1436,7 +1445,8 @@ public class InvariantTests
 				+ " to evidenceFor with the reading that proves it) or work the flow measured itself (add it to"
 				+ " measuredAsWork, with the reason):\n  " + string.Join("\n  ", unclassified));
 		Assert.True(missing.Count == 0,
-			"diskpart exits 0 on operations it declined, so each of these announces a disk state without the"
-				+ " reading that would show it really happened:\n  " + string.Join("\n  ", missing));
+			"diskpart's exit code does not reliably say whether it did the thing, so each of these"
+				+ " announces a disk state without the reading that would show it happened:\n  "
+				+ string.Join("\n  ", missing));
 	}
 }
