@@ -622,6 +622,53 @@ public class LocalizationTests
 				+ string.Join("\n  ", offenders.Distinct()));
 	}
 
+	/// <summary>
+	/// How much of a clone gets byte-compared on screen is how much gets byte-compared.
+	///
+	/// "Verify cloned data after writing" promised, in all seventeen languages, to "re-read every file
+	/// from the drive and compare it to the original to catch a bad USB stick". It does not. Every file
+	/// is checked for presence and exact SIZE - metadata, no read-back - and the byte-for-byte compare
+	/// runs on boot-critical paths plus a rotating 1-in-N sample of the rest. Seven files in eight are
+	/// never re-read, and a stick that flips a byte inside a large file has exactly the right size, so
+	/// the failure the tooltip names is the failure the method cannot see.
+	///
+	/// This had already been found once. BuildFullRootUsbCloneReportText spells the method out and says
+	/// so in a comment: the old wording "promised a byte-compare of every file, and the verdict below
+	/// then claimed no silent corruption exists - a guarantee a size check cannot give". That correction
+	/// was made to the English report and never reached the sentence the user reads before ticking the
+	/// box, which is the only place the promise is made in their own language.
+	///
+	/// The tooltip now carries the number, so this ties it to the constant. One assertion covers both
+	/// ways it can go wrong: a tooltip that drops the number (the old wording had none) and a constant
+	/// that moves away from the tooltip.
+	/// </summary>
+	[Fact]
+	public void TheShareOfACloneThatIsByteComparedIsTheShareOnScreen()
+	{
+		string code = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		var decl = Regex.Match(code, @"const\s+int\s+ContentVerifySampleEvery\s*=\s*(\d+)");
+		Assert.True(decl.Success,
+			"ContentVerifySampleEvery is gone - this rule no longer knows what the verifier samples.");
+		string every = decl.Groups[1].Value;
+		
+		var wrong = new List<string>();
+		foreach (string lang in Strings.Keys)
+		{
+			if (!Strings[lang].TryGetValue("VerifyContentCheckTip", out string? tip))
+			{
+				wrong.Add($"{lang}: missing");
+				continue;
+			}
+			// The number, with digit boundaries so 8 does not match 18 or 80. Which words a language puts
+			// around it is its own business; that it tells the user the share is not.
+			if (!Regex.IsMatch(tip, $@"(?<![0-9]){every}(?![0-9])"))
+				wrong.Add($"{lang}: {tip}");
+		}
+		Assert.True(wrong.Count == 0,
+			$"The verifier byte-compares boot files plus 1 in {every} of the rest. The checkbox that offers"
+				+ " it must say that share, and these do not:\n  " + string.Join("\n  ", wrong));
+	}
+
 	/// <summary>A declaration that holds text. Nothing else is followed back.</summary>
 	private static bool IsString(string? declaredType) =>
 		declaredType is "string" or "string?" or "String" or "String?";
