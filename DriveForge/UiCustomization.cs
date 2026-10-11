@@ -266,8 +266,16 @@ public partial class MainWindow
 		//
 		// Only while idle: during a run these same labels carry progress ("Cleaning temporary files…"), and
 		// overwriting that with a finished-looking total would be a worse lie than the wrong language.
-		if (!isBusy && CleanStatusText != null && _cleanCats != null && _cleanCats.Any(c => c.Size > 0))
-			CleanStatusText.Text = string.Format(L("CleanAnalyzeResult"), FormatBytes(_cleanCats.Sum(c => c.Size)));
+		// Re-derive whichever line is actually on screen. This used to always rebuild ANALYZE's sentence:
+		// it summed every category including the ones Advanced hides, it summed the -1 sentinel of every
+		// row that had not been measured, and after a clean it replaced the run's own result with a
+		// different claim rather than translating it.
+		if (!isBusy && CleanStatusText != null)
+		{
+			string? ran = CleanRunResultLine();
+			if (ran != null) CleanStatusText.Text = ran;
+			else UpdateCleanAnalyzeLine(force: true);
+		}
 		if (!isBusy && _lastScan != null) UpdateRecoverSelectionInfo();
 		// The same trap, and it swallowed the whole Drive tools card. ToolHealthText, ToolDriveTitleText,
 		// ToolSerialText, ToolFirmwareText, ToolInterfaceText, ToolSizeText and ToolRecommendationDetailText are all

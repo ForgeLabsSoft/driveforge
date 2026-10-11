@@ -701,10 +701,16 @@ public class InvariantTests
 		int loop = src.IndexOf("FindName(key)", StringComparison.Ordinal);
 		Assert.True(loop >= 0, "ApplyLanguage no longer looks like the FindName loop this rule reasons about.");
 
+		// The cleaner's line is no longer formatted here. ApplyLanguage used to always rebuild ANALYZE's
+		// sentence, which summed hidden categories and the -1 sentinel of unmeasured ones, and replaced a
+		// finished run's "Done - freed ..." with a different claim instead of translating it. Both lines
+		// are now re-derived by the method that owns each, and BOTH are required: dropping either loses a
+		// line to the language it was written in.
 		(string Needle, string What)[] required =
 		{
 			("UpdateRecoverSelectionInfo()", "the Recover result line (\"20 deleted files\")"),
-			("CleanAnalyzeResult", "the Clean result line (\"About 2.0 GB can be freed.\")"),
+			("CleanRunResultLine()", "the finished Clean run's line (\"Done - freed 1.2 GB\")"),
+			("UpdateCleanAnalyzeLine(", "the Clean analysis line (\"About 2.0 GB can be freed.\")"),
 		};
 
 		List<string> missing = new List<string>();
@@ -1146,14 +1152,26 @@ public class InvariantTests
 	[Fact]
 	public void AStoppedCleanIsNotReportedAsAFinishedOne()
 	{
-		var found = SourceModel.Methods().Where(m => m.Name == "CleanRun_Click").ToArray();
-		Assert.True(found.Length == 1, $"Expected one CleanRun_Click, found {found.Length}.");
-		string code = string.Join("\n", found[0].Method.ToString().Split('\n')
-			.Where(l => !l.TrimStart().StartsWith("//")));
+		// CleanRun_Click records the run and CleanRunResultLine turns it into a sentence, so the wording
+		// lives in one place and a language change can re-derive it. Both are read here: taking the
+		// stopped branch out of either one brings the defect back.
+		string[] owners = { "CleanRun_Click", "CleanRunResultLine" };
+		var bodies = new Dictionary<string, string>(StringComparer.Ordinal);
+		foreach (string owner in owners)
+		{
+			var hit = SourceModel.Methods().Where(m => m.Name == owner).ToArray();
+			Assert.True(hit.Length == 1, $"Expected one {owner}, found {hit.Length}.");
+			bodies[owner] = string.Join("\n", hit[0].Method.ToString().Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//")));
+		}
+		string code = bodies["CleanRun_Click"];
 
-		Assert.True(code.Contains("CleanStopped", StringComparison.Ordinal),
+		Assert.True(bodies["CleanRunResultLine"].Contains("CleanStopped", StringComparison.Ordinal),
 			"A stopped clean still says \"Done\", while the categories it never reached sit in the list "
 			+ "still ticked, looking as though they had been dealt with.");
+		Assert.True(Regex.IsMatch(code, @"stopRequested\s*\)\s*;|,\s*stopRequested\s*\)"),
+			"CleanRun_Click no longer tells the line whether the run was stopped, so the stopped wording "
+			+ "above can never be reached.");
 		Assert.True(Regex.IsMatch(code, @"if\s*\(\s*!stopRequested\s*\)\s*ProgressBar\.Value\s*=\s*100"),
 			"The bar is driven to 100% even when the run was stopped, which is the same claim in the one "
 			+ "place a person looks first.");
@@ -1826,5 +1844,83 @@ public class InvariantTests
 	{
 		string t = Regex.Replace(s, @"\s+", " ").Trim();
 		return t.Length > 120 ? t.Substring(0, 120) : t;
+	}
+
+	/// <summary>
+	/// The cleaner decides what is on screen in one place, and everything that acts on the categories
+	/// asks it.
+	///
+	/// It used to be decided in three places and they disagreed. The run cleaned what was ticked AND
+	/// visible; the total on the Clean button summed everything ticked, visible or not; Analyze's
+	/// "About X can be freed." summed every category there was. Tick Show advanced, tick the Windows
+	/// Update cache, untick Show advanced: the button read "Clean 4.1 GB", the run freed 0.3 GB, and
+	/// the line afterwards said "Done - freed 0.3 GB". No single line was wrong. There were three.
+	///
+	/// Two halves, because the defect had two shapes. The button's was an OMISSION - it mentioned
+	/// neither _cleanAdvanced nor Risk, so a rule hunting stray copies of the predicate would have
+	/// sailed straight past it, and the first version of this rule did.
+	///
+	///   (a) anything that enumerates _cleanCats either owns the whole list for a reason recorded
+	///       below, or asks IsCleanVisible / SelectedCleanCategories;
+	///   (b) _cleanAdvanced is read only by the predicate and written only by its own toggle, and
+	///       `Risk == 0` is compared only by the predicate and by Recommended - which uses the same
+	///       number to mean something else on purpose (recommended = the green ones).
+	/// </summary>
+	[Fact]
+	public void TheCleanerDecidesWhatIsOnScreenInOnePlace()
+	{
+		// Methods that legitimately walk EVERY category, whatever is on screen:
+		//   EnsureCleanCategories  - builds the list and wires its change events
+		//   RefreshCleanLabels     - re-localises every row on a language change
+		//   CleanRecommended_Click - ticks the green ones and UNTICKS the rest, hidden ones included
+		//   CleanAnalyze_Click     - sizes every row, so the numbers are ready when Advanced is turned on
+		var ownsTheWholeList = new HashSet<string>(StringComparer.Ordinal)
+		{
+			"EnsureCleanCategories", "RefreshCleanLabels", "CleanRecommended_Click", "CleanAnalyze_Click",
+		};
+		var advancedAllowed = new HashSet<string>(StringComparer.Ordinal)
+			{ "IsCleanVisible", "CleanAdvancedToggle_Click" };
+		var greenAllowed = new HashSet<string>(StringComparer.Ordinal)
+			{ "IsCleanVisible", "CleanRecommended_Click" };
+
+		var complaints = new List<string>();
+		var advancedIn = new SortedSet<string>(StringComparer.Ordinal);
+		var greenIn = new SortedSet<string>(StringComparer.Ordinal);
+		int users = 0;
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			string text = method.ToString();
+			if (Regex.IsMatch(text, @"\b_cleanAdvanced\b")) advancedIn.Add(name);
+			// `Risk == 0`, `Risk != 0`, `0 == Risk` - any comparison of the risk badge against green.
+			if (Regex.IsMatch(text, @"\bRisk\s*[!=]=\s*0\b|\b0\s*[!=]=\s*[A-Za-z_.]*Risk\b"))
+				greenIn.Add(name);
+
+			// Enumerating the list: `_cleanCats.Where(...)`, `_cleanCats.ToList()`, `in _cleanCats`.
+			// A null check (`_cleanCats == null`) is not an enumeration and is not counted.
+			if (!Regex.IsMatch(text, @"_cleanCats\s*[.)]|\bin\s+_cleanCats\b")) continue;
+			users++;
+			if (ownsTheWholeList.Contains(name)) continue;
+			if (Regex.IsMatch(text, @"\bIsCleanVisible\b|\bSelectedCleanCategories\b")) continue;
+			complaints.Add($"{name} ({SourceModel.Where(file, method)}) walks the category list without asking "
+				+ "IsCleanVisible or SelectedCleanCategories, so whatever it counts or acts on is its own idea of "
+				+ "what is on screen");
+		}
+		Assert.True(users >= 4, $"only {users} methods enumerate _cleanCats - the scan is wrong, not the code.");
+		Assert.True(advancedIn.Count > 0, "nothing reads _cleanAdvanced - the scan is wrong, not the code.");
+		Assert.True(greenIn.Count > 0, "nothing compares Risk against 0 - the scan is wrong, not the code.");
+
+		foreach (string m in advancedIn.Where(m => !advancedAllowed.Contains(m)))
+			complaints.Add($"{m} reads _cleanAdvanced itself instead of asking IsCleanVisible");
+		foreach (string m in greenIn.Where(m => !greenAllowed.Contains(m)))
+			complaints.Add($"{m} compares Risk against 0 itself instead of asking IsCleanVisible");
+		foreach (string m in advancedAllowed.Where(m => !advancedIn.Contains(m)))
+			complaints.Add($"{m} no longer reads _cleanAdvanced - if that moved, move this list with it");
+		foreach (string m in greenAllowed.Where(m => !greenIn.Contains(m)))
+			complaints.Add($"{m} no longer compares Risk against 0 - if that moved, move this list with it");
+
+		Assert.True(complaints.Count == 0,
+			"The cleaner must decide what is on screen in ONE place. Every other copy of that decision, and "
+				+ "every list walked without it, is a number this screen can promise and the run will not keep:"
+				+ "\n  " + string.Join("\n  ", complaints));
 	}
 }

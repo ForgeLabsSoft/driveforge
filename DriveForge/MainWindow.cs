@@ -10505,7 +10505,6 @@ exit 0
 		public string GroupKey = "";
 		public string DescKey = "";
 		public int Risk;
-		public bool RequiresAdmin;
 		public bool RecycleBin, DnsCache, Clipboard;
 		public string[] RegKeys = System.Array.Empty<string>();
 		private string _label = ""; public string Label { get => _label; set { _label = value; OnPC(nameof(Label)); } }
@@ -10522,13 +10521,13 @@ exit 0
 		new() { Key = "Temp",      LabelKey = "ChkCleanTemp",      GroupKey = "CcGrpSystem",  DescKey = "CcDescTemp",     Risk = 0, IsChecked = true },
 		new() { Key = "Thumbs",    LabelKey = "ChkCleanThumbs",    GroupKey = "CcGrpSystem",  DescKey = "CcDescThumbs",   Risk = 0, IsChecked = true },
 		new() { Key = "Recycle",   LabelKey = "ChkCleanRecycle",   GroupKey = "CcGrpSystem",  DescKey = "CcDescRecycle",  Risk = 0, RecycleBin = true, IsChecked = true },
-		new() { Key = "Crashes",   LabelKey = "CcCrashes",         GroupKey = "CcGrpSystem",  DescKey = "CcDescCrashes",  Risk = 0, RequiresAdmin = true },
+		new() { Key = "Crashes",   LabelKey = "CcCrashes",         GroupKey = "CcGrpSystem",  DescKey = "CcDescCrashes",  Risk = 0 },
 		new() { Key = "Prefetch",  LabelKey = "ChkCleanPrefetch",  GroupKey = "CcGrpSystem",  DescKey = "CcDescPrefetch", Risk = 1 },
-		new() { Key = "FontCache", LabelKey = "CcFontCache",       GroupKey = "CcGrpSystem",  DescKey = "CcDescFontCache",Risk = 1, RequiresAdmin = true },
+		new() { Key = "FontCache", LabelKey = "CcFontCache",       GroupKey = "CcGrpSystem",  DescKey = "CcDescFontCache",Risk = 1 },
 		// Windows
-		new() { Key = "Update",      LabelKey = "ChkCleanUpdate", GroupKey = "CcGrpWindows", DescKey = "CcDescUpdate",      Risk = 1, RequiresAdmin = true },
-		new() { Key = "DeliveryOpt", LabelKey = "CcDeliveryOpt",  GroupKey = "CcGrpWindows", DescKey = "CcDescDeliveryOpt", Risk = 1, RequiresAdmin = true },
-		new() { Key = "WinLogs",     LabelKey = "CcWinLogs",      GroupKey = "CcGrpWindows", DescKey = "CcDescWinLogs",     Risk = 1, RequiresAdmin = true },
+		new() { Key = "Update",      LabelKey = "ChkCleanUpdate", GroupKey = "CcGrpWindows", DescKey = "CcDescUpdate",      Risk = 1 },
+		new() { Key = "DeliveryOpt", LabelKey = "CcDeliveryOpt",  GroupKey = "CcGrpWindows", DescKey = "CcDescDeliveryOpt", Risk = 1 },
+		new() { Key = "WinLogs",     LabelKey = "CcWinLogs",      GroupKey = "CcGrpWindows", DescKey = "CcDescWinLogs",     Risk = 1 },
 		// Browsers
 		new() { Key = "Browser",   LabelKey = "ChkCleanBrowser",   GroupKey = "CcGrpBrowsers", DescKey = "CcDescBrowser",  Risk = 1 },
 		// Apps
@@ -10563,7 +10562,7 @@ exit 0
 			var cvs = new System.Windows.Data.CollectionViewSource { Source = _cleanCats };
 			cvs.GroupDescriptions.Add(new System.Windows.Data.PropertyGroupDescription(nameof(CleanCategory.Group)));
 			_cleanView = cvs.View;
-			_cleanView.Filter = o => _cleanAdvanced || (o as CleanCategory)?.Risk == 0;
+			_cleanView.Filter = o => o is CleanCategory cc && IsCleanVisible(cc);
 			if (CleanCatItems != null) CleanCatItems.ItemsSource = _cleanView;
 		}
 		RefreshCleanLabels();
@@ -10578,11 +10577,66 @@ exit 0
 		_cleanView?.Refresh();
 	}
 
+	/// <summary>Is this category on screen? One predicate: the view's filter, Select all, and the total
+	/// on the button all ask the same question, so none of them can answer it differently.</summary>
+	private bool IsCleanVisible(CleanCategory c) => _cleanAdvanced || c.Risk == 0;
+
+	/// <summary>Exactly what a run would clean: ticked AND on screen. The run always used this rule; the
+	/// button's total and Select all each had their own, which is how the button came to promise bytes
+	/// the run would not touch.</summary>
+	private IEnumerable<CleanCategory> SelectedCleanCategories() =>
+		_cleanCats == null ? Enumerable.Empty<CleanCategory>()
+			: _cleanCats.Where(c => c.IsChecked && IsCleanVisible(c));
+
 	private void RecomputeCleanTotal()
 	{
 		if (_cleanCats == null || CleanRunButton == null) return;
-		long sum = _cleanCats.Where(c => c.IsChecked && c.Size > 0).Sum(c => c.Size);
+		long sum = SelectedCleanCategories().Where(c => c.Size > 0).Sum(c => c.Size);
 		CleanRunButton.Content = sum > 0 ? string.Format(L("CleanBtnTotal"), FormatBytes(sum)) : L("CleanRunButton");
+	}
+
+	// The line Analyze last wrote, so toggling Advanced afterwards rewrites ITS line and leaves a run's
+	// "Done - freed ..." or a Stop notice alone.
+	private string _cleanAnalyzeLine = "";
+
+	// The last run's numbers, so a language change can re-format its line instead of replacing it with a
+	// different claim. ApplyLanguage used to overwrite it with Analyze's sentence: finish a clean, change
+	// the language, and "Done - freed 1.2 GB (431 files removed)." became "About 3.4 GB can be freed."
+	private (long Freed, int Files, long Binned, int BinnedFiles, int NotCleaned, bool Stopped)? _lastCleanRun;
+
+	/// <summary>The finished run's line, built from the numbers rather than remembered as a sentence.
+	/// Null when no run has finished since the last analysis.</summary>
+	private string? CleanRunResultLine()
+	{
+		if (_lastCleanRun == null) return null;
+		var r = _lastCleanRun.Value;
+		string msg = r.Stopped
+			? string.Format(L("CleanStopped"), FormatBytes(r.Freed), r.Files, r.NotCleaned)
+			: string.Format(L("CleanDone"), FormatBytes(r.Freed), r.Files);
+		if (r.BinnedFiles > 0)
+			msg += " " + string.Format(L("CleanDoneRecycled"), FormatBytes(r.Binned), r.BinnedFiles);
+		return msg;
+	}
+
+	/// <summary>
+	/// Re-states what this screen can free. "About X can be freed." used to be the sum of EVERY
+	/// category, including the ones hidden behind Advanced - a promise the Clean button had no way of
+	/// keeping, since a run only ever touched what was on screen. The actionable total goes first and
+	/// what is behind Advanced is named rather than folded in.
+	///
+	/// Re-derived from the sizes already measured, so flipping Advanced costs nothing.
+	/// </summary>
+	private void UpdateCleanAnalyzeLine(bool force = false)
+	{
+		if (_cleanCats == null || CleanStatusText == null || _cleanAnalyzeLine.Length == 0 && !force) return;
+		if (!force && !string.Equals(CleanStatusText.Text, _cleanAnalyzeLine, StringComparison.Ordinal))
+			return;
+		long here = _cleanCats.Where(c => IsCleanVisible(c) && c.Size > 0).Sum(c => c.Size);
+		long hidden = _cleanCats.Where(c => !IsCleanVisible(c) && c.Size > 0).Sum(c => c.Size);
+		string line = string.Format(L("CleanAnalyzeResult"), FormatBytes(here));
+		if (hidden > 0) line += " " + string.Format(L("CleanAnalyzeAdvanced"), FormatBytes(hidden));
+		_cleanAnalyzeLine = line;
+		CleanStatusText.Text = line;
 	}
 
 	private void CleanRecommended_Click(object sender, RoutedEventArgs e)
@@ -10596,6 +10650,9 @@ exit 0
 	{
 		_cleanAdvanced = (sender as CheckBox)?.IsChecked == true;
 		_cleanView?.Refresh();
+		// Both numbers on this screen depend on what is visible, so neither may survive the toggle unchanged.
+		RecomputeCleanTotal();
+		UpdateCleanAnalyzeLine();
 	}
 
 	private void ShowCleanView()
@@ -10628,7 +10685,7 @@ exit 0
 	{
 		EnsureCleanCategories();
 		if (_cleanCats == null) return;
-		foreach (var c in _cleanCats) if (_cleanAdvanced || c.Risk == 0) c.IsChecked = true; // only what's visible
+		foreach (var c in _cleanCats) if (IsCleanVisible(c)) c.IsChecked = true;   // only what's visible
 	}
 
 	// HARD SAFETY GUARD for every clean target. Refuses a path that IS a drive root, the user profile, the Windows
@@ -10724,12 +10781,16 @@ exit 0
 		return dirs;
 	}
 
-	private static long RecycleBinSize()
+	/// <summary>The Recycle Bin across ALL drives (a null root means every drive, which is also what
+	/// SHEmptyRecycleBin is called with): its size and how many items are in it.</summary>
+	private static (long Bytes, long Items) RecycleBinContents()
 	{
 		var info = new SHQUERYRBINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<SHQUERYRBINFO>() };
-		try { if (SHQueryRecycleBin(null, ref info) == 0) return info.i64Size; } catch { }
-		return 0;
+		try { if (SHQueryRecycleBin(null, ref info) == 0) return (info.i64Size, info.i64NumItems); } catch { }
+		return (0L, 0L);
 	}
+
+	private static long RecycleBinSize() => RecycleBinContents().Bytes;
 
 	private static long CategorySize(CleanCategory c)
 	{
@@ -10927,7 +10988,10 @@ exit 0
 		try
 		{
 			var cats = _cleanCats.ToList();
-			if (CleanStatusText != null) CleanStatusText.Text = L("CleanAnalyzing");
+			// A new measurement supersedes the previous run's line, so a later language change re-derives
+		// what this screen is claiming now rather than a stale result.
+		_lastCleanRun = null;
+		if (CleanStatusText != null) CleanStatusText.Text = L("CleanAnalyzing");
 			foreach (var c in cats) if (!c.DnsCache && !c.Clipboard && c.RegKeys.Length == 0) c.SizeText = "…";
 			// Size every category concurrently (CategorySize is static + side-effect-free), update labels as they land.
 			var jobs = cats.Select(c => (cat: c, task: Task.Run(() => CategorySize(c)))).ToList();
@@ -10935,12 +10999,14 @@ exit 0
 			foreach (var (cat, task) in jobs)
 			{
 				long size = await task;
-				grand += size;
+				grand += size;   // every category, including the ones Advanced hides
 				cat.Size = size;
 				cat.SizeText = (cat.DnsCache || cat.Clipboard || cat.RegKeys.Length > 0) ? "" : FormatBytes(size);
 			}
 			RecomputeCleanTotal();
-			if (CleanStatusText != null) CleanStatusText.Text = string.Format(L("CleanAnalyzeResult"), FormatBytes(grand));
+			// grand is every category's size, which is what the list needs; the LINE states what this screen
+			// can actually free, plus what is sitting behind Advanced.
+			UpdateCleanAnalyzeLine(force: true);
 		}
 		finally
 		{
@@ -10956,8 +11022,9 @@ exit 0
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		EnsureCleanCategories();
 		if (_cleanCats == null) return;
-		// Only clean items that are both ticked AND currently visible (hidden advanced items aren't acted on).
-		var cats = _cleanCats.Where(c => c.IsChecked && (_cleanAdvanced || c.Risk == 0)).ToList();
+		// Ticked AND on screen - hidden advanced items are not acted on. This rule now lives in one place,
+		// because the button's total and Select all each used to carry their own copy of it.
+		var cats = SelectedCleanCategories().ToList();
 		if (cats.Count == 0) { if (CleanStatusText != null) CleanStatusText.Text = L("CleanNothingSelected"); return; }
 		string sel = string.Join("\n", cats.Select(c => "• " + c.Label));
 		// Extra warning when an advanced (red) privacy item is included.
@@ -10968,7 +11035,7 @@ exit 0
 		// drive tools, kit) still ENABLED during a multi-minute clean, and left Stop greyed out so the run could not
 		// be aborted. SetBusy disables those and enables Stop, which the delete loop now polls.
 		_cleanBusy = true; stopRequested = false;
-		SetBusy(busy: true, L("CleanRunButton"));
+		SetBusy(busy: true, L("BzCleaning"));
 		// SetBusy enables Pause for ops that support it — the clean loop does NOT honour isPaused, so leaving it
 		// enabled would let the user press Pause, see "Paused", and have files keep being deleted anyway. Also make
 		// Stop actually REACHABLE: ShowCleanView collapses the shared Start/Pause/Stop row, so SetBusy was only
@@ -10999,9 +11066,12 @@ exit 0
 					// (all drives, no confirmation) seconds later, destroying exactly what they asked to keep — while
 					// the summary still told them it was restorable. Honour the safety net: skip emptying the bin.
 					if (toRecycle) { if (CleanStatusText != null) CleanStatusText.Text = L("CleanBinKept"); continue; }
-					long before = RecycleBinSize();
+					// Count the bin's ITEMS too. Only its bytes were added, so a run that emptied a 2 GB bin and
+					// nothing else reported "Done - freed 2.0 GB (0 files removed)" - freeing gigabytes by removing
+					// nothing. SHQUERYRBINFO has carried i64NumItems all along; it was never read.
+					var (before, beforeItems) = RecycleBinContents();
 					int hr = await Task.Run(() => { try { return SHEmptyRecycleBin(IntPtr.Zero, null, 0x7u); } catch { return -1; } });
-					if (hr == 0) freed += before;
+					if (hr == 0) { freed += before; filesDeleted += (int)Math.Min(int.MaxValue, beforeItems); }
 					c.Size = 0; c.SizeText = FormatBytes(hr == 0 ? 0 : RecycleBinSize());
 					continue;
 				}
@@ -11025,11 +11095,8 @@ exit 0
 			int notCleaned = Math.Max(0, cats.Count - doneCats);
 			if (!stopRequested) ProgressBar.Value = 100.0;
 			RecomputeCleanTotal();
-			string doneMsg = stopRequested
-				? string.Format(L("CleanStopped"), FormatBytes(freed), filesDeleted, notCleaned)
-				: string.Format(L("CleanDone"), FormatBytes(freed), filesDeleted);
-			if (binnedFiles > 0) doneMsg += " " + string.Format(L("CleanDoneRecycled"), FormatBytes(binnedBytes), binnedFiles);
-			if (CleanStatusText != null) CleanStatusText.Text = doneMsg;
+			_lastCleanRun = (freed, filesDeleted, binnedBytes, binnedFiles, notCleaned, stopRequested);
+			if (CleanStatusText != null) CleanStatusText.Text = CleanRunResultLine() ?? "";
 		}
 		finally
 		{
