@@ -14868,9 +14868,16 @@ exit 0
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
 			outp += await CreateAndFormatAsync(disk.Number, fs, "DriveForge");
 			SetToolOutput("diskpart format\r\n\r\n" + outp);
-			Log($"Formatted Disk {disk.Number} as {fs}.");
 			await RefreshDisksAsync();
-			MessageBox.Show(string.Format(L("MbFormatDone"), disk.Number, fs.ToUpperInvariant()), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			// The partition STYLE is checked above; the file system was not. diskpart's `format` fails while
+			// still exiting 0 - the FAT32-over-32-GB guard in the Create flow exists because of exactly that -
+			// and what it leaves behind is a partition with no file system. "ready to use" needs reading back.
+			string fsSeen = await FileSystemsOnDiskAsync(disk.Number);
+			bool ok = fsSeen.Length == 0 || fsSeen.Contains(fs, StringComparison.OrdinalIgnoreCase);
+			Log($"Disk {disk.Number}: asked for {fs}, Windows reports {(fsSeen.Length > 0 ? fsSeen : "nothing")} (ok={ok}).");
+			MessageBox.Show(ok ? string.Format(L("MbFormatDone"), disk.Number, fs.ToUpperInvariant())
+					: string.Format(L("MbFormatNoFs"), disk.Number, fs.ToUpperInvariant()),
+				"DriveForge", MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex)
 		{
@@ -15056,9 +15063,20 @@ exit 0
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
 			outp += await RunDiskpartAsync(sb.ToString());
 			SetToolOutput("diskpart quick partition\r\n\r\n" + outp);
-			Log($"Quick partition: Disk {disk.Number} -> {n} x {fs}.");
 			await RefreshDisksAsync();
-			MessageBox.Show(string.Format(L("PtQuickDone"), disk.Number, n, fs.ToUpperInvariant()), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			// The script above is n create+format pairs, and the comment three lines up says what happens when
+			// one of them fails: diskpart abandons the rest and still exits 0. This message names a COUNT and a
+			// file system, so count them and read the file systems back.
+			int made = await PartitionCountAsync(disk.Number);
+			string fsSeen = await FileSystemsOnDiskAsync(disk.Number);
+			bool ok = made < 0
+				|| (made >= n && fsSeen.Contains(fs, StringComparison.OrdinalIgnoreCase));
+			Log($"Quick partition: Disk {disk.Number} asked {n} x {fs}, has {made} partition(s), file systems: {(fsSeen.Length > 0 ? fsSeen : "none")} (ok={ok}).");
+			MessageBox.Show((ok ? string.Format(L("PtQuickDone"), disk.Number, n, fs.ToUpperInvariant())
+					: string.Format(L("PtQuickPartial"), disk.Number, Math.Max(made, 0), n,
+						fsSeen.Length > 0 ? fsSeen : "-"))
+				+ "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
+				"DriveForge", MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrQuickPart"), ex); }
 		finally { SetBusy(busy: false); }
@@ -15803,9 +15821,16 @@ exit 0
 				throw new InvalidOperationException(string.Format(L("ErrInitStyle"), disk.Number, style.ToUpperInvariant()));
 			outp += await CreateAndFormatAsync(disk.Number, "ntfs", "DriveForge");
 			SetToolOutput("diskpart initialize\r\n\r\n" + outp);
-			Log($"Initialized Disk {disk.Number} as {style}.");
 			await RefreshDisksAsync();
-			MessageBox.Show(string.Format(L("PtInitDone"), disk.Number), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			// Same as Format: the style is checked above, and "and formatted (NTFS)" was not. This is the tool
+			// people are sent to in order to RECOVER a disk that was left partitioned-but-empty, so it is the
+			// last place that may announce a format it did not get.
+			string fsSeen = await FileSystemsOnDiskAsync(disk.Number);
+			bool ok = fsSeen.Length == 0 || fsSeen.Contains("NTFS", StringComparison.OrdinalIgnoreCase);
+			Log($"Disk {disk.Number}: initialized as {style}, Windows reports {(fsSeen.Length > 0 ? fsSeen : "nothing")} (ok={ok}).");
+			MessageBox.Show(ok ? string.Format(L("PtInitDone"), disk.Number)
+					: string.Format(L("MbFormatNoFs"), disk.Number, "NTFS"),
+				"DriveForge", MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrInit"), ex); }
 		finally { SetBusy(busy: false); }
@@ -15875,8 +15900,17 @@ exit 0
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtActive")));
 			string outp = await RunDiskpartAsync($"select disk {disk.Number}\r\nselect partition 1\r\nactive\r\nexit\r\n");
 			SetToolOutput("diskpart active\r\n\r\n" + outp);
-			Log($"Set partition 1 active on Disk {disk.Number}.");
-			MessageBox.Show(string.Format(L("PtActiveDone"), disk.Number), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			// `select partition 1` on a disk that has none, and `active` itself, both fail while diskpart still
+			// exits 0 - so the flag is read back. This flow had no check of any kind: it announced the new state
+			// unconditionally. 0 is Windows saying the flag is NOT set; -1 is Windows declining to say, which is
+			// not evidence of failure.
+			int active = await PartitionIsActiveAsync(disk.Number);
+			bool ok = active != 0;
+			Log($"Disk {disk.Number}: partition 1 IsActive = {active} (ok={ok}).");
+			MessageBox.Show((ok ? string.Format(L("PtActiveDone"), disk.Number)
+					: string.Format(L("PtActiveNotSet"), disk.Number))
+				+ "\r\n\r\n" + (outp.Length > 600 ? outp.Substring(outp.Length - 600) : outp),
+				"DriveForge", MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
 		}
 		catch (Exception ex) { ShowError(L("ErrSetActive"), ex); }
 		finally { SetBusy(busy: false); }
@@ -16044,6 +16078,46 @@ exit 0
 
 	// Number of partitions currently on a disk, or -1 when Windows will not say. The flows that empty a
 	// disk use it to CHECK that the clean really emptied it, instead of trusting diskpart's exit code.
+	/// <summary>
+	/// 1 when partition 1 of this disk carries the MBR active flag, 0 when it does not, -1 when Windows
+	/// will not say. Measured against real hardware before being relied on: the value arrives as the
+	/// text "True" or "False".
+	/// </summary>
+	private async Task<int> PartitionIsActiveAsync(int diskNumber)
+	{
+		try
+		{
+			string s = (await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+				+ QuoteArgument($"(Get-Partition -DiskNumber {diskNumber} -PartitionNumber 1"
+					+ " -ErrorAction SilentlyContinue).IsActive"))).Trim();
+			return s.Equals("True", StringComparison.OrdinalIgnoreCase) ? 1
+				: s.Equals("False", StringComparison.OrdinalIgnoreCase) ? 0 : -1;
+		}
+		catch { return -1; }
+	}
+
+	/// <summary>
+	/// The file systems Windows reports for the volumes on this disk, comma-separated, or "" when there
+	/// are none to report (or Windows declines to say).
+	///
+	/// A partition whose format failed still HAS a volume - with no file system on it - so an empty
+	/// FileSystem is reported here as RAW rather than dropped. That distinction is the whole point: it is
+	/// what separates "formatted" from "partitioned and left unusable", which is the state diskpart
+	/// leaves behind when `format` fails and still exits 0.
+	/// </summary>
+	private async Task<string> FileSystemsOnDiskAsync(int diskNumber)
+	{
+		try
+		{
+			return (await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command "
+				+ QuoteArgument($"@(Get-Partition -DiskNumber {diskNumber} -ErrorAction SilentlyContinue"
+					+ " | Get-Volume -ErrorAction SilentlyContinue"
+					+ " | ForEach-Object { if ($_.FileSystem) { $_.FileSystem } else { 'RAW' } })"
+					+ " -join ','"))).Trim();
+		}
+		catch { return ""; }
+	}
+
 	private async Task<int> PartitionCountAsync(int diskNumber)
 	{
 		try

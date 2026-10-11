@@ -1350,4 +1350,93 @@ public class InvariantTests
 			"A success/failure message is being chosen by a flag that cannot be false, which makes the other"
 				+ " message dead code:\n  " + string.Join("\n  ", offenders));
 	}
+
+	/// <summary>
+	/// A disk's new state is read back before it is announced - and read back for the thing claimed.
+	///
+	/// diskpart exits 0 on operations it declined. That is not a guess: this file says so in its own
+	/// comments in four places, and the Resize flow was rebuilt around it - "the only locale-safe way to
+	/// know whether anything actually changed is to compare the real volume size before/after". Parsing
+	/// the output instead is not available, because it is localized in sixteen of the seventeen languages.
+	///
+	/// Set active read nothing at all and announced the flag unconditionally. Quick partition named a
+	/// COUNT it never counted, three lines under a comment explaining that diskpart abandons the rest of
+	/// the script at the first error. Format and Initialize checked the partition STYLE and never the
+	/// file system, in a file that already knows `format` fails while exiting 0 - which is why the
+	/// FAT32-over-32-GB guard exists at all.
+	///
+	/// It is a TABLE and not a presence check, and that is the whole lesson of writing it. The first
+	/// version asked only that some read-back appear somewhere in the flow; mutation showed three of the
+	/// four defects satisfied that already, because checking the partition style is not evidence about a
+	/// count or a file system. A claim names the evidence it needs, or it is not guarded.
+	///
+	/// Two announcements are deliberately outside the table, each for the same kind of reason - what
+	/// backs them is a measurement of the WORK, not a reading of the disk:
+	///   MvDone  - the move flows copy the sectors themselves and rewrite the table only after a full
+	///             flushed copy, so `moved` already is the measurement.
+	///   SsdDone - the TRIM half of its claim is backed by whether ReTrim actually ran (that is what
+	///             chooses between SsdDone and SsdDoneNoTrim), which no disk query can show.
+	/// </summary>
+	[Fact]
+	public void ADiskStateIsReadBackBeforeItIsAnnounced()
+	{
+		string[] drivers = { "RunDiskpartAsync", "CleanDiskAsync", "CreateAndFormatAsync" };
+		
+		// Each announcement, and the reading that has to stand behind it.
+		var evidenceFor = new Dictionary<string, string[]>(StringComparer.Ordinal)
+		{
+			["PtResizeDone"] = new[] { "VolumeSizeBytesAsync" },
+			["PtCreateDone"] = new[] { "PartitionCountAsync" },
+			["PtDeleteDone"] = new[] { "PartitionCountAsync" },
+			["PtConvertDone"] = new[] { "EnsureDiskPartitionStyleAsync" },
+			["PtInitDone"] = new[] { "FileSystemsOnDiskAsync" },
+			["MbFormatDone"] = new[] { "FileSystemsOnDiskAsync" },
+			["PtQuickDone"] = new[] { "PartitionCountAsync", "FileSystemsOnDiskAsync" },
+			["PtActiveDone"] = new[] { "PartitionIsActiveAsync" },
+		};
+		// Backed by a measurement of the work rather than a reading of the disk - see above.
+		var measuredAsWork = new HashSet<string>(StringComparer.Ordinal)
+			{ "MvDone", "SsdDone" };
+		
+		// The English block, read the way LocalizationTests reads it: the runtime object, not the source.
+		var en = ((Dictionary<string, Dictionary<string, string>>)Mw.Field("Strings"))["en"];
+		var missing = new List<string>();
+		var unclassified = new List<string>();
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			string code = method.ToString();
+			if (name is "RunDiskpartAsync" or "CleanDiskAsync" or "CreateAndFormatAsync") continue;
+			if (!drivers.Any(d => code.Contains(d + "("))) continue;
+			
+			var keys = Regex.Matches(code, @"L\(\s*""([A-Za-z0-9_]+)""")
+				.Select(m => m.Groups[1].Value).Distinct().ToList();
+			
+			// Completeness: an announcement opening with "Done" has to be classified one way or the other, so a
+			// new one cannot arrive unguarded.
+			foreach (string key in keys)
+			{
+				if (!en.TryGetValue(key, out string? text)) continue;
+				if (!text.TrimStart('\u2713', ' ').StartsWith("Done", StringComparison.Ordinal)) continue;
+				if (evidenceFor.ContainsKey(key) || measuredAsWork.Contains(key)) continue;
+				unclassified.Add($"{name} -> {key}: \"{text}\"");
+			}
+			
+			foreach (string key in keys)
+			{
+				if (!evidenceFor.TryGetValue(key, out string[]? needed)) continue;
+				string[] absent = needed.Where(r => !code.Contains(r + "(")).ToArray();
+				if (absent.Length == 0) continue;
+				missing.Add($"{SourceModel.Where(file, method)} {name}: announces {key} without "
+					+ string.Join(" or ", absent));
+			}
+		}
+		
+		Assert.True(unclassified.Count == 0,
+			"A diskpart flow announces something new. Say which it is - a state diskpart was asked for (add it"
+				+ " to evidenceFor with the reading that proves it) or work the flow measured itself (add it to"
+				+ " measuredAsWork, with the reason):\n  " + string.Join("\n  ", unclassified));
+		Assert.True(missing.Count == 0,
+			"diskpart exits 0 on operations it declined, so each of these announces a disk state without the"
+				+ " reading that would show it really happened:\n  " + string.Join("\n  ", missing));
+	}
 }
