@@ -503,6 +503,66 @@ public class LocalizationTests
 				+ " (this is the sentence the user reads):\n  " + string.Join("\n  ", offenders.Distinct()));
 	}
 
+	/// <summary>
+	/// The amount the speed test says it writes is the amount it writes.
+	///
+	/// Four sentences quote that size, and they quote it for a reason: it is why a Good result is a
+	/// narrow claim ("tested over 80 MB"), why the recommendation says the test is too short to see
+	/// whether the drive holds its speed, and why the time estimate says where its number came from.
+	/// It checks the number and not the unit, because four of the seventeen write the megabyte in
+	/// their own alphabet and the file is already mixed on which to use.
+	///
+	/// The size itself is not a constant anywhere - it is two loop bounds multiplied by two buffer
+	/// sizes. Change one loop from 64 to 256 and all four sentences are wrong in seventeen languages,
+	/// with nothing in the diff to see it by. The one place that already quoted a size before this
+	/// (MbSpeedWritesWarn, "writes about 80 MB into this drive's free space") was unguarded too.
+	/// </summary>
+	[Fact]
+	public void WhatTheSpeedTestSaysItWritesIsWhatItWrites()
+	{
+		var method = SourceModel.Methods().Single(m => m.Name == "MeasureDiskSpeed").Method;
+		var loops = method.DescendantNodes().OfType<ForStatementSyntax>().ToList();
+		Assert.True(loops.Count == 2,
+			$"MeasureDiskSpeed has {loops.Count} write loops, not the two this rule knows how to read.");
+
+		long written = 0;
+		foreach (ForStatementSyntax loop in loops)
+		{
+			// `for (int i = 0; i < 64; i++)` - the rounds.
+			var bound = Assert.IsType<BinaryExpressionSyntax>(loop.Condition);
+			int rounds = int.Parse(Assert.IsType<LiteralExpressionSyntax>(bound.Right).Token.ValueText);
+			// ...writing THIS buffer: `stream.Write(buf, 0, buf.Length)`.
+			string buffer = loop.DescendantNodes().OfType<InvocationExpressionSyntax>()
+				.Where(i => (i.Expression as MemberAccessExpressionSyntax)?.Name.Identifier.Text == "Write")
+				.Select(i => (i.ArgumentList.Arguments[0].Expression as IdentifierNameSyntax)?.Identifier.Text)
+				.First(n => n != null)!;
+			// ...which is this big: `byte[] buf = new byte[1048576];`.
+			int size = method.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+				.Where(v => v.Identifier.Text == buffer).Select(v => v.Initializer?.Value)
+				.OfType<ArrayCreationExpressionSyntax>()
+				.Select(ac => int.Parse(((LiteralExpressionSyntax)ac.Type.RankSpecifiers[0].Sizes[0])
+					.Token.ValueText)).Single();
+			written += (long)rounds * size;
+		}
+		long mb = written / (1024 * 1024);
+
+		string[] quoted = { "MbSpeedWritesWarn", "DSpdMsgGood", "DSpdRecGood", "EstFromBurst" };
+		var wrong = new List<string>();
+		foreach (string key in quoted)
+			foreach (string lang in Strings.Keys)
+			{
+				if (!Strings[lang].TryGetValue(key, out string? value))
+					wrong.Add($"{lang}/{key}: missing");
+				// The NUMBER, not the unit: four languages localise the megabyte (fr "80 Mo", ru and uk
+				// "80 МБ", ar "80 ميغابايت"), the file is already mixed on it, and which word a language uses
+				// for a megabyte is not this rule's business. The digit boundaries stop 80 matching 800.
+				else if (!Regex.IsMatch(value, $@"(?<![0-9]){mb}(?![0-9])"))
+					wrong.Add($"{lang}/{key}: {value}");
+			}
+		Assert.True(wrong.Count == 0, $"The speed test writes {mb} MB, and these sentences quote a"
+			+ $" different size, or none:\n  " + string.Join("\n  ", wrong));
+	}
+
 	/// <summary>A declaration that holds text. Nothing else is followed back.</summary>
 	private static bool IsString(string? declaredType) =>
 		declaredType is "string" or "string?" or "String" or "String?";

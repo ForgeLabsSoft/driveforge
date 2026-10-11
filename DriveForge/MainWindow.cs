@@ -798,16 +798,27 @@ public partial class MainWindow : Window, IComponentConnector
 	}
 
 	// Rough estimate of how long the write will take, from the data size and the drive's measured speed.
+	//
+	// Both inputs are weaker than the sentence that quotes them, in opposite ways, and the two used to come
+	// out identical. The speed test writes 80 MB; dividing a 20 GB clone by that figure assumes the drive
+	// holds its opening speed for two hundred and fifty times as long, which is exactly what a flash drive
+	// with a write cache does not do - a stick that opens at 180 MB/s and settles at 12 quotes two minutes
+	// for half an hour of work. And with no measurement at all the 60 below is a guess, which read as
+	// confidently as a measurement. The number stays; what is said about it now matches where it came
+	// from. (MbConfirmSummary's old "(depends on the drive)" went with this: it implied the drive had been
+	// consulted, when the uncertainty is whether the drive can keep it up.)
 	private string EstimateOperationTime(DiskItem disk, long bytes)
 	{
 		double mbps = 0;
 		if (speedResults.TryGetValue(disk.Number, out SpeedResult sr) && sr.SequentialWriteMb > 1)
 			mbps = sr.SequentialWriteMb;
+		bool measured = mbps > 1;
 		if (mbps <= 1) mbps = 60; // conservative default when no speed test yet
 		double minutes = (bytes / 1024.0 / 1024.0) / mbps / 60.0 * 1.25; // +25% for overhead/verification
-		if (minutes < 1) return L("EstMinute");
-		if (minutes < 90) return string.Format(L("EstMinutes"), Math.Ceiling(minutes));
-		return string.Format(L("EstHours"), Math.Round(minutes / 60.0, 1));
+		string howLong = minutes < 1 ? L("EstMinute")
+			: minutes < 90 ? string.Format(L("EstMinutes"), Math.Ceiling(minutes))
+			: string.Format(L("EstHours"), Math.Round(minutes / 60.0, 1));
+		return howLong + L(measured ? "EstFromBurst" : "EstNoTest");
 	}
 
 	// One clear "here is what will happen" confirmation instead of several pop-ups.

@@ -1255,4 +1255,32 @@ public class InvariantTests
 			"What was verified is never compared against what the drive claims, so the choice between the "
 			+ "two verdicts cannot be about coverage at all.");
 	}
+
+	/// <summary>
+	/// An operation-time estimate says whether it measured this drive.
+	///
+	/// Two different numbers reach the same sentence. One is the speed test's, taken over 80 MB and then
+	/// multiplied out over a whole clone, which assumes a drive holds its opening speed for hundreds of
+	/// times as long. The other is a flat 60 MB/s written into the code for when no test has been run.
+	/// They used to produce identical wording, so a guess and a measurement were indistinguishable in
+	/// the one dialog that stands between the user and an erase.
+	///
+	/// The fix is a sentence, not a better number, so it is a sentence this guards: both endings exist,
+	/// and the one that is used comes from whether a measurement was actually found.
+	/// </summary>
+	[Fact]
+	public void AnEstimateSaysWhetherItMeasuredTheDrive()
+	{
+		string code = SourceModel.Methods().Single(m => m.Name == "EstimateOperationTime")
+			.Method.ToString();
+
+		Assert.True(code.Contains("\"EstFromBurst\"") && code.Contains("\"EstNoTest\""),
+			"The estimate must have both endings - one for a figure measured over the speed test's"
+				+ " 80 MB, one for the flat default - or a guess reads exactly like a measurement:\n" + code);
+
+		// And the choice has to come from whether a measurement was found, not from anything else: a
+		// `bool measured = true` keeps both keys in the file and says the wrong one every time.
+		Assert.True(Regex.IsMatch(code, @"bool\s+measured\s*=[^;]*\bmbps\s*>"),
+			"Which ending the estimate uses must be decided by the measured speed itself:\n" + code);
+	}
 }
