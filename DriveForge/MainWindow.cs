@@ -14843,14 +14843,19 @@ exit 0
 				new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
 			if (fsSel == null) return;
 			string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
-			// Windows' formatter (which diskpart drives) cannot CREATE a FAT32 volume larger than 32 GB. On a bigger disk the
-			// `format fs=fat32` line fails but diskpart still returns exit code 0, so the write reported success while the disk
-			// was actually left RAW/unusable. Reject up front and steer to exFAT (the modern large-capacity FAT successor).
-			if (fs == "fat32" && disk.Size > 32L * 1024 * 1024 * 1024)
-			{
-				MessageBox.Show(L("MbFat32TooBig"), L("MbFormatTitle"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+			// FAT32 above 32 GB is a limit of Windows' own format UI, not of diskpart and not of FAT32.
+			// Measured: diskpart formatted a 476.9 GB partition as FAT32, exit 0, and Windows mounted it and
+			// reported FAT32. The comment that used to sit here said the opposite - that the format fails while
+			// diskpart still exits 0 - and all three of these guards were built on it. It is wrong on this build.
+			//
+			// The ADVICE was right and is kept: FAT32 cannot hold a file over 4 GB, and exFAT is the better
+			// choice at this size. So the refusal became a warning the user may overrule, and if the format does
+			// fail on some other build, the file-system read-back at the end of this flow now says so.
+			if (fs == "fat32" && disk.Size > 32L * 1024 * 1024 * 1024
+				&& MessageBox.Show(string.Format(L("MbFat32TooBig"), FormatBytes(disk.Size)), L("MbFormatTitle"),
+					MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel)
+					!= MessageBoxResult.OK)
 				return;
-			}
 
 			scriptPath = Path.Combine(Path.GetTempPath(), $"winforge-format-{Guid.NewGuid():N}.txt");
 			SetBusy(busy: true, string.Format(L("BzFormat"), disk.Number, fs.ToUpperInvariant()));
@@ -15016,22 +15021,37 @@ exit 0
 			new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
 		if (fsSel == null) return;
 		string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
-		// Windows' formatter cannot CREATE a FAT32 volume above 32 GB: `format fs=fat32` fails but diskpart STILL exits 0.
-		// This flow runs `clean` FIRST, so without this guard the disk is wiped and a partition is left RAW while
-		// PtQuickDone reports success. Guard the BIGGEST partition the script will actually create: partitions 1..n-1 get
-		// an explicit size=each, but the LAST one is emitted unsized, so it swallows the remainder (the 200 MB reserve +
-		// the division remainder) and is always larger than `each` — checking `each` would let it slip through.
+		// FAT32 above 32 GB is a limit of Windows' own format UI, not of diskpart and not of FAT32.
+		// Measured: diskpart formatted a 476.9 GB partition as FAT32, exit 0, and Windows mounted it and
+		// reported FAT32. The comment that used to sit here said the opposite - that the format fails while
+		// diskpart still exits 0 - and all three of these guards were built on it. It is wrong on this build.
+		//
+		// The ADVICE was right and is kept: FAT32 cannot hold a file over 4 GB, and exFAT is the better
+		// choice at this size. So the refusal became a warning the user may overrule, and if the format does
+		// fail on some other build, the file-system read-back at the end of this flow now says so.
+		//
+		// It still measures the BIGGEST partition the script will create, because that is the one the
+		// warning is about: partitions 1..n-1 get an explicit size=each, but the LAST one is emitted
+		// unsized, so it swallows the remainder (the 200 MB reserve + the division remainder) and is
+		// always larger than `each` - looking at `each` would describe the wrong partition.
 		long usableMb = disk.Size / (1024 * 1024) - 200;
 		long each = usableMb / n;
 		long lastMb = disk.Size / (1024 * 1024) - (n - 1) * each;
-		if (fs == "fat32" && lastMb > 32L * 1024)
+		if (fs == "fat32" && lastMb > 32L * 1024
+			&& MessageBox.Show(string.Format(L("MbFat32TooBig"), FormatBytes(lastMb * 1024 * 1024)), L("PtQuickPart"),
+				MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel)
+				!= MessageBoxResult.OK)
 		{
-			MessageBox.Show(L("MbFat32TooBig"), L("PtQuickPart"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
 			return;
 		}
-		// FAT32 has a MINIMUM too (Windows can't create one below ~32 MB), and that failure is silent in exactly the same
-		// way — diskpart exits 0 — so a tiny disk split several ways would be wiped by `clean` and left with RAW partitions
-		// reported as success. The generic PtTooSmall check below only requires 16 MB, so bound it here for FAT32.
+		// FAT32 has a MINIMUM too: Windows needs at least 65527 clusters for a FAT32 volume, so below
+		// roughly 32 MB it cannot make one. The generic PtTooSmall check below only requires 16 MB, so
+		// bound it here for FAT32.
+		//
+		// This used to add that the failure is silent because diskpart exits 0. That was the same claim
+		// measured false for the 32 GB maximum (diskpart formatted 476.9 GB as FAT32, exit 0, and Windows
+		// mounted it), and the minimum case has NOT been measured either way - so the guard stays on the
+		// strength of the cluster limit, which is documented, and claims nothing about the exit code.
 		if (fs == "fat32" && each < 33)
 		{
 			MessageBox.Show(string.Format(L("PtTooSmall"), n), L("PtQuickPart"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
@@ -15695,12 +15715,19 @@ exit 0
 			new[] { 0xEDA2, 0xEDA2, 0xEDA2 }, null, 0);
 		if (fsSel == null) return;
 		string fs = fsSel.Value == 0 ? "ntfs" : fsSel.Value == 1 ? "exfat" : "fat32";
-		// Windows' formatter cannot CREATE a FAT32 volume above 32 GB: diskpart's `format fs=fat32` fails but STILL exits 0,
-		// so this flow would report PtCreateDone on a RAW, unusable partition. Reject up front, like FormatDrive_Click does.
-		// With no explicit size the partition fills the largest unallocated EXTENT, so ask Windows how big that really is —
-		// using the whole-disk size instead would wrongly refuse a legitimate 8 GB FAT32 hole on a 500 GB drive. If the
-		// query fails we let it through: unlike QuickPartition this flow issues no `clean`, so the worst case is the new
-		// partition alone being left RAW, with no pre-existing data destroyed.
+		// FAT32 above 32 GB is a limit of Windows' own format UI, not of diskpart and not of FAT32.
+		// Measured: diskpart formatted a 476.9 GB partition as FAT32, exit 0, and Windows mounted it and
+		// reported FAT32. The comment that used to sit here said the opposite - that the format fails while
+		// diskpart still exits 0 - and all three of these guards were built on it. It is wrong on this build.
+		//
+		// The ADVICE was right and is kept: FAT32 cannot hold a file over 4 GB, and exFAT is the better
+		// choice at this size. So the refusal became a warning the user may overrule, and if the format does
+		// fail on some other build, the file-system read-back at the end of this flow now says so.
+		//
+		// With no explicit size the partition fills the largest unallocated EXTENT, so ask Windows how
+		// big that really is - the whole-disk size would warn about a size the partition will not have,
+		// and a legitimate 8 GB FAT32 hole on a 500 GB drive deserves no warning at all. If the query
+		// fails there is nothing to warn about, so it goes ahead.
 		if (fs == "fat32")
 		{
 			long fat32Mb = requestedMb;
@@ -15709,11 +15736,11 @@ exit 0
 				long freeBytes = await LargestFreeExtentBytesAsync(disk.Number);
 				fat32Mb = freeBytes > 0 ? freeBytes / (1024 * 1024) : 0;
 			}
-			if (fat32Mb > 32L * 1024)
-			{
-				MessageBox.Show(L("MbFat32TooBig"), L("PtCreate"), MessageBoxButton.OK, MessageBoxImage.Exclamation);
+			if (fat32Mb > 32L * 1024
+				&& MessageBox.Show(string.Format(L("MbFat32TooBig"), FormatBytes(fat32Mb * 1024 * 1024)), L("PtCreate"),
+					MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel)
+					!= MessageBoxResult.OK)
 				return;
-			}
 		}
 		if (MessageBox.Show(string.Format(L("PtCreateConfirm"), disk.Number), L("PtCreate"), MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
 		if (!await VerifyTargetDiskUnchangedAsync(disk)) return; // disks can renumber between the scan and the click — re-confirm identity before create+format
@@ -15725,16 +15752,16 @@ exit 0
 			SetToolOutput("diskpart create partition\r\n\r\n" + outp);
 			Log($"Create partition on Disk {disk.Number} ({fs}): diskpart finished.");
 			await RefreshDisksAsync();
-			// diskpart's exit code is not a uniform signal, and the text that would say is localized. Measured
-			// on real hardware (MBR disk, zero usable space, diskpart 10.0.26100.1150): `create partition
-			// primary` answers "There is not enough usable space for this operation" and exits 0x8004240F, so
-			// THAT refusal does throw and never reaches here. But `format fs=fat32` above 32 GB fails and exits
-			// 0 - recorded twice in this file, and the reason its guard exists. Which kind a refusal is cannot
-			// be read off the exit code, so the state gets read back. Same wall the Resize flow hit, same way
-			// through it: measure.
-			// A partition that was created is visible in the partition COUNT, whatever language Windows speaks.
-			// Windows refusing to say (-1) is not evidence of failure, so that case keeps the old benefit of
-			// the doubt, exactly as the resize flow's `measured` does.
+			// The exit code is the only signal this gets, and reading the disk back is the cheap second one.
+			//
+			// Measured on real hardware, diskpart 10.0.26100.1150: every refusal that could be produced came
+			// back NON-zero and therefore threw - no usable space 0x8004240F, uninitialised disk 0x80042417,
+			// a fifth primary partition on an MBR table 0x80070057. So this is defence in depth and not the
+			// repair of a false success anybody has reproduced; saying otherwise would be inventing evidence.
+			//
+			// What makes it worth the one query: the exit code is the ONLY thing standing between a refusal
+			// and a Done message, the text that would say more is localized in sixteen languages, and the
+			// reading is locale-independent and costs one PowerShell call on an operation already waited for.
 			int partsAfter = await PartitionCountAsync(disk.Number);
 			// A table change can lag the diskpart exit by a moment, and a false failure is a wrong claim too.
 			if (partsBefore >= 0 && partsAfter >= 0 && !(partsAfter > partsBefore))
@@ -15781,16 +15808,16 @@ exit 0
 			SetToolOutput("diskpart delete volume\r\n\r\n" + outp);
 			Log($"Delete volume {letter}: on Disk {disk.Number}: diskpart finished.");
 			await RefreshDisksAsync();
-			// diskpart's exit code is not a uniform signal, and the text that would say is localized. Measured
-			// on real hardware (MBR disk, zero usable space, diskpart 10.0.26100.1150): `create partition
-			// primary` answers "There is not enough usable space for this operation" and exits 0x8004240F, so
-			// THAT refusal does throw and never reaches here. But `format fs=fat32` above 32 GB fails and exits
-			// 0 - recorded twice in this file, and the reason its guard exists. Which kind a refusal is cannot
-			// be read off the exit code, so the state gets read back. Same wall the Resize flow hit, same way
-			// through it: measure.
-			// A partition that went away is visible in the partition COUNT, whatever language Windows speaks.
-			// Windows refusing to say (-1) is not evidence of failure, so that case keeps the old benefit of
-			// the doubt, exactly as the resize flow's `measured` does.
+			// The exit code is the only signal this gets, and reading the disk back is the cheap second one.
+			//
+			// Measured on real hardware, diskpart 10.0.26100.1150: every refusal that could be produced came
+			// back NON-zero and therefore threw - no usable space 0x8004240F, uninitialised disk 0x80042417,
+			// a fifth primary partition on an MBR table 0x80070057. So this is defence in depth and not the
+			// repair of a false success anybody has reproduced; saying otherwise would be inventing evidence.
+			//
+			// What makes it worth the one query: the exit code is the ONLY thing standing between a refusal
+			// and a Done message, the text that would say more is localized in sixteen languages, and the
+			// reading is locale-independent and costs one PowerShell call on an operation already waited for.
 			int partsAfter = await PartitionCountAsync(disk.Number);
 			// A table change can lag the diskpart exit by a moment, and a false failure is a wrong claim too.
 			if (partsBefore >= 0 && partsAfter >= 0 && !(partsAfter < partsBefore))

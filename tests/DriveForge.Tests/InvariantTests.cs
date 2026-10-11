@@ -1354,38 +1354,25 @@ public class InvariantTests
 	/// <summary>
 	/// A disk's new state is read back before it is announced - and read back for the thing claimed.
 	///
-	/// diskpart's exit code does not tell you whether it did the thing.
+	/// <summary>
+	/// A disk's state is read back because the exit code is the only other thing there is.
 	///
-	/// Not uniformly, which is the awkward part. Measured on real hardware - an MBR disk with zero usable
-	/// space, diskpart 10.0.26100.1150 - `create partition primary` answers "There is not enough usable
-	/// space for this operation" and exits 0x8004240F, so that refusal throws and is reported. But
-	/// `format fs=fat32` above 32 GB fails and exits 0; that is recorded twice in MainWindow.cs and is
-	/// why its guard exists. An earlier version of this comment claimed the exit-0 behaviour as the rule
-	/// rather than one case of it, and the measurement above is what corrected it.
+	/// Said carefully, because two earlier versions of this comment said it too strongly. Measured on
+	/// real hardware, diskpart 10.0.26100.1150, every refusal that could be produced came back
+	/// NON-zero and so threw before reaching any Done message: no usable space 0x8004240F,
+	/// uninitialised disk 0x80042417, a fifth primary partition on an MBR table 0x80070057. There is
+	/// no measured case on this build of diskpart declining something and reporting 0 - and the one
+	/// cited for it in MainWindow.cs, `format fs=fat32` above 32 GB, turned out to SUCCEED when it
+	/// was finally run.
 	///
-	/// So: which kind of refusal happened cannot be read off the exit code, and the text that would say
-	/// is localized in sixteen of the seventeen languages. The Resize flow reached the same conclusion
-	/// first - "the only locale-safe way to know whether anything actually changed is to compare the real
-	/// volume size before/after".
+	/// What stands: the exit code is the only signal these flows get, the text that would say more is
+	/// localized in sixteen of the seventeen languages, and CreateAndFormatAsync deliberately
+	/// catches a diskpart failure and retries - so a flow can reach its ending having swallowed one.
+	/// The Resize flow got there first and said it best: "the only locale-safe way to know whether
+	/// anything actually changed is to compare the real volume size before/after".
 	///
-	/// Set active read nothing at all and announced the flag unconditionally. Quick partition named a
-	/// COUNT it never counted, three lines under a comment explaining that diskpart abandons the rest of
-	/// the script at the first error. Format and Initialize checked the partition STYLE and never the
-	/// file system, in a file that already knows `format` fails while exiting 0 - which is why the
-	/// FAT32-over-32-GB guard exists at all.
-	///
-	/// It is a TABLE and not a presence check, and that is the whole lesson of writing it. The first
-	/// version asked only that some read-back appear somewhere in the flow; mutation showed three of the
-	/// four defects satisfied that already, because checking the partition style is not evidence about a
-	/// count or a file system. A claim names the evidence it needs, or it is not guarded.
-	///
-	/// Two announcements are deliberately outside the table, each for the same kind of reason - what
-	/// backs them is a measurement of the WORK, not a reading of the disk:
-	///   MvDone  - the move flows copy the sectors themselves and rewrite the table only after a full
-	///             flushed copy, so `moved` already is the measurement.
-	///   SsdDone - the TRIM half of its claim is backed by whether ReTrim actually ran (that is what
-	///             chooses between SsdDone and SsdDoneNoTrim), which no disk query can show.
-	/// </summary>
+	/// So this rule is defence in depth, not the repair of a reproduced false success. Worth having
+	/// at one query per destructive operation; worth describing accurately either way.
 	[Fact]
 	public void ADiskStateIsReadBackBeforeItIsAnnounced()
 	{
