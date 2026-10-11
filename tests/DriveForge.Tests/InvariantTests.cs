@@ -2110,4 +2110,49 @@ public class InvariantTests
 			"A result the user reads as complete when it is not is the difference between trying again and "
 				+ "giving up on the drive:\n  " + string.Join("\n  ", problems));
 	}
+
+	[Fact]
+	// MEASURED ON HARDWARE (2026-10-11, eight deleted files on a throwaway 2 GB VHD): five came back whole
+	// and three came back as zeros. The three rows stayed ticked, which is the whole design - what is still
+	// ticked is what is worth another attempt - and the summary said "8 of 8 recovered" with not one word
+	// about why anything was still ticked. The hint was gated on `ok`, and `ok` counts a write as OK when it
+	// is WHOLE, zeros included; the ticks come from `recovered`, the clean ones. Two facts, one of them wrong.
+	//
+	// Same defect class as the rest of this screen: a derived answer read off the nearest counter instead of
+	// off the thing it is actually about.
+	public void TheRetryHintAgreesWithWhatIsStillTicked()
+	{
+		var worker = SourceModel.Methods().Where(m => m.Name == "RecoverPickedToDir").ToArray();
+		Assert.True(worker.Length == 1, $"Expected one RecoverPickedToDir, found {worker.Length}.");
+		string wcode = worker[0].Method.ToString();
+
+		List<string> problems = new List<string>();
+
+		// The worker has to publish the CLEAN count, or a caller has nothing honest to gate the hint on.
+		if (!Regex.IsMatch(wcode, @"int\s+Clean"))
+			problems.Add("RecoverPickedToDir no longer returns a Clean count, so the only numbers a caller has "
+				+ "are Ok/Partial/Fail/Empty - and an all-zero write is counted as Ok");
+		if (!Regex.IsMatch(wcode, @"return\s*\([^)]*recovered\.Count"))
+			problems.Add("the Clean count no longer comes from `recovered` - the very list the unticking walks - "
+				+ "so the hint and the ticks can disagree again");
+
+		// Both summaries - the folder recovery and the ZIP - gate the hint, and neither may use Ok for it.
+		var notes = SourceModel.Parsed
+			.SelectMany(f => f.Root.DescendantNodes().OfType<ConditionalExpressionSyntax>())
+			.Where(c => c.ToString().Contains("RfRecRetryNote", StringComparison.Ordinal))
+			.ToArray();
+		Assert.True(notes.Length == 2,
+			$"Expected the retry hint on both summaries (folder + ZIP), found {notes.Length}.");
+		foreach (var n in notes)
+		{
+			string cond = n.Condition.ToString();
+			if (!cond.Contains("Clean", StringComparison.Ordinal))
+				problems.Add($"the retry hint is gated on `{cond}`, which is not the clean count: a file that "
+					+ "was written whole but came back as zeros counts there and still stays ticked");
+		}
+
+		Assert.True(problems.Count == 0,
+			"Rows left ticked with no sentence explaining them read as a bug in the program rather than "
+				+ "as the invitation to try again that they are:" + "\n  " + string.Join("\n  ", problems));
+	}
 }

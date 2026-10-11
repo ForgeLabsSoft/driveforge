@@ -13526,7 +13526,7 @@ exit 0
 					+ (emptyCount > 0 ? string.Format(L("RfRecEmptyNote"), emptyCount) : "")
 					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
 					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "")
-					+ (ok < picked.Count ? L("RfRecRetryNote") : "") + L("RfRecOpenFolder"),
+					+ (rr.Clean < picked.Count ? L("RfRecRetryNote") : "") + L("RfRecOpenFolder"),
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo(outDir) { UseShellExecute = true }); } catch { }
 		}
@@ -13548,7 +13548,7 @@ exit 0
 	}
 
 	// Recovers the picked files into outDir, rebuilding their original folder structure. Runs on a worker thread.
-	private (int Ok, int Partial, int Fail, int Empty) RecoverPickedToDir(List<DeletedFile> picked, NtfsScanResult scan, string outDir)
+	private (int Ok, int Partial, int Fail, int Empty, int Clean) RecoverPickedToDir(List<DeletedFile> picked, NtfsScanResult scan, string outDir)
 	{
 		int ok = 0, partial = 0, fail = 0, empty = 0;
 		var recovered = new List<DeletedFile>();   // the clean ones, unticked in one pass at the end
@@ -13644,7 +13644,9 @@ exit 0
 				finally { _suppressRecoverSelUpdate = false; }
 				UpdateRecoverSelectionInfo();
 			});
-		return (ok, partial, fail, empty);
+		// Clean, not Ok: a write that is WHOLE but all zeros counts as ok and is NOT clean, and the caller's
+		// retry hint has to agree with what is left ticked - which is this same list.
+		return (ok, partial, fail, empty, recovered.Count);
 	}
 
 	// Recover selected files straight into a single .zip archive (recovers to a temp folder, then compresses).
@@ -13716,7 +13718,7 @@ exit 0
 					+ (emptyCount > 0 ? string.Format(L("RfRecEmptyNote"), emptyCount) : "")
 					+ (partialCount > 0 ? string.Format(L("RfRecPartialNote"), partialCount) : "")
 					+ (fail > 0 ? string.Format(L("RfRecFailNote"), fail) : "")
-					+ (ok < picked.Count ? L("RfRecRetryNote") : "") + L("RfZipShowExplorer"),
+					+ (rr.Clean < picked.Count ? L("RfRecRetryNote") : "") + L("RfZipShowExplorer"),
 					L("RfFilesTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
 				try { Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{zipPath}\"") { UseShellExecute = true }); } catch { }
 		}
