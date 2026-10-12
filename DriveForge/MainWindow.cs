@@ -3541,7 +3541,8 @@ public partial class MainWindow : Window, IComponentConnector
 				if (usedDismFallback) MessageBox.Show(L("MbBackupDismSkipped"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);   // AV blocked wimlib -> DISM skipped unreadable files -> image may be missing files
 				MessageBox.Show(string.Format(L("MbBackupCreated"), outPath, FormatBytes(new FileInfo(outPath).Length)),
 					"DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
-				MaybeOfferDonation();
+				// NotifyOperationDone armed the offer; it waits for this dialog to close. Asking again here is
+				// what made the saved counter advance two per run.
 			}
 			else
 			{
@@ -4182,7 +4183,9 @@ public partial class MainWindow : Window, IComponentConnector
 			string rawZeroNote = rawZeroFilled > 0 ? "\n\n" + string.Format(L("MbRawZeroFilled"), rawZeroFilled) : "";
 			string reportNote = reportPath != null ? "\n\n" + L("MbCloneReportLabel") + "\n" + reportPath : "";
 			MessageBox.Show((ok ? L("MbCloneDoneOk") : L("MbCloneDoneReview")) + dataCloneNote + bitLockerFailNote + rawErrorsNote + rawZeroNote + "\n\n" + L("MbCloneBody") + "\n\n" +(bitLockerEncrypting ? L("MbCloneBitlockerBusy") : L("MbCloneSafeRemove")) + "\n\n" + L("MbCloneBootHelp") + reportNote + BuildWithheldPromiseSummary() + BuildSkippedHiveSummary() + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, (ok && dataCloneFailures == 0) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
-			if (cloneDialogOk) MaybeOfferDonation();
+			// No MaybeOfferDonation() here any more: NotifyOperationDone above already armed it, and the offer
+			// now waits for this dialog to close by itself. Asking twice is what advanced the saved counter
+			// two per run.
 			if (optEjectWhenDone && !bitLockerEncrypting) await EjectDiskAsync(targetDisk.Number);
 		}
 		finally
@@ -8241,6 +8244,9 @@ exit 0
 	private void ReportProblem_Click(object sender, RoutedEventArgs e) => ReportProblem("");
 	private int _successCount;
 
+	// One support offer per run is pending at a time, whichever flow armed it.
+	private bool _supportOfferArmed;
+
 	private void OpenDonate_Click(object sender, RoutedEventArgs e) => OpenDonatePage();
 
 	private void OpenSource_Click(object sender, RoutedEventArgs e)
@@ -8257,21 +8263,55 @@ exit 0
 
 	// Offered after a successful operation — politely and rarely. Only on the 1st success and then every 5th,
 	// respects the Settings toggle, and never runs in unattended/scheduled mode.
+	//
+	// It used to put its MessageBox up right here, and every flow calls NotifyOperationDone - which asks this
+	// - immediately BEFORE showing its own result. So on the first success the person got "Support DriveForge"
+	// over a finished operation whose outcome they had not been shown yet, with the real report waiting behind
+	// it. Measured on a duplicator run: the report sat behind the prompt for as long as it was left up.
+	// Now the offer is ARMED here and shown once the flow's own windows are gone, so the order is the one the
+	// two call sites that already asked after their dialog were written for.
+	//
+	// Counting moved ahead of the throttle for the same reason the offer did: the clone and the backup asked
+	// twice per run (once through NotifyOperationDone, once explicitly after their dialog), so _successCount -
+	// which is SAVED - advanced two per run and "every 5th" arrived at every other run. One ask per run now,
+	// however many times a flow calls this.
 	private void MaybeOfferDonation()
 	{
 		if (headlessRun) return;
 		if (ShowDonatePromptCheck?.IsChecked != true) return;
+		if (_supportOfferArmed) return;
 		_successCount++;
-		if (_successCount == 1 || _successCount % 5 == 0)
-		{
-			// Shown after EVERY completed task, so it was the most-seen English dialog in the app - next to a
-			// Settings page whose own Ko-fi button (DonateButton) has been translated all along.
-			var r = MessageBox.Show(
-				L("MbSupportAsk"),
-				L("MbSupportTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information);
-			if (r == MessageBoxResult.Yes) OpenDonatePage();
-		}
 		SaveUserSettings();
+		if (_successCount != 1 && _successCount % 5 != 0) return;
+		_supportOfferArmed = true;
+		ShowSupportOfferWhenIdleAsync();
+	}
+
+	// Waits for the flow to stop showing its own windows, then asks. "Is one of ours up?" is answered two
+	// ways because the app shows both kinds: ComponentDispatcher.IsThreadModal covers a WPF ShowDialog (the
+	// duplicator's report and confirmation), and GetActiveWindow - which is per-THREAD, so it is our own
+	// dialog or our own window, never another app's - covers a Win32 MessageBox, which does not push a WPF
+	// modal frame. Capped: a dialog nobody dismisses must not leave this waiting for the life of the process,
+	// and a support prompt is the one thing in here that is fine to drop.
+	private async void ShowSupportOfferWhenIdleAsync()
+	{
+		try
+		{
+			IntPtr mine = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+			for (int i = 0; i < 600 && OwnWindowIsUp(mine); i++) await Task.Delay(200);
+			if (OwnWindowIsUp(mine) || !IsLoaded) return;   // still blocked after two minutes: drop the offer
+			if (MessageBox.Show(L("MbSupportAsk"), L("MbSupportTitle"),
+				MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes) OpenDonatePage();
+		}
+		catch (Exception ex) { Log("Support prompt skipped: " + OneLine(ex.Message)); }
+		finally { _supportOfferArmed = false; }
+	}
+
+	private static bool OwnWindowIsUp(IntPtr mainWindow)
+	{
+		if (System.Windows.Interop.ComponentDispatcher.IsThreadModal) return true;
+		IntPtr active = GetActiveWindow();
+		return active != IntPtr.Zero && active != mainWindow;
 	}
 
 	// Overwrites only the FREE space of a volume so already-deleted files become unrecoverable, while leaving the
@@ -8923,14 +8963,16 @@ exit 0
 		if (string.IsNullOrWhiteSpace(src) || !File.Exists(src))
 		{ MessageBox.Show(L("Mb024"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 		long isoSize = new FileInfo(src).Length;
-		// The raw writer sector-pads the final chunk (up to +4095 bytes; 4096 covers 4Kn disks too), so reject
-		// anything whose padded size would run past the device end — else the last write throws after diskpart wiped it.
-		if ((isoSize + 4095) / 4096 * 4096 > disk.Size)
-		{ MessageBox.Show(string.Format(L("MbIsoTooBig"), FormatBytes(isoSize), FormatBytes(disk.Size)), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-
-		// The source ISO must not live on the disk we're about to wipe, or we'd destroy the very file we're writing.
-		if (PhysicalDiskOfPath(src) == disk.Number)
-		{ MessageBox.Show(L("MbSrcOnTarget"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Stop); return; }
+		// ImageTargetRejection, not a copy of two of its tests. This is the DiskBox drive, and it used to be
+		// vetted here by its own inline size check and its own source-on-target check - the same two lines, the
+		// same comment, in a method whose owner says it exists so the rule cannot drift. What the copy did NOT
+		// have is the ambiguity test: two identical drives that report no serial and no device path cannot be
+		// told apart, so the duplicator greys them both out - and the one picked here was written to by NUMBER,
+		// which is the exact thing that refusal exists to prevent. VerifyTargetDiskUnchangedAsync cannot close
+		// it either; its own comment says the device path is "the only signal that survives" this case.
+		string? rejection = ImageTargetRejection(disk, src, isoSize);
+		if (rejection != null)
+		{ MessageBox.Show(rejection, "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		// A Windows / WinPE ISO is not "isohybrid" — writing it raw usually won't boot. Warn and point to the
 		// proper task. Only meaningful for an actual ISO: the probe works by mounting the file with
@@ -9091,7 +9133,10 @@ exit 0
 		if (!string.Equals(disk.HealthStatus, "Healthy", StringComparison.OrdinalIgnoreCase)
 			&& !string.Equals(disk.HealthStatus, "Unknown", StringComparison.OrdinalIgnoreCase))
 			return L("DupRowUnhealthy");
-		return null;
+		// Folded in, so "can this disk take this image" has ONE entry point. It was a separate call that every
+		// caller had to remember to chain with `?? AmbiguousTargetReason(d)` - and the DiskBox target, which
+		// went through neither, is the one drive the app actually writes to in every other task too.
+		return AmbiguousTargetReason(disk);
 	}
 
 	// Fail CLOSED on the case the scheduled clone already refuses (see the note above DiskIdentityKey): two or more
@@ -9125,7 +9170,7 @@ exit 0
 				if (primary != null && d.Number == primary.Number) continue;   // that one is the DiskBox target already
 				string key = DupKey(d);
 				// With no image chosen yet nothing can be judged against it, so every row says so and none is tickable.
-				string? why = isoSize > 0 ? (ImageTargetRejection(d, src, isoSize) ?? AmbiguousTargetReason(d)) : L("Mb024");
+				string? why = isoSize > 0 ? ImageTargetRejection(d, src, isoSize) : L("Mb024");
 				var row = new DupTarget { Disk = d, Key = key, Row = d.ToString(), Reason = why, Eligible = why == null };
 				row.IsChecked = why == null && _dupSelected.Contains(key);
 				row.OnToggled = DupTargetToggled;
@@ -9318,6 +9363,8 @@ exit 0
 	{
 		var targets = new List<DiskItem> { primary };
 		var skipped = new List<(string Row, string? Note, bool Bad)>();
+		// Every drive the person ticked that this run will NOT write, carried through to the end-of-run report.
+		var refused = new List<DriveWriteResult>();
 		// Walk `disks`, not the set: the queue then runs in the order the picker SHOWS, which GetDisksAsync sorts
 		// with the hub sticks first and system disks last. A HashSet has no order at all, so the confirmation and
 		// the run would have listed the drives differently on every launch.
@@ -9327,8 +9374,19 @@ exit 0
 			if (!_dupSelected.Contains(DupKey(d))) continue;
 			found++;
 			if (d.Number == primary.Number) continue;   // already target #1
-			string? why = ImageTargetRejection(d, src, isoSize) ?? AmbiguousTargetReason(d);
-			if (why != null) { skipped.Add((d.ToString(), why, true)); continue; }
+			string? why = ImageTargetRejection(d, src, isoSize);
+			if (why != null)
+			{
+				skipped.Add((d.ToString(), why, true));
+				// ...and into the REPORT, not only into the confirmation. DriveWriteOutcome.Rejected and
+				// DriveWriteResult.Reason were declared for exactly this, and both report paths already render
+				// them - nothing ever produced one. So a run over eight ticked drives that refused two ended
+				// with "6 of 6 drives written", and the two the person ticked were in no list they could still
+				// see. The count is the whole point of that header.
+				refused.Add(new DriveWriteResult(d.Number, d.FriendlyName, d.Size, DriveWriteOutcome.Rejected)
+					{ Reason = why, Identity = (d.Serial ?? "").Trim() });
+				continue;
+			}
 			targets.Add(d);
 		}
 		int missing = _dupSelected.Count - found;
@@ -9364,12 +9422,19 @@ exit 0
 		var live = new Dictionary<string, DiskItem>(StringComparer.OrdinalIgnoreCase);
 		foreach (DiskItem d in disks) live[DupKey(d)] = d;
 		var finalTargets = new List<DiskItem>();
-		foreach (DiskItem d in targets) if (live.TryGetValue(DupKey(d), out DiskItem? now)) finalTargets.Add(now);
+		foreach (DiskItem d in targets)
+		{
+			if (live.TryGetValue(DupKey(d), out DiskItem? now)) { finalTargets.Add(now); continue; }
+			// Unplugged while the confirmation was on screen. Dequeuing it is right; dropping it from the
+			// report was not - it left the header counting a smaller run than the one that was agreed to.
+			refused.Add(new DriveWriteResult(d.Number, d.FriendlyName, d.Size, DriveWriteOutcome.Rejected)
+				{ Reason = L("DupRowChanged"), Identity = (d.Serial ?? "").Trim() });
+		}
 		if (finalTargets.Count == 0)
 		{ MessageBox.Show(L("Mb007"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
 		await RunImageWriteQueueAsync(finalTargets, src, isoSize,
-			VerifyImageWriteCheck.IsChecked == true, EjectWhenDoneCheck.IsChecked == true);
+			VerifyImageWriteCheck.IsChecked == true, EjectWhenDoneCheck.IsChecked == true, refused, missing);
 	}
 
 	// Runs the image write over its targets, one after another, and owns EVERY process-wide thing exactly once per
@@ -9377,8 +9442,13 @@ exit 0
 	// the batch total, the completion chime, the log copy, the rescan and the report. Lowering busy between drives
 	// is the obvious way to write this and it is wrong: SetBusy(false) greys Stop and Pause, force-clears isPaused,
 	// nulls activeProcess and unlocks every other destructive tool on this queue's own next target.
+	// `refused` are drives the person ticked that this run will not write, already carrying their reason;
+	// they are part of the report and of its count, and of nothing else - not the bar's total, which measures
+	// work, and not the failure flag, because nothing was attempted on them. `notConnected` is the count of
+	// ticks with no drive to name at all.
 	private async Task RunImageWriteQueueAsync(IReadOnlyList<DiskItem> targets, string src, long isoSize,
-		bool verifyAfterWrite, bool ejectWhenDone)
+		bool verifyAfterWrite, bool ejectWhenDone,
+		IReadOnlyList<DriveWriteResult>? refused = null, int notConnected = 0)
 	{
 		if (targets.Count == 0) return;
 		var results = new List<DriveWriteResult>();
@@ -9455,6 +9525,10 @@ exit 0
 				results.Add(new DriveWriteResult(targets[i].Number, targets[i].FriendlyName, targets[i].Size, DriveWriteOutcome.NotAttempted)
 					{ Identity = (targets[i].Serial ?? "").Trim() });
 
+			// The refused drives go in LAST, so the drives the run worked on stay in queue order at the top -
+			// but BEFORE anything reads `results`. Appending them after the chime meant a run that turned a
+			// ticked drive away still rang the success sound and offered the support prompt.
+			if (refused != null) results.AddRange(refused);
 			operationTimer.Stop(); operationStopwatch.Stop();
 			failed = results.Any(r => r.Outcome == DriveWriteOutcome.Failed);
 			// Pin the row to 100% only when the run really did all of it. After a Stop or a failure the partial bar
@@ -9469,7 +9543,7 @@ exit 0
 			await RefreshDisksAsync();
 			// Its own try: ShowDialog throws if the main window is already closing, and landing in the catch below
 			// would turn a finished run into an error dialog about a write that actually succeeded.
-			try { ShowImageWriteResult(results, sourceGone); }
+			try { ShowImageWriteResult(results, sourceGone, notConnected); }
 			catch (Exception ex) { Log("Could not show the result window: " + ex.Message); }
 		}
 		catch (Exception ex) { failed = true; NotifyOperationDone(false); SaveLogToDesktop(); ShowError(L("ErrWriteIso"), ex); }
@@ -9501,7 +9575,7 @@ exit 0
 
 	// Reports the run. With one target this is the dialog this flow has always shown, driven now by that drive's
 	// own outcome instead of by reading stopRequested twice.
-	private void ShowImageWriteResult(IReadOnlyList<DriveWriteResult> results, bool sourceGone)
+	private void ShowImageWriteResult(IReadOnlyList<DriveWriteResult> results, bool sourceGone, int notConnected = 0)
 	{
 		if (headlessRun || results.Count == 0) return;
 		if (results.Count > 1)
@@ -9530,8 +9604,11 @@ exit 0
 				if (x.LeftOffline) note += "  " + L("DupRowLeftOffline");
 				report.Add((head, note, !x.Ok));
 			}
+			// The footer slot the confirmation uses for its options: here it carries the ticks that had no drive
+			// behind them at all, which have no row to sit in and were otherwise said only before the run began.
+			string? footer = notConnected > 0 ? string.Format(L("DupNotConnectedDone"), notConnected) : null;
 			ShowDuplicatorWindow(string.Format(L("DupReportHead"), good, results.Count),
-				good != results.Count, sourceGone ? L("DupSourceGone") : null, report, null, null, null);
+				good != results.Count, sourceGone ? L("DupSourceGone") : null, report, footer, null, null);
 			return;
 		}
 		DriveWriteResult r = results[0];
@@ -9550,10 +9627,15 @@ exit 0
 			DriveWriteOutcome.VerifyFailed => "\n\n" + string.Format(L("IsoVerifyFailed"), FormatBytes(r.VerifyMismatchAt)),
 			_ => ""
 		};
-		MessageBox.Show(r.Wrote
+		// Both online attempts failed, so Windows still has this disk hidden. The multi-drive report has said
+		// this since the outcome was first recorded ("record it instead so the run can say which one"); the
+		// one-drive dialog never did, so the single most common case showed "Done... plug it into the target
+		// PC" with an information icon over a drive the person would not find in Explorer.
+		string offlineNote = r.LeftOffline ? "\n\n" + L("DupRowLeftOffline") : "";
+		MessageBox.Show((r.Wrote
 			? string.Format(L("IsoWriteDone"), r.DiskNumber) + verifyNote
-			: string.Format(L("IsoWriteStopped"), r.DiskNumber),
-			"DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
+			: string.Format(L("IsoWriteStopped"), r.DiskNumber)) + offlineNote,
+			"DriveForge", MessageBoxButton.OK, r.LeftOffline ? MessageBoxImage.Exclamation : MessageBoxImage.Information);
 	}
 
 	// Mounts the ISO read-only and checks for Windows setup files (boot.wim/install.*) to detect a non-isohybrid
@@ -9573,6 +9655,11 @@ exit 0
 		}
 		catch { return false; }
 	}
+
+	// Per-THREAD active window: while one of our own dialogs is up it is that dialog, otherwise our
+	// window - it never names another application's, which is what makes it usable as "is one of ours up".
+	[System.Runtime.InteropServices.DllImport("user32.dll")]
+	private static extern IntPtr GetActiveWindow();
 
 	[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
 	private static extern bool FlushFileBuffers(SafeFileHandle hFile);

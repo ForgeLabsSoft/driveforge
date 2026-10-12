@@ -2943,4 +2943,220 @@ public class InvariantTests
 				+ "counts has changed — widen the rule to that flow if it now snapshots, or update the count:\n  "
 				+ string.Join("\n  ", drifted));
 	}
+
+	/// <summary>
+	/// RULE — what the run records about a drive reaches its report.
+	///
+	/// The image writer is the most carefully built flow in the app: typed outcomes instead of re-reading
+	/// stopRequested, a per-drive core that never throws so one dead stick cannot abandon the queue behind it,
+	/// a read-back opened with FILE_FLAG_NO_BUFFERING so a fake-capacity drive cannot verify out of the OS
+	/// cache. Everything it learns about a drive it writes down. Three things it wrote down never reached the
+	/// person:
+	///
+	///   - DriveWriteOutcome.Rejected and DriveWriteResult.Reason were declared for the drives the run refuses,
+	///     and BOTH report paths already rendered them — nothing ever produced one. So eight ticked drives with
+	///     two refused ended as "6 of 6 drives written", and the two were in no list the person could still see.
+	///   - LeftOffline ("both online attempts failed, so this disk really is still offline — record it instead
+	///     so the run can say which one") reached the multi-drive report and not the one-drive dialog, which is
+	///     the common case: "Done… plug it into the target PC", information icon, over a drive Windows hides.
+	///   - ImageTargetRejection says it exists so the rule cannot drift, and the DiskBox target was vetted by a
+	///     copy of two of its five tests. The test the copy lacked was the ambiguity refusal, which greys out
+	///     two indistinguishable drives in the picker while the one chosen above them was written to by NUMBER.
+	///
+	/// So: every outcome is produced by someone and named by the reporter; everything the multi-drive report
+	/// reads off a result, the one-drive dialog reads too; and the target rule has exactly one owner.
+	/// </summary>
+	[Fact]
+	public void WhatTheRunRecordsAboutADriveReachesItsReport()
+	{
+		var reporter = SourceModel.Methods().Where(m => m.Name == "ShowImageWriteResult").ToArray();
+		Assert.True(reporter.Length == 1, $"expected one ShowImageWriteResult, found {reporter.Length}");
+		string reporterText = reporter[0].Method.ToString();
+
+		// --- every outcome is produced by someone, and named by the reporter -------------------------
+		var outcomeEnum = SourceModel.Parsed.SelectMany(p => p.Root.DescendantNodes().OfType<EnumDeclarationSyntax>())
+			.Where(e => e.Identifier.Text == "DriveWriteOutcome").ToArray();
+		Assert.True(outcomeEnum.Length == 1, $"expected one DriveWriteOutcome enum, found {outcomeEnum.Length}");
+		var values = outcomeEnum[0].Members.Select(m => m.Identifier.Text).ToArray();
+		Assert.True(values.Length >= 9,
+			$"Only {values.Length} outcome(s); there were nine. Re-read this rule rather than leaving it passing "
+				+ "over a scope that has moved.");
+
+		// PRODUCED means something BUILDS a result with it: the value passed as an argument to a call or to a
+		// `new DriveWriteResult(...)`. Not merely named — `Wrote` and `Ok` list four of these outcomes in their
+		// own predicates, so "appears in some member other than the reporter" called every one of them produced
+		// and the rule went green on an outcome whose only producer had just been taken away. Found by mutation.
+		// Keyed on the two things that BUILD a result - the local `Result(...)` helper and `new DriveWriteResult`
+		// - and then any outcome named anywhere inside one of those, because the argument is often a
+		// ConditionalExpression: `Result(stopRequested ? NotAttempted : IdentityChanged)`. Matching the
+		// argument's own text called IdentityChanged unproduced, which is this file's oldest blind spot
+		// (see LiteralPartsOf) showing up in a third rule.
+		var built = new SortedSet<string>(StringComparer.Ordinal);
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			if (name == "ShowImageWriteResult") continue;
+			foreach (SyntaxNode maker in method.DescendantNodes())
+			{
+				bool isMaker = maker switch
+				{
+					InvocationExpressionSyntax inv => inv.Expression.ToString() == "Result",
+					ObjectCreationExpressionSyntax oc => oc.Type.ToString() == "DriveWriteResult",
+					_ => false
+				};
+				if (!isMaker) continue;
+				foreach (MemberAccessExpressionSyntax ma in maker.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
+					if (ma.Expression.ToString() == "DriveWriteOutcome") built.Add(ma.Name.Identifier.Text);
+			}
+		}
+		var unproduced = values.Where(v => !built.Contains(v)).ToList();
+		var unreported = values.Where(v => !reporterText.Contains("DriveWriteOutcome." + v, StringComparison.Ordinal)).ToList();
+		Assert.True(unproduced.Count == 0,
+			"These outcomes are declared and rendered and nothing ever produces one, so the case they describe "
+				+ "is silently missing from the report: " + string.Join(", ", unproduced));
+		Assert.True(unreported.Count == 0,
+			"These outcomes can happen to a drive and the report has no words for them: "
+				+ string.Join(", ", unreported));
+
+		// --- the one-drive dialog reads what the multi-drive report reads ----------------------------
+		// The reporter's two halves are split by `DriveWriteResult r = results[0];`: above it the loop over `x`,
+		// below it the single dialog over `r`. Compare the two sets of members by name.
+		var split = reporter[0].Method.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+			.Where(v => v.Identifier.Text == "r").ToArray();
+		Assert.True(split.Length == 1, $"expected one `r` in the reporter, found {split.Length}");
+		int boundary = split[0].SpanStart;
+
+		var multi = new SortedSet<string>(StringComparer.Ordinal);
+		var single = new SortedSet<string>(StringComparer.Ordinal);
+		foreach (MemberAccessExpressionSyntax ma in reporter[0].Method.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
+		{
+			string who = ma.Expression.ToString();
+			if (who == "x" && ma.SpanStart < boundary) multi.Add(ma.Name.Identifier.Text);
+			else if (who == "r" && ma.SpanStart > boundary) single.Add(ma.Name.Identifier.Text);
+		}
+		Assert.True(multi.Count >= 5,
+			$"Only {multi.Count} member(s) read in the enumerating report; there were seven. Re-read this rule.");
+
+		// What a ROW needs and a dialog does not: the row has to name its drive, because eight of them scroll
+		// past; the one-drive dialog is about the drive the person just picked and already names it in its own
+		// sentence. Everything else is something the run LEARNED, and belongs in both.
+		var rowOnly = new SortedSet<string>(StringComparer.Ordinal)
+		{ "DiskNumber", "FriendlyName", "Size", "Identity", "Ok" };
+		var dropped = multi.Where(m => !single.Contains(m) && !rowOnly.Contains(m)).ToArray();
+		Assert.True(dropped.Length == 0,
+			"The enumerating report tells the person these and the one-drive dialog does not, so the commonest "
+				+ "case is the one that says least: " + string.Join(", ", dropped)
+				+ "\n  enumerating report: " + string.Join(", ", multi)
+				+ "\n  one-drive dialog:   " + string.Join(", ", single));
+
+		// --- one owner for "can this disk take this image" -------------------------------------------
+		var sizeRule = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("(isoSize + 4095) / 4096 * 4096 > disk.Size", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(sizeRule.Length == 1 && sizeRule[0] == "ImageTargetRejection",
+			"The padded-size test belongs to ImageTargetRejection and nowhere else - a second copy is how the "
+				+ "DiskBox target came to be vetted by two of its five tests. Found in: " + string.Join(", ", sizeRule));
+
+		var srcRule = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("PhysicalDiskOfPath(src) == disk.Number", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(srcRule.Length == 1 && srcRule[0] == "ImageTargetRejection",
+			"...and so does the source-on-target test. Found in: " + string.Join(", ", srcRule));
+
+		// The fail-closed ambiguity refusal is reached THROUGH the owner, so a caller cannot forget to chain it.
+		var ambig = SourceModel.Methods()
+			.Where(m => m.Name != "AmbiguousTargetReason")
+			.Where(m => m.Method.ToString().Contains("AmbiguousTargetReason(", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(ambig.Length == 1 && ambig[0] == "ImageTargetRejection",
+			"AmbiguousTargetReason is called from ImageTargetRejection and nowhere else: as a separate call every "
+				+ "caller had to remember to chain it, and the one drive the app always writes to went through "
+				+ "neither. Called from: " + string.Join(", ", ambig));
+
+		// ...and the flow that writes to one drive asks the owner rather than its own questions.
+		var front = SourceModel.Methods().Where(m => m.Name == "WriteIsoImageFlowAsync").ToArray();
+		Assert.True(front.Length == 1, $"expected one WriteIsoImageFlowAsync, found {front.Length}");
+		Assert.True(front[0].Method.ToString().Contains("ImageTargetRejection(disk, src, isoSize)", StringComparison.Ordinal),
+			"The single-drive flow must vet its target through ImageTargetRejection; its own inline copy of two "
+				+ "of those tests is the defect this rule exists for.");
+	}
+
+	/// <summary>
+	/// RULE — a finished run shows its own result before anything else asks for anything.
+	///
+	/// Found by driving the duplicator: after the write finished, an owned window titled "Susține DriveForge"
+	/// appeared and the status line never reached Ready, for the whole eight and a half minutes the harness
+	/// waited. The run's own report was behind the support prompt, because MaybeOfferDonation put its
+	/// MessageBox up inside NotifyOperationDone — which every one of fifteen flows calls immediately BEFORE
+	/// showing its result. The two flows that also asked AFTER their dialog say what the intent was; their
+	/// second ask is also why _successCount, which is SAVED, advanced two per run, so a prompt meant for
+	/// "the 1st and every 5th" arrived on every other run.
+	///
+	/// And one of my own, from this screen's other fix: the refused drives were appended to `results` after
+	/// the chime read it, so a run that turned a ticked drive away still rang the success sound.
+	/// </summary>
+	[Fact]
+	public void AFinishedRunShowsItsOwnResultFirst()
+	{
+		// --- the queue counts the refused drives before anything reads the outcome ---------------------
+		var queue = SourceModel.Methods().Where(m => m.Name == "RunImageWriteQueueAsync").ToArray();
+		Assert.True(queue.Length == 1, $"expected one RunImageWriteQueueAsync, found {queue.Length}");
+
+		var appends = queue[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Where(i => i.ToString().Contains("results.AddRange(refused)", StringComparison.Ordinal)).ToArray();
+		Assert.True(appends.Length == 1, $"expected one results.AddRange(refused), found {appends.Length}");
+		var readers = queue[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Where(i => i.Expression.ToString() is "NotifyOperationDone" or "ShowImageWriteResult").ToArray();
+		Assert.True(readers.Length >= 2,
+			$"Only {readers.Length} reader(s) of the outcome in the queue; there were three. Re-read this rule.");
+		var tooLate = readers.Where(r => r.SpanStart < appends[0].SpanStart)
+			.Select(r => Trim120(r.ToString())).ToArray();
+		Assert.True(tooLate.Length == 0,
+			"These read the run's outcome before the drives it refused were added to it, so a run that turned a "
+				+ "ticked drive away still counts as a clean success:\n  " + string.Join("\n  ", tooLate));
+
+		// --- the support prompt is armed here and shown somewhere else ---------------------------------
+		var offer = SourceModel.Methods().Where(m => m.Name == "MaybeOfferDonation").ToArray();
+		Assert.True(offer.Length == 1, $"expected one MaybeOfferDonation, found {offer.Length}");
+		Assert.True(!offer[0].Method.ToString().Contains("MessageBox.Show", StringComparison.Ordinal),
+			"MaybeOfferDonation must not show its dialog itself: every flow asks it immediately BEFORE showing "
+				+ "its own result, so a MessageBox here stands in front of the outcome of the run.");
+
+		// Asked from ONE place. Two flows used to ask again after their dialog, which is what advanced the
+		// saved counter two per run.
+		var askers = SourceModel.Methods()
+			.Where(m => m.Name != "MaybeOfferDonation")
+			.Where(m => m.Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+				.Any(i => i.Expression.ToString() == "MaybeOfferDonation"))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(askers.SequenceEqual(new[] { "NotifyOperationDone" }),
+			"The support offer is asked for in one place, because it is throttled on a counter that is saved to "
+				+ "disk: a second ask in the same run advances it twice. Asked from: " + string.Join(", ", askers));
+
+		// ...and only that one counter write.
+		var counters = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("_successCount++", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(counters.SequenceEqual(new[] { "MaybeOfferDonation" }),
+			"_successCount is advanced in one place. Found in: " + string.Join(", ", counters));
+
+		// --- and the deferred shower asks whether one of ours is up, first ----------------------------
+		var shower = SourceModel.Methods().Where(m => m.Name == "ShowSupportOfferWhenIdleAsync").ToArray();
+		Assert.True(shower.Length == 1, $"expected one ShowSupportOfferWhenIdleAsync, found {shower.Length}");
+		string body = shower[0].Method.ToString();
+		Assert.True(body.Contains("MbSupportAsk", StringComparison.Ordinal),
+			"the deferred shower is where the prompt is shown");
+		Assert.True(body.Contains("OwnWindowIsUp(", StringComparison.Ordinal),
+			"ShowSupportOfferWhenIdleAsync must ask OwnWindowIsUp before showing: without it the prompt lands on "
+				+ "top of the report again, which is the defect this rule exists for.");
+
+		// Both kinds of window, because the app shows both: a WPF ShowDialog pushes a modal frame, a Win32
+		// MessageBox does not, and the duplicator's report is the first kind while most reports are the second.
+		var probe = SourceModel.Methods().Where(m => m.Name == "OwnWindowIsUp").ToArray();
+		Assert.True(probe.Length == 1, $"expected one OwnWindowIsUp, found {probe.Length}");
+		string probeBody = probe[0].Method.ToString();
+		foreach (string half in new[] { "IsThreadModal", "GetActiveWindow" })
+			Assert.True(probeBody.Contains(half, StringComparison.Ordinal),
+				$"OwnWindowIsUp must test {half}: one of the two kinds of window this app shows is invisible to "
+					+ "the other test.");
+	}
 }
