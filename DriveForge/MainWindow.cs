@@ -1059,13 +1059,38 @@ public partial class MainWindow : Window, IComponentConnector
 		string path = sourcePath;
 		try
 		{
+			ShowIsoChecksumDialog(Path.GetFileName(path), await HashFileForChecksumAsync(path));
+		}
+		catch (OperationCanceledException) { Log("Checksum stopped by user."); }
+		catch (Exception ex)
+		{
+			ShowError(L("ErrChecksum"), ex);
+		}
+	}
+
+	/// <summary>
+	/// The one place the app hashes a file FOR THE USER, so every screen where a file arrives can offer the
+	/// check instead of only the screen that happens to own <c>sourcePath</c>.
+	///
+	/// It was written inside VerifyIsoButton_Click, which is why the Download-an-ISO screen — where a freshly
+	/// fetched OS image is exactly what wants checking, and which collapses the panel that button lives in —
+	/// had nothing to offer, under a warning that told the user outright there was no checksum check.
+	///
+	/// Raises and clears the busy state itself, because both callers reach it with nothing else running: the
+	/// button guards on isBusy, and the download has already called SetBusy(false) by then. Throws
+	/// StoppedException if the person presses Stop, which both callers already handle.
+	/// </summary>
+	private async Task<string> HashFileForChecksumAsync(string path)
+	{
+		try
+		{
 			SetBusy(busy: true, L("BzSha"));
 			stopRequested = false; isPaused = false;   // Stop is enabled during hashing; reset the flag so the loop below can honor it
 			ProgressBar.Value = 0.0;
 			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
 			long total = new FileInfo(path).Length;
-			string hash = await Task.Run(() =>
+			return await Task.Run(() =>
 			{
 				using var sha = System.Security.Cryptography.SHA256.Create();
 				using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
@@ -1088,12 +1113,6 @@ public partial class MainWindow : Window, IComponentConnector
 				sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
 				return Convert.ToHexString(sha.Hash ?? Array.Empty<byte>());
 			});
-			ShowIsoChecksumDialog(Path.GetFileName(path), hash);
-		}
-		catch (OperationCanceledException) { Log("Checksum stopped by user."); }
-		catch (Exception ex)
-		{
-			ShowError(L("ErrChecksum"), ex);
 		}
 		finally
 		{
@@ -14018,7 +14037,15 @@ exit 0
 	private sealed class IsoEntry { public string Label = ""; public IsoKind Kind; public string A = ""; public string B = ""; public string C = ""; }
 	private static readonly IsoEntry[] IsoCatalog =
 	{
-		new IsoEntry { Label = "Ubuntu 24.04 LTS — Desktop (64-bit)", Kind = IsoKind.Index, A = "https://releases.ubuntu.com/24.04/", B = "ubuntu-24\\.04(?:\\.\\d+)?-desktop-amd64\\.iso" },
+		// TwoStep, not Index, and no version anywhere. The directory pattern keeps only LTS releases (an EVEN
+		// major with .04, so the 25.10 / 26.10 interims are skipped) and NaturalSortKey picks the highest,
+		// which is the newest point release. This entry used to pin 24.04 TWICE — in the directory it indexed
+		// and in the filename pattern — so "Get latest" could not return anything newer than a 24.04 point
+		// release, under a comment two lines up claiming the catalog has no hard-coded versions. Measured
+		// 2026-10-12 by running the app's own ResolveCatalog over the real indexes: the server was already
+		// serving 26.04.1 LTS, and this pattern resolves to ubuntu-26.04.1-desktop-amd64.iso. The label drops
+		// the version with it, because a label naming a version is the same pin wearing a different hat.
+		new IsoEntry { Label = "Ubuntu LTS — Desktop (64-bit)", Kind = IsoKind.TwoStep, A = "https://releases.ubuntu.com/", B = "[0-9]*[02468]\\.04(?:\\.[0-9]+)*/", C = "ubuntu-[0-9.]+-desktop-amd64\\.iso" },
 		new IsoEntry { Label = "Linux Mint — Cinnamon (64-bit)", Kind = IsoKind.TwoStep, A = "https://mirrors.edge.kernel.org/linuxmint/stable/", B = "[0-9]+(?:\\.[0-9]+)?/", C = "linuxmint-[0-9.]+-cinnamon-64bit\\.iso" },
 		new IsoEntry { Label = "Linux Mint — Xfce (64-bit)", Kind = IsoKind.TwoStep, A = "https://mirrors.edge.kernel.org/linuxmint/stable/", B = "[0-9]+(?:\\.[0-9]+)?/", C = "linuxmint-[0-9.]+-xfce-64bit\\.iso" },
 		new IsoEntry { Label = "Debian — Live GNOME (64-bit)", Kind = IsoKind.Index, A = "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/", B = "debian-live-[0-9.]+-amd64-gnome\\.iso" },
@@ -14174,8 +14201,24 @@ exit 0
 			NotifyOperationDone(true);
 			if (DlSaveHint != null) DlSaveHint.Text = string.Format(L("DlSaved"), dest);
 			if (!total.HasValue) MessageBox.Show(L("DlSizeUnverified"), L("MbDownloadTitle"), MessageBoxButton.OK, MessageBoxImage.Warning);   // no Content-Length -> a truncated body can look complete; tell the user to verify the ISO
-			if (MessageBox.Show(string.Format(L("MbDownloaded"), dest), L("MbDownloadTitle"),
-					MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+			// The checksum check is offered HERE, which is the moment it means anything: a multi-gigabyte OS
+			// image has just come off a mirror and is about to be written to a disk and booted. The app has
+			// always had the check — it was reachable only from the Create-USB and write-ISO screens, whose
+			// panel this view collapses — and DlHttpWarn used to tell the person outright there was none.
+			// Cancelling the menu does nothing, which is the third option and needs no row of its own.
+			int? next = ShowActionMenu(L("MbDownloadTitle"), string.Format(L("MbDownloaded"), dest),
+				new[] { L("DlVerifyNow"), L("DlOpenFolder") },
+				new[] { 0xE73E, 0xE8B7 }, new[] { false, false }, 0);
+			if (next == 0)
+			{
+				// Its own try: a Stop during the hash, or an unreadable file, must not reach the download's
+				// catch — which would report the DOWNLOAD as failed and delete nothing, having already moved
+				// the finished file into place.
+				try { ShowIsoChecksumDialog(Path.GetFileName(dest), await HashFileForChecksumAsync(dest)); }
+				catch (OperationCanceledException) { Log("Checksum stopped by user."); }
+				catch (Exception cex) { ShowError(L("ErrChecksum"), cex); }
+			}
+			else if (next == 1)
 				try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + dest + "\"") { UseShellExecute = true }); } catch { }
 		}
 		catch (Exception ex)

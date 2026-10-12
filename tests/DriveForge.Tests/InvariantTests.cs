@@ -2423,4 +2423,107 @@ public class InvariantTests
 			"These build a line for the completion dialog and the completion dialog never asks for it:\n  "
 				+ string.Join("\n  ", uncalled));
 	}
+
+	/// <summary>
+	/// No entry in the ISO catalog hard-codes a version.
+	///
+	/// The catalog says so about itself — "Distros whose latest ISO is resolved live from a stable source
+	/// (durable — no hard-coded versions)" — and five of its six entries were: Mint walks
+	/// linuxmint/stable/ for the newest version directory, Debian uses current-live/, Arch uses iso/latest/.
+	/// The Ubuntu entry pinned 24.04 TWICE, in the directory it indexed AND in the filename pattern, so
+	/// "Get latest" could not return anything newer than a 24.04 point release. Measured 2026-10-12 by
+	/// running the app's own ResolveCatalog over the real indexes: releases.ubuntu.com was already serving
+	/// 26.04.1 LTS while Mint and Debian resolved to 22.3 and 13.7.0, both current. Two LTS generations
+	/// behind, on the distro most people would pick, under a comment promising the opposite.
+	///
+	/// A version is a digit group, a dot, and another digit group. That is all this looks for, and no
+	/// stripping of character classes is needed first — which was measured, not assumed, by writing the
+	/// stripping and then checking it was load-bearing: it was not. In a regex the digits that mean "any
+	/// digit" always sit inside a class, so the character immediately before the dot is "]" or a
+	/// quantifier, never a bare digit: "[0-9]+(?:\.[0-9]+)?/" and "ubuntu-[0-9.]+-desktop-amd64\.iso"
+	/// both pass untouched, while "ubuntu-24\.04" does not. The architecture strings ("64-bit", "amd64",
+	/// "x86_64") carry digits with no dot between them at all.
+	///
+	/// Checked against every field including the LABEL, because "Ubuntu 24.04 LTS" is the same pin wearing
+	/// a different hat: the label is what the person reads, and it went stale with the URL.
+	/// </summary>
+	[Fact]
+	public void NoIsoCatalogEntryHardCodesAVersion()
+	{
+		var catalog = SourceModel.Parsed
+			.SelectMany(p => p.Root.DescendantNodes().OfType<FieldDeclarationSyntax>())
+			.Where(f => f.Declaration.Variables.Any(v => v.Identifier.Text == "IsoCatalog"))
+			.ToArray();
+		Assert.True(catalog.Length == 1, $"expected one IsoCatalog field, found {catalog.Length}");
+
+		// Every string literal in the initialiser: the labels and the three URL/pattern fields.
+		string[] literals = catalog[0].DescendantNodes().OfType<LiteralExpressionSyntax>()
+			.Where(l => l.Token.IsKind(SyntaxKind.StringLiteralToken))
+			.Select(l => l.Token.ValueText).ToArray();
+		Assert.True(literals.Length >= 12,
+			$"Only {literals.Length} literal(s) found in IsoCatalog; six entries carry at least two each. "
+				+ "Re-read this rule rather than leaving it passing over a scope that has moved.");
+
+		var pinned = new List<string>();
+		foreach (string lit in literals)
+		{
+			Match v = Regex.Match(lit, @"\d+\\?\.\d+");
+			if (v.Success) pinned.Add($"\"{Trim120(lit)}\"  pins \"{v.Value}\"");
+		}
+
+		Assert.True(pinned.Count == 0,
+			"The ISO catalog promises it has no hard-coded versions, and these pin one. An entry that names "
+				+ "a version serves that version for ever: \"Get latest\" on Ubuntu was two LTS generations "
+				+ "behind. Resolve the version from the server — Kind.TwoStep walks a directory index and "
+				+ "NaturalSortKey picks the newest:\n  " + string.Join("\n  ", pinned));
+	}
+
+	/// <summary>
+	/// The checksum check is offered where an ISO arrives, and nothing claims the app cannot do it.
+	///
+	/// The hashing loop used to live inside VerifyIsoButton_Click, so it could only ever hash
+	/// <c>sourcePath</c> — the file picked on the Create-USB or write-ISO screen. The Download-an-ISO
+	/// screen collapses the panel that button sits in, so the one place a multi-gigabyte OS image actually
+	/// arrives had nothing to offer; and DlHttpWarn told the person so, in every language: "its contents can
+	/// be altered in transit **and there is no checksum check**". The app had the check the whole time, one
+	/// screen away.
+	///
+	/// This is a narrow regression pin, and worth saying so: the first half is derived — the hashing owner
+	/// must be reached from both the button and the download — but the second half is a literal guard on one
+	/// sentence, because "no string claims a capability the app lacks" is not something a rule can derive.
+	/// It is still the half that would have caught the original defect, because the sentence is what made
+	/// the gap a lie rather than merely a gap.
+	/// </summary>
+	[Fact]
+	public void TheChecksumCheckIsOfferedWhereAnIsoArrives()
+	{
+		var owner = SourceModel.Methods().Where(m => m.Name == "HashFileForChecksumAsync").ToArray();
+		Assert.True(owner.Length == 1,
+			$"Expected one HashFileForChecksumAsync, found {owner.Length}. The user-facing checksum has one "
+				+ "owner so that every screen where a file arrives can offer it, not just the screen that "
+				+ "happens to own sourcePath.");
+
+		foreach (string caller in new[] { "VerifyIsoButton_Click", "DownloadIsoAsync" })
+		{
+			var m = SourceModel.Methods().Where(x => x.Name == caller).ToArray();
+			Assert.True(m.Length == 1, $"expected one {caller}, found {m.Length}");
+			Assert.True(SourceModel.Calls(m[0].Method, "HashFileForChecksumAsync").Any(),
+				$"{caller} does not offer the checksum check. A freshly downloaded OS image, about to be "
+					+ "written to a disk and booted, is the moment the check means something.");
+		}
+
+		// ...and no sentence tells the person the app cannot do what it just did. The table is read here
+		// rather than in LocalizationTests so the two halves of one claim stay in one place: the code must
+		// offer the check AND the text must not deny it.
+		var strings = (Dictionary<string, Dictionary<string, string>>)Mw.Field("Strings");
+		var liars = new List<string>();
+		foreach (string lang in strings.Keys)
+			foreach (var (key, value) in strings[lang])
+				if (Regex.IsMatch(value, @"no checksum|without a checksum|checksum check\b.{0,12}\bnone",
+						RegexOptions.IgnoreCase))
+					liars.Add($"{key} [{lang}]: {Trim120(value)}");
+		Assert.True(liars.Count == 0,
+			"These say the app does no checksum check, and it does — offered on the Create-USB screen, the "
+				+ "write-ISO screen, and after a download:\n  " + string.Join("\n  ", liars));
+	}
 }
