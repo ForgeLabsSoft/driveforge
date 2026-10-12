@@ -829,6 +829,32 @@ public partial class MainWindow : Window, IComponentConnector
 		return howLong + L(measured ? "EstFromBurst" : "EstNoTest");
 	}
 
+	// An option the person cannot SEE was not offered, so it must not be applied — and must not be announced
+	// either.
+	//
+	// These two checkboxes are visible and enabled only for the fresh ISO install, and they are the ONLY two
+	// options in the app read by flows that cannot show them. Measured: of twelve conditionally-visible
+	// option checkboxes, every other one is read only where its own task displays it; these two are read by
+	// the portable clone, both restores, and the VHDX export. The export is the starkest — its panel
+	// collapses the whole left column — so the bypasses that reach the produced image are whatever was last
+	// ticked on ANOTHER screen, possibly in an earlier session, because the setting is saved and restored.
+	//
+	// The repair is not a new idea here; it is written four lines into ConfirmOperationSummary below, for the
+	// three options underneath these two: "Visibility is the honest test: it is exactly 'could the user see
+	// and tick this for what they are about to do'." These two were left on `!isClone`, which answers for the
+	// clone and not for a restore or an export. EjectWhenDoneCheck and BitLockerCheck carry the same lesson
+	// in their own comments.
+	//
+	// IsVisible, not Visibility: it is false when ANY ancestor is collapsed, which is what the panel views
+	// (Export, Download, Multi-boot, Recover, Clean) do — and those switch the view without touching ModeBox
+	// at all, so a reset hung off a mode change would never fire for them.
+	private static bool Offered(System.Windows.Controls.CheckBox? box) =>
+		box?.IsVisible == true && box.IsChecked == true;
+
+	private bool BypassRequirementsWanted => Offered(BypassRequirementsCheck);
+
+	private bool BypassAccountWanted => Offered(BypassAccountCheck);
+
 	// One clear "here is what will happen" confirmation instead of several pop-ups.
 	private async Task<bool> ConfirmOperationSummary(DiskItem disk)
 	{
@@ -850,27 +876,32 @@ public partial class MainWindow : Window, IComponentConnector
 		// Show what is currently ON the target disk so the user can be 100% sure they picked the right one.
 		string contents = await GetDiskContentsAsync(disk.Number);
 
+		// Every option asks Offered(...) — "could the person see and tick this for what they are about to
+		// do" — which is the test the comment below this block already prescribed, now applied to all of
+		// them instead of three. Both of these were MISSING from the summary while doing exactly what they
+		// say: a run with them ticked removed apps from the image and injected six driver packages, and the
+		// last review before the disk was erased listed neither. The checkbox labels are already translated,
+		// and repeating the words the user actually ticked reads better here than a paraphrase.
+		//
+		// What the five hand-written mode conditions hid, found by making them all one test:
+		//   - DataPartitionCheck had NO condition, so a restore listed "create an extra data partition";
+		//   - the two bypasses used `!isClone`, which answers for the clone and not for a restore or export;
+		//   - VerifyContentCheck is read only by the clone and CompactImageCheck only by the ISO install,
+		//     yet OptionsSection shows both to both — so each sat on a screen where nothing read it, and
+		//     only this list's mode guard kept it from being announced there. They have their own
+		//     Visibility now, beside UseDismEngineCheck's, and the guard is no longer load-bearing.
 		var opts = new List<string>();
-		if (BitLockerCheck.IsChecked == true) opts.Add(L("CoOptBitLocker"));
-		if (BypassAccountCheck.IsChecked == true && !isClone) opts.Add(L("CoOptLocalAcct"));
-		if (BypassRequirementsCheck.IsChecked == true && !isClone) opts.Add(L("CoOptBypassReq"));
-		// Both of these were MISSING from the summary while doing exactly what they say: a run with them ticked
-		// removed apps from the image and injected six driver packages, and the last review before the disk was
-		// erased listed neither. The checkbox labels are already translated, and repeating the words the user
-		// actually ticked reads better here than a paraphrase.
-		// ...and only when THIS mode can run them. The three are collapsed and disabled on a mode change but
-		// never unchecked, so a tick left over from building a Windows USB was still being announced in the
-		// last dialog before a RESTORE erased the disk - promising work no restore path performs. Visibility
-		// is the honest test: it is exactly "could the user see and tick this for what they are about to do".
-		bool optionsApply = DebloatCheck.Visibility == Visibility.Visible;
-		if (DebloatCheck.IsChecked == true && optionsApply) opts.Add(L("DebloatCheck"));
-		if (AddAllDriversCheck.IsChecked == true && optionsApply) opts.Add(L("AddAllDriversCheck"));
-		else if (AddNetworkDriversCheck.IsChecked == true && optionsApply) opts.Add(L("AddNetworkDriversCheck"));
+		if (Offered(BitLockerCheck)) opts.Add(L("CoOptBitLocker"));
+		if (Offered(BypassAccountCheck)) opts.Add(L("CoOptLocalAcct"));
+		if (Offered(BypassRequirementsCheck)) opts.Add(L("CoOptBypassReq"));
+		if (Offered(DebloatCheck)) opts.Add(L("DebloatCheck"));
+		if (Offered(AddAllDriversCheck)) opts.Add(L("AddAllDriversCheck"));
+		else if (Offered(AddNetworkDriversCheck)) opts.Add(L("AddNetworkDriversCheck"));
 		if (ModeBox.SelectedIndex == ModeCloneInternal) opts.Add(L("CoOptWholeDisk"));
-		else if (CloneOtherPartitionsCheck.IsChecked == true && isClone) opts.Add(L("CoOptOtherParts"));
-		else if (DataPartitionCheck.IsChecked == true) opts.Add(L("CoOptDataPart"));
-		if (VerifyContentCheck.IsChecked == true && isClone) opts.Add(L("CoOptVerify"));
-		if (CompactImageCheck.IsChecked == true && !isClone && !isFfu) opts.Add(L("CoOptCompact"));
+		else if (Offered(CloneOtherPartitionsCheck)) opts.Add(L("CoOptOtherParts"));
+		else if (Offered(DataPartitionCheck)) opts.Add(L("CoOptDataPart"));
+		if (Offered(VerifyContentCheck)) opts.Add(L("CoOptVerify"));
+		if (Offered(CompactImageCheck)) opts.Add(L("CoOptCompact"));
 
 		// One composite key per confirmation, like MbFormatConfirm and MbWipeConfirm next door: the moving parts
 		// are placeholders so a translator sees the whole sentence. This dialog gates Clone, Create USB and
@@ -890,7 +921,10 @@ public partial class MainWindow : Window, IComponentConnector
 		// Same lesson, different feature. BitLocker is turned on at 96%, so a Windows Home owner could tick the box,
 		// wait out an hour of cloning, and only then be told that manage-bde refused with 0x8031005A - the one thing
 		// they asked for being the one thing their edition cannot do. Say it here, before anything is erased.
-		if (BitLockerCheck.IsChecked == true && !HostEditionCanTurnOnBitLocker()) body += "\n\n" + L("BitLockerEditionWarn");
+		// Offered(...) here too: warning that this Windows edition cannot turn BitLocker on is noise when
+		// BitLocker was not on offer for this task in the first place. BitLockerCheck is also CLEARED when it
+		// cannot apply, which made a bare read honest — but one shape for every option beats two.
+		if (Offered(BitLockerCheck) && !HostEditionCanTurnOnBitLocker()) body += "\n\n" + L("BitLockerEditionWarn");
 
 		if (MessageBox.Show(body, L("CoTitle"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
 			return false;
@@ -1817,6 +1851,14 @@ public partial class MainWindow : Window, IComponentConnector
 			// on screen looking like a decision the user needed to make. Same treatment as the bypass checkboxes above.
 			UseDismEngineCheck.Visibility = cloneMode ? Visibility.Visible : Visibility.Collapsed;
 			UseNtfsRawEngineCheck.Visibility = cloneMode ? Visibility.Visible : Visibility.Collapsed;
+			// Same treatment, for the same reason, for the two that had none: "Verify cloned data after
+			// writing" is read ONLY by the clone and "Compact image" ONLY by the fresh ISO install, yet
+			// OptionsSection showed both to both tasks — so each sat on a screen where nothing would ever
+			// read it, looking like a decision the person needed to make. Giving them their own visibility
+			// is also what lets ConfirmOperationSummary ask one question about every option instead of
+			// keeping five mode conditions in step with Visibility lines two hundred lines away.
+			VerifyContentCheck.Visibility = cloneMode ? Visibility.Visible : Visibility.Collapsed;
+			CompactImageCheck.Visibility = installMode ? Visibility.Visible : Visibility.Collapsed;
 			UseDismEngineCheck.IsEnabled = cloneMode;
 			UseNtfsRawEngineCheck.IsEnabled = cloneMode;
 			BypassRequirementsCheck.IsEnabled = installMode;
@@ -2696,7 +2738,7 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				return;
 			}
-			if (BypassAccountCheck.IsChecked == true && ModeBox.SelectedIndex == ModeInstallFromImage)
+			if (BypassAccountWanted)   // visibility implies the ISO-install task, so the old mode re-check is in here now
 			{
 				PromptLocalAccount();
 			}
@@ -3590,8 +3632,9 @@ public partial class MainWindow : Window, IComponentConnector
 		bool optCloneOtherPartitions = CloneOtherPartitionsCheck?.IsChecked == true;
 		bool optDataPartition = DataPartitionCheck?.IsChecked == true;
 		bool optVerifyContent = VerifyContentCheck?.IsChecked == true;
-		bool optBypassRequirements = BypassRequirementsCheck?.IsChecked == true;
-		bool optBypassAccount = BypassAccountCheck?.IsChecked == true;
+		// Collapsed for the clone task, so these were last set on the Create-USB screen.
+		bool optBypassRequirements = BypassRequirementsWanted;
+		bool optBypassAccount = BypassAccountWanted;
 		bool optBitLocker = BitLockerCheck?.IsChecked == true;
 		bool optEjectWhenDone = EjectWhenDoneCheck?.IsChecked == true;
 		// The engine choice too: it decides which code path writes the disk, so flipping it mid-run is the most
@@ -5414,7 +5457,7 @@ exit 0
 		// 82, not 80: the copy phase advances through the 40..82 band, and SetStage assigns the bar absolutely,
 		// so any post-copy stage below 82 makes the bar visibly walk backwards at the very end of a long copy.
 		SetStage(L("StgApplyPortable"), 82.0);
-		string restoreRegOut = await ApplyPortableRegistrySettingsToRealCloneAsync(realWindowsFolder, BypassRequirementsCheck.IsChecked == true, BypassAccountCheck.IsChecked == true, faithfulMode: true, portableMode: true);
+		string restoreRegOut = await ApplyPortableRegistrySettingsToRealCloneAsync(realWindowsFolder, BypassRequirementsWanted, BypassAccountWanted, faithfulMode: true, portableMode: true);
 		if (restoreRegOut.Contains("FAILED", StringComparison.OrdinalIgnoreCase))
 			throw new InvalidOperationException("Portable registry preparation failed after restore — the drive would boot mis-configured:\r\n" + restoreRegOut);
 
@@ -5603,7 +5646,7 @@ exit 0
 			// 4. Portable-registry post-processing + first-boot answer file (same pass as the clone / WIM restore).
 			SetStage(L("StgApplyPortable"), 90.0);
 			string regOut = await ApplyPortableRegistrySettingsToRealCloneAsync(realWindowsFolder,
-				BypassRequirementsCheck?.IsChecked == true, BypassAccountCheck?.IsChecked == true, faithfulMode: true, portableMode: true);
+				BypassRequirementsWanted, BypassAccountWanted, faithfulMode: true, portableMode: true);
 			if (regOut.Contains("FAILED", StringComparison.OrdinalIgnoreCase))
 				throw new InvalidOperationException("Portable registry preparation failed after restore — the drive would boot mis-configured:\r\n" + regOut);
 			WritePortableUnattend(realWindowsFolder);
@@ -6695,11 +6738,11 @@ exit 0
 
 	private async Task ApplyInstallBypassOptionsAsync(char windowsLetter)
 	{
-		if (BypassRequirementsCheck.IsChecked != true && BypassAccountCheck.IsChecked != true && DebloatCheck.IsChecked != true)
+		if (!BypassRequirementsWanted && !BypassAccountWanted && DebloatCheck.IsChecked != true)
 		{
 			return;
 		}
-		if (BypassRequirementsCheck.IsChecked == true)
+		if (BypassRequirementsWanted)
 		{
 			SetStage(L("StgBypassCompat"), 88.0);
 			string systemHive = $"{windowsLetter}:\\Windows\\System32\\config\\SYSTEM";
@@ -6731,7 +6774,7 @@ exit 0
 				}
 			}
 		}
-		if (BypassAccountCheck.IsChecked == true)
+		if (BypassAccountWanted)
 		{
 			SetStage(L("StgBypassAccount"), 89.0);
 			string softwareHive = $"{windowsLetter}:\\Windows\\System32\\config\\SOFTWARE";
@@ -10076,8 +10119,14 @@ exit 0
 
 		// Virtual-disk size cap. The VHDX is expandable, so a bigger cap does NOT use more disk now — it only lets the
 		// VM's Windows grow larger later. "Auto" = current used data + 40 GB headroom (never smaller than the data).
+		// "Auto" was a bare English literal, and the prompt beside it explains the option in each language's
+		// OWN word — which for eight of the seventeen is a different word (ru «Авто», tr "Otomatik", zh 自动,
+		// ja 自動, hi ऑटो, id "Otomatis", ar تلقائي, uk «Авто»). So the prompt named a button that was not
+		// there: the mirror of the reference sweep, in the one place [[Key]] had never reached, because a
+		// chooser option is not a keyed control — it is a literal in an array. The sizes stay literal: they
+		// are numbers and a unit.
 		int? sizePick = ShowChooserDialog(L("TbExportVhdx"), L("MbExportVhdxSizePrompt"),
-			new[] { "Auto", "128 GB", "256 GB", "512 GB", "1024 GB" }, 0);
+			new[] { L("AmExportSizeAuto"), "128 GB", "256 GB", "512 GB", "1024 GB" }, 0);
 		if (sizePick == null) { SetBusy(false); return; }
 		long maxMbChoice = sizePick.Value switch { 1 => 128L * 1024, 2 => 256L * 1024, 3 => 512L * 1024, 4 => 1024L * 1024, _ => 0 };
 
@@ -10278,7 +10327,8 @@ exit 0
 			//    controller instead of bugchecking INACCESSIBLE_BOOT_DEVICE (0x7B). Same pass the portable USB clone uses.
 			SetBusy(true, L("BzExportVhdx"));
 			string regOut = await ApplyPortableRegistrySettingsToRealCloneAsync(realWindowsFolder,
-				BypassRequirementsCheck?.IsChecked == true, BypassAccountCheck?.IsChecked == true,
+				// This panel collapses the whole left column, so neither option is on screen here.
+				BypassRequirementsWanted, BypassAccountWanted,
 				faithfulMode: true, portableMode: true);
 			if (regOut.Contains("FAILED", StringComparison.OrdinalIgnoreCase))
 				throw new InvalidOperationException("Portable registry preparation failed:\r\n" + regOut);

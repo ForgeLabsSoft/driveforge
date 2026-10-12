@@ -1850,6 +1850,11 @@ public class InvariantTests
 			if (n is LocalFunctionStatementSyntax lf) return lf.Identifier.Text;
 			if (n is ConstructorDeclarationSyntax cd) return cd.Identifier.Text;
 			if (n is AccessorDeclarationSyntax ad) return ad.Keyword.Text;
+			// An expression-bodied PROPERTY is a method-like body too, and leaving it out answered
+			// "<file scope>" for every expression in one — which is both wrong and, for a rule that keys
+			// an allow-list off this name, quietly wrong. Found when the option-owner properties below
+			// came back unattributed.
+			if (n is PropertyDeclarationSyntax pd) return pd.Identifier.Text;
 		}
 		return "<file scope>";
 	}
@@ -2585,5 +2590,119 @@ public class InvariantTests
 				+ "started elevated, so a planted copy only has to sort earlier. Count the matches and refuse "
 				+ "an ambiguous answer — the caller re-extracts from the official download:\n  "
 				+ string.Join("\n  ", picked));
+	}
+
+	/// <summary>
+	/// An option nobody can see is neither applied nor announced.
+	///
+	/// ModeBox_SelectionChanged decides each option's Visibility from the selected task, and a flow that
+	/// reads <c>SomeCheck.IsChecked</c> while its own task collapses that checkbox is reading whatever the
+	/// person last left ticked on another screen — or in an earlier session, because the setting is saved and
+	/// restored. The file names this defect twice and fixes it twice, in its own words: EjectWhenDoneCheck
+	/// ("the write flow used to read a checkbox nobody could see") and BitLockerCheck ("Clear the option when
+	/// it cannot apply, so every downstream read is honest by construction").
+	///
+	/// Measured 2026-10-12 across all twelve conditionally-visible option checkboxes: eleven are read only
+	/// where their own task displays them. The two bypasses are read by FOUR flows that cannot show them —
+	/// the portable clone, both restores, and the VHDX export, whose panel collapses the entire left column.
+	/// The sharpest part is where the repair already was: ConfirmOperationSummary's own comment says
+	/// "Visibility is the honest test: it is exactly 'could the user see and tick this for what they are
+	/// about to do'" — and it sits directly BELOW the two lines that used `!isClone` instead, and above the
+	/// three that use it. The lesson was written down between the broken lines and the fixed ones.
+	///
+	/// Two halves. The first is narrow and exact, and says why: these are the only two options with
+	/// cross-screen readers, so they are the only two that need an owner, and nothing may bypass it. The
+	/// second generalises to the place the next option will be added: anything the confirmation LISTS is
+	/// either visibility-tested there or cleared when it cannot apply — those being the two disciplines this
+	/// file already uses, and between them they are what makes a read honest.
+	/// </summary>
+	[Fact]
+	public void AnOptionNobodyCanSeeIsNeitherAppliedNorAnnounced()
+	{
+		// The one owner, and the fact that it asks about the screen at all.
+		var offered = SourceModel.Methods().Where(m => m.Name == "Offered").ToArray();
+		Assert.True(offered.Length == 1, $"expected one Offered helper, found {offered.Length}");
+		Assert.True(offered[0].Method.ToString().Contains("IsVisible", StringComparison.Ordinal),
+			"Offered must ask whether the checkbox is ON SCREEN, not only whether it is ticked. IsVisible and "
+				+ "not Visibility: the panel views collapse the whole left column and never touch ModeBox, so "
+				+ "only the ancestor-aware test answers for them.");
+
+		foreach (string owner in new[] { "BypassRequirementsWanted", "BypassAccountWanted" })
+		{
+			var found = SourceModel.Parsed
+				.SelectMany(p => p.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>())
+				.Where(d => d.Identifier.Text == owner).ToArray();
+			Assert.True(found.Length == 1, $"expected one {owner} property, found {found.Length}");
+			Assert.True(found[0].ToString().Contains("Offered(", StringComparison.Ordinal),
+				$"{owner} must go through Offered rather than asking its own way — one owner, so a change to "
+					+ "what 'offered' means reaches every reader.");
+		}
+
+		// Nothing reads those two checkboxes behind the owners' backs — except persistence, which stores
+		// what the person set; "was this offered for THIS task" is a question for the read, not for the file.
+		// BOTH access forms. `X.IsChecked` is a MemberAccessExpression; `X?.IsChecked` is a
+		// ConditionalAccessExpression wrapping a MemberBindingExpression, and looking only at the first
+		// missed the null-conditional form — which is precisely what the export and the clone were written
+		// with, two of this defect's four sites. Found by mutation: planting the clone's original line back
+		// left the rule GREEN.
+		var reads = new List<(SyntaxNode Node, string Target, string File)>();
+		foreach (var (file, root) in SourceModel.Parsed)
+		{
+			foreach (MemberAccessExpressionSyntax ma in root.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
+				if (ma.Name.Identifier.Text == "IsChecked")
+					reads.Add((ma, ma.Expression.ToString(), file));
+			foreach (ConditionalAccessExpressionSyntax ca in root.DescendantNodes().OfType<ConditionalAccessExpressionSyntax>())
+				if (ca.WhenNotNull is MemberBindingExpressionSyntax mb && mb.Name.Identifier.Text == "IsChecked")
+					reads.Add((ca, ca.Expression.ToString(), file));
+		}
+
+		var behind = new List<string>();
+		foreach (var (node, rawTarget, file) in reads)
+			{
+				string target = rawTarget.Trim();
+				if (target is not ("BypassRequirementsCheck" or "BypassAccountCheck")) continue;
+				// An assignment is persistence restoring the saved value.
+				if (node.Parent is AssignmentExpressionSyntax a && a.Left == node) continue;
+				SyntaxNode ma = node;
+				string method = OwningMethodName(ma);
+				if (method is "SaveUserSettings" or "BypassRequirementsWanted" or "BypassAccountWanted") continue;
+				if (method.StartsWith("Load", StringComparison.Ordinal)
+						|| method.StartsWith("Apply", StringComparison.Ordinal) && method.Contains("Settings", StringComparison.Ordinal))
+					continue;
+				behind.Add($"{SourceModel.Where(file, ma)}  in {method}");
+			}
+		Assert.True(behind.Count == 0,
+			"These read a cross-screen option directly instead of through its owner, so a tick left on the "
+				+ "Create-USB screen reaches a clone, a restore or an export that never offered it:\n  "
+				+ string.Join("\n  ", behind));
+
+		// ...and every option the confirmation lists is either visibility-tested there, or cleared when it
+		// cannot apply. Those are the two disciplines this file uses; a third option added without either is
+		// the defect this rule exists for.
+		var confirm = SourceModel.Methods().Where(m => m.Name == "ConfirmOperationSummary").ToArray();
+		Assert.True(confirm.Length == 1, $"expected one ConfirmOperationSummary, found {confirm.Length}");
+		string allCode = string.Concat(SourceModel.Parsed.Select(p => p.Root.ToString()));
+
+		var announced = new List<string>();
+		int listed = 0;
+		foreach (IfStatementSyntax ifs in confirm[0].Method.DescendantNodes().OfType<IfStatementSyntax>())
+		{
+			string cond = ifs.Condition.ToString();
+			Match box = Regex.Match(cond, @"\b([A-Za-z0-9_]+Check)\b");
+			if (!box.Success) continue;
+			listed++;
+			string name = box.Groups[1].Value;
+			// One test for all of them. The five hand-written mode conditions this replaced had to be kept
+			// in step with Visibility lines two hundred lines away, and two of the five were not.
+			if (!Regex.IsMatch(cond, @"\bOffered\s*\(")) announced.Add($"{name}: {Trim120(cond)}");
+		}
+
+		Assert.True(listed >= 8,
+			$"Only {listed} option(s) read in ConfirmOperationSummary's conditions; there were ten. Re-read "
+				+ "this rule rather than leaving it passing over a scope that has moved.");
+		Assert.True(announced.Count == 0,
+			"The last dialog before the disk is erased lists these without asking whether the person could "
+				+ "see and tick them for THIS task, so it promises work the run will not do. Ask Offered(...) "
+				+ "like every other option here:\n  " + string.Join("\n  ", announced));
 	}
 }
