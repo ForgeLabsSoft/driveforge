@@ -2705,4 +2705,242 @@ public class InvariantTests
 				+ "see and tick them for THIS task, so it promises work the run will not do. Ask Offered(...) "
 				+ "like every other option here:\n  " + string.Join("\n  ", announced));
 	}
+
+	/// <summary>
+	/// RULE — an option the run drops is named where the person looks.
+	///
+	/// Every option in the last dialog before the disk is erased is a promise, and a run can withdraw one for a
+	/// reason the person cannot see: too little space left over, a partition layout out of primaries, an engine
+	/// that verifies something other than what it wrote. _dataPartitionSkipped existed for exactly this and was
+	/// carried out to the completion dialog — by ONE of the two flows that can withdraw it. The clone announces
+	/// four options, can withdraw three, and had neither the flag nor the call, so all three went to the log and
+	/// the dialog said "Finished."
+	///
+	/// Three parts. The first is the shape that caused it: the leftover-space rule existed in two copies and the
+	/// answer to the person grew in only one of them. The second is the dialogs: a flow that can name a skipped
+	/// hive edit can name a withdrawn option — the two answer the same question and are cleared by the same line.
+	/// The third points forward: the announced set is a table here, so a new option in the confirmation fails
+	/// this test until someone has decided where its withdrawal is reported.
+	/// </summary>
+	[Fact]
+	public void AnOptionTheRunDropsIsNamedWhereThePersonLooks()
+	{
+		// --- one owner for the leftover-space decision, and for its refusal ---------------------------
+		// Named for what it is, not for the number: 8 GiB is also the headroom in the Windows-size estimate
+		// two methods away, so keying on the constant alone made this rule fire on arithmetic it has no
+		// opinion about. What must be unique is the quantity — a leftover a caller works out for itself is
+		// a second copy of the decision, which is how this defect existed. A SUBTRACTION, because the name
+		// alone collides with the disk-cleanup page's "what is left of this category", which this rule has
+		// no opinion about either.
+		var ownLeftover = new List<string>();
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (VariableDeclaratorSyntax v in root.DescendantNodes().OfType<VariableDeclaratorSyntax>())
+				if (v.Identifier.Text == "leftover"
+						&& v.Initializer?.Value is BinaryExpressionSyntax sub
+						&& sub.OperatorToken.IsKind(SyntaxKind.MinusToken)
+						&& OwningMethodName(v) != "DataPartitionFitsInLeftover")
+					ownLeftover.Add(OwningMethodName(v));
+		Assert.True(ownLeftover.Count == 0,
+			"Nobody works out what is left over after Windows for themselves — they ask "
+				+ "DataPartitionFitsInLeftover, which hands it back. A caller that subtracts its own has a second "
+				+ "copy of the decision, and that is how the install grew an answer for the person while the "
+				+ "clone, 660 lines away, kept only a log line. Found in: "
+				+ string.Join(", ", ownLeftover.Distinct()));
+
+		var floors = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("leftover >= 8L * 1024 * 1024 * 1024", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(floors.Length == 1 && floors[0] == "DataPartitionFitsInLeftover",
+			"...and only it holds the floor that decides. Found in: " + string.Join(", ", floors));
+
+		var refusals = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("NotePromiseWithheld(L(\"MbDataPartSkipped\"))", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(refusals.Length == 1 && refusals[0] == "DataPartitionFitsInLeftover",
+			"...and so does the refusal that goes with it. Found in: " + string.Join(", ", refusals));
+
+		// Nobody keeps their own tally. One list, one way in, one way out — a second bool is how this started.
+		var touch = SourceModel.Methods()
+			.Where(m => m.Method.ToString().Contains("_promisesWithheld", StringComparison.Ordinal))
+			.Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		var allowed = new[] { "BuildWithheldPromiseSummary", "ConfirmOperationSummary",
+			"CreateWindowsToGoFromImageAsync", "NotePromiseWithheld" };
+		Assert.True(touch.SequenceEqual(allowed),
+			"_promisesWithheld is named outside its own accessors and the two per-run resets; record a withheld "
+				+ "promise through NotePromiseWithheld so every dialog that asks gets all of them:\n  expected: "
+				+ string.Join(", ", allowed) + "\n  found:    " + string.Join(", ", touch));
+
+		// --- a dialog that can name a skipped hive edit can name a withdrawn option -------------------
+		var silent = new List<string>();
+		int hiveDialogs = 0;
+		foreach (var (file, root) in SourceModel.Parsed)
+		{
+			foreach (InvocationExpressionSyntax inv in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+			{
+				if (inv.Expression is not MemberAccessExpressionSyntax ma) continue;
+				if (ma.Name.Identifier.Text != "Show") continue;
+				if (!ma.Expression.ToString().EndsWith("MessageBox", StringComparison.Ordinal)) continue;
+				string args = inv.ArgumentList.ToString();
+				if (!args.Contains("BuildSkippedHiveSummary()", StringComparison.Ordinal)) continue;
+				hiveDialogs++;
+				if (!args.Contains("BuildWithheldPromiseSummary()", StringComparison.Ordinal))
+					silent.Add($"{SourceModel.Where(file, inv)}  in {OwningMethodName(inv)}");
+			}
+		}
+		Assert.True(hiveDialogs == 2,
+			$"Expected the two completion dialogs that report a skipped hive edit; found {hiveDialogs}. Re-read "
+				+ "this rule rather than leaving it passing over a scope that has moved.");
+		Assert.True(silent.Count == 0,
+			"These dialogs name the registry edits the run could not make and say nothing about the options it "
+				+ "dropped, which is the same question with the same answer. Add BuildWithheldPromiseSummary():\n  "
+				+ string.Join("\n  ", silent));
+
+
+		// Each withheld promise is said once, and only through the owner: the keys exist for this and for
+		// nothing else, so a sentence used as bare dialog text somewhere would be a promise answered in one
+		// place and not the other. This is also what pins the two halves nobody else can see - the layout
+		// running out of primaries, and the verification the Microsoft engine does not do.
+		foreach (string key in new[] { "MbDataPartSkipped", "MbExtraPartsCapped", "MbVerifySkippedDism" })
+		{
+			var uses = new List<string>();
+			foreach (var (file, root) in SourceModel.Parsed)
+				foreach (InvocationExpressionSyntax inv in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+				{
+					if (inv.Expression.ToString() != "L") continue;
+					if (inv.ArgumentList.ToString() != $"(\"{key}\")") continue;
+					SyntaxNode? note = inv.Ancestors().OfType<InvocationExpressionSyntax>()
+						.FirstOrDefault(a => a.Expression.ToString() == "NotePromiseWithheld");
+					uses.Add(note == null ? $"{SourceModel.Where(file, inv)} NOT through NotePromiseWithheld"
+										  : $"{SourceModel.Where(file, inv)} ok");
+				}
+			Assert.True(uses.Count == 1 && uses[0].EndsWith("ok", StringComparison.Ordinal),
+				$"{key} is the answer to one withdrawn promise and belongs in exactly one "
+					+ "NotePromiseWithheld call. Found:\n  " + string.Join("\n  ", uses));
+		}
+
+		// --- what the confirmation promises, somebody has decided how to withdraw ----------------------
+		var confirm = SourceModel.Methods().Where(m => m.Name == "ConfirmOperationSummary").ToArray();
+		Assert.True(confirm.Length == 1, $"expected one ConfirmOperationSummary, found {confirm.Length}");
+
+		var announced = new SortedSet<string>(StringComparer.Ordinal);
+		foreach (InvocationExpressionSyntax inv in confirm[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>())
+		{
+			if (inv.Expression.ToString() != "opts.Add") continue;
+			Match k = Regex.Match(inv.ArgumentList.ToString(), @"L\(""([A-Za-z0-9_]+)""\)");
+			Assert.True(k.Success, $"an announced option that is not a key: {Trim120(inv.ToString())}");
+			announced.Add(k.Groups[1].Value);
+		}
+
+		// Each one, and where its withdrawal is reported. The right-hand side is the point of the table: an
+		// option whose answer is "nothing can stop it" has to be SAID to be that, once, here.
+		var accountedFor = new SortedSet<string>(StringComparer.Ordinal)
+		{
+			"CoOptBitLocker",    // manage-bde refuses -> MbCloneBitlockerFailed / MbUsbBitlockerFailed
+			"CoOptDataPart",     // no room left over  -> MbDataPartSkipped
+			"CoOptOtherParts",   // layout out of primaries -> MbExtraPartsCapped
+			"CoOptWholeDisk",    // the same cap, against the internal clone's flat promise
+			"CoOptVerify",       // the Microsoft engine checks its capture, not the write -> MbVerifySkippedDism
+			// These four are edits to a hive mounted from the target, or to the image itself. They cannot be
+			// quietly dropped: a hive that would not open is already named by BuildSkippedHiveSummary, and
+			// anything else throws and ends the run as a failure.
+			"CoOptBypassReq", "CoOptLocalAcct", "DebloatCheck", "CoOptCompact",
+			// Driver injection reports the COUNT it managed, in the same dialog, via BuildDriverDebloatSummary.
+			"AddAllDriversCheck", "AddNetworkDriversCheck",
+		};
+		Assert.True(announced.SetEquals(accountedFor),
+			"The confirmation's promises and the promises this file knows how to withdraw have drifted apart. "
+				+ "Decide where the new one's withdrawal is reported (NotePromiseWithheld) before listing it, or "
+				+ "say here that nothing can withdraw it:\n  announced:    " + string.Join(", ", announced)
+				+ "\n  accounted for: " + string.Join(", ", accountedFor));
+	}
+
+	/// <summary>
+	/// RULE — a run does not change its own parameters halfway through.
+	///
+	/// SetBusy disables four buttons. It does not disable the Options panel or the task list, so every checkbox
+	/// stays live for the whole run — and a clone runs for an hour. RunExperimentalFullRootUsbCloneAsync is the
+	/// one flow that answers this: it snapshots every option it depends on before any work starts, with seven
+	/// lines of comment saying why ("a clone that began as portable USB could finish applying internal-disk
+	/// registry settings"). One line still went back to the live control afterwards, and it was the engine
+	/// choice — the comment's own example of the most consequential read of the lot — 115 lines and a VSS
+	/// snapshot later, after the antivirus prompt had already been answered for the other engine. And one more
+	/// escaped by being one method down: EnableBitLockerAsync asked the screen itself, at 96%.
+	///
+	/// SCOPE, measured, so this is not mistaken for a guarantee about the app: the clone is the only one of six
+	/// write flows with a snapshot block. CreateWindowsToGoFromImageAsync reads five options up to 114 lines in
+	/// (BitLocker at 92%), StartButton_Click five up to 211 lines in, WriteIsoImageFlowAsync three and
+	/// WriteIsoImageToManyFlowAsync four. Those are a screen each, and each needs its own hardware run; the
+	/// assertion below names them, so fixing one asks for this rule to be widened rather than quietly passing.
+	/// </summary>
+	[Fact]
+	public void ARunDoesNotChangeItsOwnParametersHalfwayThrough()
+	{
+		var clone = SourceModel.Methods().Where(m => m.Name == "RunExperimentalFullRootUsbCloneAsync").ToArray();
+		Assert.True(clone.Length == 1, $"expected one clone flow, found {clone.Length}");
+
+		// Both access forms, because `X?.IsChecked` is a ConditionalAccessExpression and not a member access,
+		// and the whole snapshot block is written with the null-conditional one.
+		var live = new List<string>();
+		int snapshotted = 0;
+		foreach (SyntaxNode n in clone[0].Method.DescendantNodes())
+		{
+			string box;
+			if (n is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "IsChecked")
+				box = ma.Expression.ToString();
+			else if (n is ConditionalAccessExpressionSyntax ca
+					&& ca.WhenNotNull is MemberBindingExpressionSyntax mb && mb.Name.Identifier.Text == "IsChecked")
+				box = ca.Expression.ToString();
+			else continue;
+
+			// The snapshot: the initializer of a local called opt-something. Anything else is a read of the
+			// screen while the operation the person approved is already running.
+			VariableDeclaratorSyntax? v = n.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault();
+			if (v != null && v.Identifier.Text.StartsWith("opt", StringComparison.Ordinal)) { snapshotted++; continue; }
+			live.Add($"{box}.IsChecked — {Trim120(n.Parent?.ToString() ?? n.ToString())}");
+		}
+		// This floor is what stops the rule being blinded: every line of the snapshot block is written with
+		// `?.`, so disarming the null-conditional arm above drops this count to zero and fails here. Measured
+		// — that mutation goes red on this line, which is the property last session's version of this check
+		// did not have, where a blind arm simply passed.
+		Assert.True(snapshotted >= 8,
+			$"Only {snapshotted} option(s) snapshotted in the clone; there were eight. Re-read this rule rather "
+				+ "than leaving it passing over a scope that has moved.");
+		Assert.True(live.Count == 0,
+			"The clone reads these off the screen after its snapshot block, so the operation can change the "
+				+ "parameters the person approved while it runs. Snapshot it at the top with the others:\n  "
+				+ string.Join("\n  ", live));
+
+		// ...and nothing it calls asks the screen on its behalf. EnableBitLockerAsync is the one that did: it
+		// runs at 96% of the clone and read the "let me remove the drive early" box itself, which is how an
+		// option escapes a snapshot block without appearing in the method that has one.
+		var blk = SourceModel.Methods().Where(m => m.Name == "EnableBitLockerAsync").ToArray();
+		Assert.True(blk.Length == 1, $"expected one EnableBitLockerAsync, found {blk.Length}");
+		Assert.True(!blk[0].Method.ToString().Contains("IsChecked", StringComparison.Ordinal),
+			"EnableBitLockerAsync runs at the very end of a clone and must take its options as arguments; "
+				+ "reading a checkbox here puts an hour between the person's choice and its use.");
+
+		// The scope, named. These are the write flows that have no snapshot block, with the count each reads
+		// live. If one of them grows one, widen this rule to it instead of letting this list go stale.
+		var expected = new Dictionary<string, int>(StringComparer.Ordinal)
+		{
+			["CreateWindowsToGoFromImageAsync"] = 6,   // its own five, plus the resume box EnableBitLockerAsync
+													   // used to read for it, now read at this call site
+			["StartButton_Click"] = 5,
+			["WriteIsoImageFlowAsync"] = 3,
+			["WriteIsoImageToManyFlowAsync"] = 4,
+		};
+		var actual = new Dictionary<string, int>(StringComparer.Ordinal);
+		foreach (var (file, method, name) in SourceModel.Methods())
+		{
+			if (!expected.ContainsKey(name)) continue;
+			actual[name] = Regex.Matches(method.ToString(), @"\bIsChecked\b").Count;
+		}
+		var drifted = expected.Where(e => !actual.TryGetValue(e.Key, out int c) || c != e.Value)
+			.Select(e => $"{e.Key}: expected {e.Value} live read(s), found "
+				+ (actual.TryGetValue(e.Key, out int c2) ? c2.ToString() : "the method is gone")).ToArray();
+		Assert.True(drifted.Length == 0,
+			"This rule covers the clone only, and says so by naming what it does NOT cover. One of those "
+				+ "counts has changed — widen the rule to that flow if it now snapshots, or update the count:\n  "
+				+ string.Join("\n  ", drifted));
+	}
 }

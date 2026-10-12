@@ -669,11 +669,26 @@ public partial class MainWindow : Window, IComponentConnector
 	private int _lastDriversAdded = -2;
 	private bool _lastDebloatApplied = false;
 
-	// Was a data partition asked for and then not made? The option is listed in the last dialog before the
-	// disk is erased, and the run drops it when too little space is left over - which it recorded in the log
-	// and nowhere the user would look. Same treatment as _lastDriversAdded and _hiveEditsSkipped: carry the
-	// answer out to the completion dialog, so an option that was promised is always accounted for.
-	private bool _dataPartitionSkipped = false;
+	// Options the confirmation listed and the run then dropped. The option is named in the last dialog before
+	// the disk is erased, and the run can drop it afterwards - which it recorded in the log and nowhere the
+	// user would look. Same treatment as _lastDriversAdded and _hiveEditsSkipped: carry the answer out to the
+	// completion dialog, so an option that was promised is always accounted for.
+	//
+	// This was a single bool for a single flow. The CLONE announces four options and can withdraw three of
+	// them - the data partition for the same lack of space, the extra data partitions to the clone layout's
+	// four-primary limit, and the content verification whenever the Microsoft engine runs - and it had neither
+	// the flag nor the call, so all three went to the log alone while the dialog reported a clean success.
+	// A list, like _hiveEditsSkipped next door, because the reason differs per option: each entry is a
+	// finished translated sentence, not a key.
+	private readonly List<string> _promisesWithheld = new List<string>();
+
+	// The one way to record it. Everything the run drops goes through here, so the dialog below needs to ask
+	// one question, and the log keeps its own copy for the report.
+	private void NotePromiseWithheld(string sentence)
+	{
+		if (!_promisesWithheld.Contains(sentence)) _promisesWithheld.Add(sentence);
+		Log("Promised option withheld: " + OneLine(sentence));
+	}
 
 	// Why an offline hive can refuse to open, in one sentence, for logs and reports (English, like every
 	// other Log() line). reg.exe reports the refusal as "The filename or extension is too long", which is
@@ -712,10 +727,23 @@ public partial class MainWindow : Window, IComponentConnector
 
 	// Named in the completion dialog when some offline-registry tuning had to be skipped, so "finished" never
 	// stands alone over a drive that is missing settings the user ticked.
-	// An option that was listed in the confirmation and then not carried out says so, next to the drivers
+	// Options that were listed in the confirmation and then not carried out say so, next to the drivers
 	// and hive-edit answers in the same dialog.
-	private string BuildSkippedDataPartitionSummary() =>
-		_dataPartitionSkipped ? "\n\n" + L("MbDataPartSkipped") : "";
+	private string BuildWithheldPromiseSummary() =>
+		_promisesWithheld.Count == 0 ? "" : "\n\n" + string.Join("\n\n", _promisesWithheld);
+
+	// Is there room after Windows for the optional data partition, and if not, has the person been told?
+	// Both the fresh install and the clone size it from what is left over and both drop it under the same
+	// 8 GB floor - two copies of one rule, and the answer to the person had grown in only one of them.
+	// The boot slack differs between the two layouts, so that is the caller's to pass; the floor and the
+	// refusal are not.
+	private bool DataPartitionFitsInLeftover(long usableBytes, long windowsBytes, long bootSlack, out long leftover)
+	{
+		leftover = usableBytes - windowsBytes - bootSlack;
+		if (leftover >= 8L * 1024 * 1024 * 1024) return true;
+		NotePromiseWithheld(L("MbDataPartSkipped"));
+		return false;
+	}
 
 	private string BuildSkippedHiveSummary()
 	{
@@ -863,7 +891,7 @@ public partial class MainWindow : Window, IComponentConnector
 		// dialog that reads them is the shared success tail for the RESTORE paths too - so restoring an image in
 		// the same session as an earlier USB build announced "Drivers from this PC: 12 package(s) added" about a
 		// run that injected nothing. -2 is the "not requested" sentinel.
-		_lastDriversAdded = -2; _lastDebloatApplied = false; _dataPartitionSkipped = false;
+		_lastDriversAdded = -2; _lastDebloatApplied = false; _promisesWithheld.Clear();
 		bool isClone = ModeBox.SelectedIndex == ModeCloneCurrentWindows || IsExperimentalNtfsMode(ModeBox.SelectedIndex);
 		bool isFfu = ModeBox.SelectedIndex == ModeRestoreSavedClone;
 		// x3 approximates an LZX archive's uncompressed content, which is right for a .wim/.esd/.ffu and wrong
@@ -2828,7 +2856,7 @@ public partial class MainWindow : Window, IComponentConnector
 					// Start button dispatches - so a full PC backup written back onto a drive used to finish with
 					// "USB creation finished."
 					string doneHead = ModeBox.SelectedIndex == ModeRestoreSavedClone ? L("MbRestoreDone") : L("MbUsbDone");
-					MessageBox.Show(doneHead + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + BuildSkippedDataPartitionSummary() + BuildSkippedHiveSummary() + avNote, "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
+					MessageBox.Show(doneHead + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + BuildWithheldPromiseSummary() + BuildSkippedHiveSummary() + avNote, "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
 					if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(diskItem.Number);
 				}
 			}
@@ -3103,7 +3131,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async Task CreateWindowsToGoFromImageAsync(string path, DiskItem disk)
 	{
-		_lastDriversAdded = -2; _lastDebloatApplied = false; _dataPartitionSkipped = false; // reset per-run so the completion summary is accurate
+		_lastDriversAdded = -2; _lastDebloatApplied = false; _promisesWithheld.Clear(); // reset per-run so the completion summary is accurate
 		string mountedIso = null;
 		string diskpartPath = null;
 		try
@@ -3165,19 +3193,11 @@ public partial class MainWindow : Window, IComponentConnector
 				// diskpart silently caps the trailing 'create partition primary' at the MBR limit, so basing the reported
 				// size on disk.Size would over-promise (log a size that is never created) on a >2 TB target.
 				long mbrUsable = Math.Min(disk.Size, 2199023255040L);
-				long leftover = mbrUsable - winBytes - 300L * 1024 * 1024 - 200L * 1024 * 1024;
-				if (leftover >= 8L * 1024 * 1024 * 1024)
+				if (DataPartitionFitsInLeftover(mbrUsable, winBytes, 300L * 1024 * 1024 + 200L * 1024 * 1024, out long leftover))
 				{
 					windowsSizeMb = (int)(winBytes / (1024 * 1024));
 					dataLetter = GetFreeDriveLetter(bootLetter, windowsLetter);
 					Log($"Data partition enabled: Windows capped at {FormatBytes(winBytes)}, data partition gets ~{FormatBytes(leftover)} ({dataLetter}:).");
-				}
-				else
-				{
-					// The last dialog before the disk was erased listed this option. Record the refusal where the
-				// completion dialog can say so; the log alone is not an answer to a promise.
-				_dataPartitionSkipped = true;
-				Log("Data partition requested but skipped: not enough leftover space. Windows will use the whole disk.");
 				}
 			}
 
@@ -3226,7 +3246,7 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				// A BitLocker start-failure must NOT abort an already-complete, bootable Windows To Go as a total failure
 				// (which would also skip the volume flush below). Mirror the clone path: keep the drive, flush, and warn.
-				try { await EnableBitLockerAsync(windowsLetter); }
+				try { await EnableBitLockerAsync(windowsLetter, BitLockerResumeCheck.IsChecked == true); }
 				catch (Exception blEx)
 				{
 					bitLockerFailedThisRun = true;
@@ -3636,6 +3656,7 @@ public partial class MainWindow : Window, IComponentConnector
 		bool optBypassRequirements = BypassRequirementsWanted;
 		bool optBypassAccount = BypassAccountWanted;
 		bool optBitLocker = BitLockerCheck?.IsChecked == true;
+		bool optBitLockerResume = BitLockerResumeCheck?.IsChecked == true;
 		bool optEjectWhenDone = EjectWhenDoneCheck?.IsChecked == true;
 		// The engine choice too: it decides which code path writes the disk, so flipping it mid-run is the most
 		// consequential live read of the lot.
@@ -3755,7 +3776,11 @@ public partial class MainWindow : Window, IComponentConnector
 			// Microsoft-engine (DISM) path: capture the snapshot to a scratch WIM BEFORE we format the target, so a
 			// capture failure never leaves an erased drive. DISM is a signed Windows component, so real-time antivirus
 			// does not scan its reads the way it scans third-party wimlib — and it fits a target smaller than the source.
-			bool useDismEngine = !useRawEngine && (forceDism || UseDismEngineCheck?.IsChecked == true);
+			// optDismEngine, not the box: the snapshot at the top of this method exists for exactly this read,
+			// and this was the one line that still went back to the live control - 115 lines and a VSS snapshot
+			// later, with the Options panel never disabled, so the engine that writes the disk could be swapped
+			// after the antivirus prompt had already been answered for the other one.
+			bool useDismEngine = !useRawEngine && (forceDism || optDismEngine);
 			if (useDismEngine)
 			{
 				// DISM writes an intermediate WIM (~half the used data). If no fixed drive has room for it (a nearly-
@@ -3815,6 +3840,10 @@ public partial class MainWindow : Window, IComponentConnector
 					if (sized.Count > MaxExtraDataPartitions)
 					{
 						Log($"NOTE: this disk has {sized.Count} data partitions but an MBR clone can hold only {MaxExtraDataPartitions} extra (plus boot + Windows). Cloning the first {MaxExtraDataPartitions}; clone the rest separately.");
+						// The confirmation said "the whole disk" (internal) or "also clone the other data partitions"
+						// (portable). Neither is what happens when the layout runs out of primaries, and the completion
+						// dialog counted only the partitions that were ATTEMPTED - so the ones left behind appeared nowhere.
+						NotePromiseWithheld(string.Format(L("MbExtraPartsCapped"), MaxExtraDataPartitions, sized.Count));
 						sized = sized.GetRange(0, MaxExtraDataPartitions);
 					}
 					long need = winBytesPlan + bootSlack;
@@ -3840,18 +3869,14 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			else if (optDataPartition)
 			{
-				// Empty data partition from leftover space.
-				long leftover = mbrUsable - winBytesPlan - bootSlack;
-				if (leftover >= 8L * 1024 * 1024 * 1024)
+				// Empty data partition from leftover space. Same floor, same refusal, one owner: this copy had the
+				// 8 GB test and the log line but not the answer to the person, which the install's copy grew.
+				if (DataPartitionFitsInLeftover(mbrUsable, winBytesPlan, bootSlack, out long leftover))
 				{
 					windowsSizeMb = (int)(winBytesPlan / (1024 * 1024));
 					char dl = GetFreeDriveLetter(reservedLetters.ToArray());
 					extraPartitions.Add(new ExtraPartitionSpec(0, dl, "Data"));
 					Log($"Data partition enabled: Windows capped at {FormatBytes(winBytesPlan)}, data partition gets ~{FormatBytes(leftover)} ({dl}:).");
-				}
-				else
-				{
-					Log("Data partition requested but skipped: not enough leftover space after Windows. Windows will use the whole disk.");
 				}
 			}
 			// TOCTOU guard: the health/identity gate ran before the (possibly multi-minute) DISM capture + the raw-engine
@@ -4006,6 +4031,12 @@ public partial class MainWindow : Window, IComponentConnector
 				// introducing the very slowdown the DISM engine avoids. Skip it; the structural checks above already
 				// confirm a complete, bootable Windows root.
 				Log("Content verification skipped in Microsoft-engine mode: the captured image was already verified, and re-reading the source here would be scanned by antivirus (slow).");
+				// "Verify cloned data after writing" was ticked and listed in the confirmation, and what DISM checked
+				// is its own captured image, not the files this run wrote onto the target. The engine can also be
+				// chosen FOR the person - answering Yes at the antivirus prompt sets it - so the one thing they asked
+				// for could be dropped by a dialog that only mentioned speed, and `ok` stays true either way because
+				// verifyRan is false. Say which check ran instead of leaving "Finished" to imply this one did.
+				if (optVerifyContent) NotePromiseWithheld(L("MbVerifySkippedDism"));
 			}
 			else if (optVerifyContent)
 			{
@@ -4082,7 +4113,7 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				try
 				{
-					await EnableBitLockerAsync(windowsLetter);
+					await EnableBitLockerAsync(windowsLetter, optBitLockerResume);
 				}
 				catch (Exception blEx)
 				{
@@ -4150,7 +4181,7 @@ public partial class MainWindow : Window, IComponentConnector
 			string rawErrorsNote = rawIncomplete ? "\n\n" + string.Format(L("MbCloneFilesSkipped"), rawStats!.Errors) : "";
 			string rawZeroNote = rawZeroFilled > 0 ? "\n\n" + string.Format(L("MbRawZeroFilled"), rawZeroFilled) : "";
 			string reportNote = reportPath != null ? "\n\n" + L("MbCloneReportLabel") + "\n" + reportPath : "";
-			MessageBox.Show((ok ? L("MbCloneDoneOk") : L("MbCloneDoneReview")) + dataCloneNote + bitLockerFailNote + rawErrorsNote + rawZeroNote + "\n\n" + L("MbCloneBody") + "\n\n" +(bitLockerEncrypting ? L("MbCloneBitlockerBusy") : L("MbCloneSafeRemove")) + "\n\n" + L("MbCloneBootHelp") + reportNote + BuildSkippedHiveSummary() + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, (ok && dataCloneFailures == 0) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
+			MessageBox.Show((ok ? L("MbCloneDoneOk") : L("MbCloneDoneReview")) + dataCloneNote + bitLockerFailNote + rawErrorsNote + rawZeroNote + "\n\n" + L("MbCloneBody") + "\n\n" +(bitLockerEncrypting ? L("MbCloneBitlockerBusy") : L("MbCloneSafeRemove")) + "\n\n" + L("MbCloneBootHelp") + reportNote + BuildWithheldPromiseSummary() + BuildSkippedHiveSummary() + "\n\n" + L("MbAvCloneNote"), "DriveForge", MessageBoxButton.OK, (ok && dataCloneFailures == 0) ? MessageBoxImage.Information : MessageBoxImage.Exclamation);
 			if (cloneDialogOk) MaybeOfferDonation();
 			if (optEjectWhenDone && !bitLockerEncrypting) await EjectDiskAsync(targetDisk.Number);
 		}
@@ -6945,7 +6976,10 @@ exit 0
 		catch { return true; }
 	}
 
-	private async Task EnableBitLockerAsync(char windowsLetter)
+	// resumeAfterBoot is the CALLER's answer, not this method's to look up. It runs at 96% of a clone - up to an hour
+	// after the confirmation - and it was the last control read the clone's snapshot block did not cover, because it
+	// happens one method down. The clone passes what it read before any work started; the install passes its own.
+	private async Task EnableBitLockerAsync(char windowsLetter, bool resumeAfterBoot)
 	{
 		if (string.IsNullOrWhiteSpace(bitLockerRecoveryFolder))
 		{
@@ -7020,7 +7054,6 @@ exit 0
 		Match pct = Regex.Match(pctVal, @"([\d\.]+%)");
 		// If the user opted to remove the drive early, a non-paused conversion resumes automatically when the
 		// clone boots (BitLocker's Drive Encryption service picks up unfinished, unpaused conversions on mount).
-		bool resumeAfterBoot = BitLockerResumeCheck.IsChecked == true;
 		if (inProgress && resumeAfterBoot)
 		{
 			bitLockerEncrypting = false; // safe to remove — it will continue on the clone
