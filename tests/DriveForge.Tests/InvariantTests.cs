@@ -2307,4 +2307,51 @@ public class InvariantTests
 				+ "`_refreshOwnsBusy && _refreshBusyScan == myScan`, or on the line still being the rescan's "
 				+ "own text.\n  " + string.Join("\n  ", unguarded));
 	}
+
+	/// <summary>
+	/// A Stop does not leave a file on the person's Desktop.
+	///
+	/// SaveLogToDesktop writes the session log there — the thing the issue template calls the most useful
+	/// attachment — and nine of its ten callers are catch blocks. A Stop reaches a catch by design: killing
+	/// the child process throws. So every Stop dropped an ~850 KB DriveForge-log-… file on the Desktop with
+	/// nothing on screen to explain it. Found by looking for residues after a hardware run, not by reading
+	/// the code: three stopped backups, three files.
+	///
+	/// ShowError already makes exactly this distinction one method away, suppressing the bug-report offer
+	/// when stopRequested, on the grounds that asking for a bug report about a deliberate cancellation is
+	/// noise — and the log is the attachment that offer would have asked for. So the test belongs in the one
+	/// place that writes, not at ten call sites, and the one caller that is a REQUEST rather than a reaction
+	/// says so at the call.
+	///
+	/// This rule pins both halves: the writer asks, and exactly one caller overrides it. Without the second
+	/// half, the obvious "fix" to a Stop that left no log would be to pass userAsked at whichever call site
+	/// was being looked at.
+	/// </summary>
+	[Fact]
+	public void AStopLeavesNoFileOnTheDesktop()
+	{
+		var writer = SourceModel.Methods().Where(m => m.Name == "SaveLogToDesktop").ToArray();
+		Assert.True(writer.Length == 1, $"expected one SaveLogToDesktop, found {writer.Length}");
+		string body = writer[0].Method.ToString();
+		Assert.True(body.Contains("stopRequested", StringComparison.Ordinal),
+			"SaveLogToDesktop writes a file to the person's Desktop and does not ask whether they pressed "
+				+ "Stop. Nine of its ten callers are catch blocks, and a Stop reaches a catch by design, so a "
+				+ "cancellation leaves an unexplained ~850 KB file behind.");
+		Assert.True(Regex.IsMatch(body, @"userAsked\s*&&|!\s*userAsked"),
+			"The Stop test must let the one deliberate caller through — the 'save the log' menu item, which "
+				+ "is a request and not a reaction, and which someone reaches for precisely after a Stop.");
+
+		var overrides = new List<string>();
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (InvocationExpressionSyntax inv in SourceModel.Calls(root, "SaveLogToDesktop"))
+				if (inv.ArgumentList.Arguments.Count > 0)
+					overrides.Add($"{SourceModel.Where(file, inv)}  {Trim120(inv.ToString())}");
+
+		Assert.True(overrides.Count == 1,
+			$"Exactly one caller may override the Stop test — SaveLog_Click, the menu item. Found "
+				+ $"{overrides.Count}:\n  " + string.Join("\n  ", overrides));
+		Assert.True(overrides[0].Contains("userAsked", StringComparison.Ordinal),
+			"The override must be written by name (userAsked: true), so the call says what it is claiming: "
+				+ overrides[0]);
+	}
 }

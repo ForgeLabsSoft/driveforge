@@ -16574,7 +16574,9 @@ exit 0
 	// full log after a SUCCESSFUL operation too, then opens Explorer with the saved file selected.
 	private void SaveLog_Click(object sender, RoutedEventArgs e)
 	{
-		string? path = SaveLogToDesktop();
+		// The one caller that is a request, not a reaction: it must write even right after a Stop, which is
+		// exactly when someone wants the log of what happened.
+		string? path = SaveLogToDesktop(userAsked: true);
 		if (path != null)
 		{
 			try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = true }); } catch { }
@@ -17599,8 +17601,29 @@ exit 0
 
 	// On failure, dump the full in-memory log to the desktop so the user keeps the diagnostics even after
 	// closing the app. Best-effort; returns the path written or null.
-	private string? SaveLogToDesktop()
+	/// <summary>
+	/// Writes the session log to the Desktop. <paramref name="userAsked"/> is true for the one caller that is a
+	/// request rather than a reaction: the "save the log" menu item.
+	///
+	/// A Stop is not a failure, and this is a failure action. Nine of the ten callers are catch blocks, which a
+	/// Stop reaches by design - killing the child process throws - so every Stop dropped an ~850 KB file on the
+	/// person's Desktop with nothing on screen to explain it. Measured here: three stopped backups, three logs.
+	/// ShowError already draws exactly this distinction one method away, suppressing the bug-report offer when
+	/// stopRequested because "asking them to file a bug for something they cancelled on purpose is pure noise" -
+	/// and the log is the attachment that offer would have asked for.
+	///
+	/// Safe on the stale-flag question, which is worth stating because the flag is global: every flow that can
+	/// reach a catch here arms stopRequested = false on its own way in (StartButton_Click, the backup, the wipe,
+	/// the image-write queue, the multi-boot flow - thirty-seven such resets in all), so the flag read here
+	/// always belongs to the run being reported.
+	/// </summary>
+	private string? SaveLogToDesktop(bool userAsked = false)
 	{
+		if (!userAsked && stopRequested)
+		{
+			Log("Stopped at your request, so no log file was written to the Desktop. Use the log menu to save one.");
+			return null;
+		}
 		try
 		{
 			string path = Path.Combine(
