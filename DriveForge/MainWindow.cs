@@ -486,10 +486,12 @@ public partial class MainWindow : Window, IComponentConnector
 		UpdateDriveVerdict();
 		UpdateStartReadiness();
 
+		// This prompt said "back up", and the Yes branch runs StartButton_Click in CLONE mode, which FORMATS
+		// the target - "Back up to image" is a different task in this app, and it writes a .wim instead. The key
+		// says clone, and says it erases. (The full confirmation still follows, which the text now promises.)
 		var choice = MessageBox.Show(
-			"Your scheduled backup drive is connected:\n    " + target.FriendlyName + " — " + FormatBytes(target.Size) +
-			"\n\nDo you want to back up this PC to it now (instead of waiting for the scheduled time)?",
-			"DriveForge — backup now?", MessageBoxButton.YesNo, MessageBoxImage.Question);
+			string.Format(L("MbSchedDriveFound"), target.FriendlyName, FormatBytes(target.Size)),
+			L("MbSchedTitle"), MessageBoxButton.YesNo, MessageBoxImage.Question);
 		if (choice == MessageBoxResult.Yes)
 		{
 			StartButton_Click(this, new RoutedEventArgs());
@@ -1006,10 +1008,12 @@ public partial class MainWindow : Window, IComponentConnector
 			return;
 		}
 		bool internalMode = ModeBox.SelectedIndex == ModeCloneInternal;
+		// MbSchedTitle is what the two sibling dialogs in this same method already use. The body also now says
+		// that every unattended run ERASES the drive, which nothing said before and nothing says later either:
+		// a scheduled run is headless, and the health gate skips itself when headlessRun is set.
 		MessageBoxResult freq = MessageBox.Show(
-			"Run this clone automatically to:\n    " + disk.FriendlyName + "\n\nYes = every day at 02:00\nNo = every week (Sunday) at 02:00\nCancel = don't schedule\n\n" +
-			"Keep that drive connected at the scheduled time. The clone runs unattended (no windows to click).",
-			"Schedule automatic clone", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+			string.Format(L("MbSchedAskFreq"), disk.FriendlyName),
+			L("MbSchedTitle"), MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
 		if (freq == MessageBoxResult.Cancel) return;
 		string exe = "";
 		try { exe = Process.GetCurrentProcess().MainModule?.FileName ?? ""; } catch { }
@@ -6407,29 +6411,29 @@ exit 0
 				|| (!health.Contains("Healthy", StringComparison.OrdinalIgnoreCase)
 					&& !health.Contains("Unknown", StringComparison.OrdinalIgnoreCase))))
 		{
-			warnings.Add("Reported health: " + health);
+			warnings.Add(L("SmHealth") + ": " + health);
 		}
 
 		string wearText = ExtractReportValue(report, "Wear");
 		if (int.TryParse(wearText, out int wear) && wear >= 80)
 		{
-			warnings.Add($"Wear level: {wear}% (SSD life largely consumed)");
+			warnings.Add(L("SmWear") + $": {wear}%");
 		}
 
 		string readErrText = ExtractReportValue(report, "ReadErrorsTotal");
 		if (long.TryParse(readErrText, out long readErrors) && readErrors > 0)
 		{
-			warnings.Add($"Read errors total: {readErrors:N0}");
+			warnings.Add(L("SmReadTotal") + $": {readErrors:N0}");
 		}
 
 		string writeErrText = ExtractReportValue(report, "WriteErrorsTotal");
 		if (long.TryParse(writeErrText, out long writeErrors) && writeErrors > 0)
 		{
-			warnings.Add($"Write errors total: {writeErrors:N0}");
+			warnings.Add(L("SmWriteTotal") + $": {writeErrors:N0}");
 		}
 
-		if (long.TryParse(ExtractReportValue(report, "ReadErrorsUncorrected"), out long ruc) && ruc > 0) warnings.Add($"Read errors uncorrectable: {ruc:N0}");
-			if (long.TryParse(ExtractReportValue(report, "WriteErrorsUncorrected"), out long wuc) && wuc > 0) warnings.Add($"Write errors uncorrectable: {wuc:N0}");
+		if (long.TryParse(ExtractReportValue(report, "ReadErrorsUncorrected"), out long ruc) && ruc > 0) warnings.Add(L("SmReadUnc") + $": {ruc:N0}");
+			if (long.TryParse(ExtractReportValue(report, "WriteErrorsUncorrected"), out long wuc) && wuc > 0) warnings.Add(L("SmWriteUnc") + $": {wuc:N0}");
 			if (warnings.Count == 0)
 		{
 			Log("Target health gate: SMART/reliability counters look OK.");
@@ -6441,12 +6445,11 @@ exit 0
 		string details = string.Join("\n- ", warnings);
 		Log("Target health gate flagged the drive: " + string.Join("; ", warnings));
 		if (headlessRun) { Log("Headless run: proceeding despite health warnings."); return true; }
+		// "This operation", not "Cloning": this gate is shared by the clone, the Windows-USB build and all
+		// three restore paths, so naming one of them was wrong four times out of five.
 		MessageBoxResult choice = MessageBox.Show(
-			"The selected target drive shows health warnings:\n\n- " + details +
-			"\n\nDisk " + disk.Number + " - " + disk.FriendlyName +
-			"\n\nCloning will ERASE this drive, and a worn/failing drive can produce a clone that does not boot " +
-			"or that loses data over time.\n\nContinue anyway?",
-			"DriveForge - target drive health warning",
+			string.Format(L("MbTargetHealthWarn"), details, disk.Number, disk.FriendlyName),
+			L("MbTargetHealthTitle"),
 			MessageBoxButton.YesNo,
 			MessageBoxImage.Warning,
 			MessageBoxResult.No); // default to the SAFE button (safety contract) — Enter/Space must NOT erase the drive
@@ -8185,9 +8188,11 @@ exit 0
 		_successCount++;
 		if (_successCount == 1 || _successCount % 5 == 0)
 		{
+			// Shown after EVERY completed task, so it was the most-seen English dialog in the app - next to a
+			// Settings page whose own Ko-fi button (DonateButton) has been translated all along.
 			var r = MessageBox.Show(
-				"Done.\n\nDriveForge is free, ad-free and collects no data. If it saved you time, you can support its development with any amount you like.\n\nOpen the Ko-fi support page now? (You can turn this off in Settings.)",
-				"Support DriveForge", MessageBoxButton.YesNo, MessageBoxImage.Information);
+				L("MbSupportAsk"),
+				L("MbSupportTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information);
 			if (r == MessageBoxResult.Yes) OpenDonatePage();
 		}
 		SaveUserSettings();
@@ -14322,7 +14327,10 @@ exit 0
 			// oscillated between the true value and 89% for the whole install.
 			progressTotalGiB = 0.0; progressDoneGiB = 0.0; progressSpeedMb = 0.0; _speedWindow.Clear();
 			operationStopwatch.Restart(); operationTimer.Start();
-			SetBusy(busy: true, (update ? "Updating" : "Setting up") + $" multi-boot engine on Disk {disk.Number}...");
+			// The one status line in the app typed in English - 1 of 147 - and invisible to
+			// NoStatusLineIsWrittenInEnglishFromCode, which matches `<Name>Text.Text = "..."` and not the
+			// status argument SetBusy forwards to exactly that TextBlock.
+			SetBusy(busy: true, string.Format(L(update ? "BzMultiBootUpdate" : "BzMultiBootSetup"), disk.Number));
 			ProgressBar.Value = 0.0;
 			if (!await VerifyTargetDiskUnchangedAsync(disk)) return;   // the disk can renumber during the (multi-minute) Ventoy download — re-confirm identity (size/serial/name) before the whole-disk wipe
 			await RunVentoyAsync(exe, disk.Number, install: !update);
@@ -14406,8 +14414,10 @@ exit 0
 		string? found = FindVentoyExe(root);
 		if (found != null) return await EnsureVentoyTrustedAsync(found) ? found : null;   // re-verify the cached binary each run (guards cache-poisoning) before running it elevated
 
+		// A translated body under an English title. MbMultiBootTitle is what every other dialog in this flow
+		// already uses.
 		if (MessageBox.Show(L("Mb038"),
-				"DriveForge — multi-boot engine", MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes)
+				L("MbMultiBootTitle"), MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes)
 			return null;
 
 		Directory.CreateDirectory(root);
@@ -14435,9 +14445,31 @@ exit 0
 		finally { SetBusy(busy: false); }
 	}
 
-	private static string? FindVentoyExe(string root)
+	// EXACTLY one, or nothing.
+	//
+	// This used to be `.FirstOrDefault()` over a recursive search, and EnsureWimlibAsync carries the reason
+	// that is wrong, in its own words, about its own loader: "at fixed paths rather than by searching the tree
+	// for anything named wimlib-imagex.exe — that search returned the first match in enumeration order, which
+	// an attacker chooses." Both tools live under %LOCALAPPDATA%, which every program running as this user can
+	// write to, and both are then started ELEVATED. The lesson was learnt for one of them and not for its
+	// sibling; a planted copy only has to sort earlier than the real one.
+	//
+	// A second match is not repaired in place either — the caller throws the folder away and extracts again,
+	// which is what the wimlib loader does for the same reason.
+	//
+	// No longer static, so the refusal can reach the log: a guard that declines in silence looks exactly like
+	// a cache that was simply empty, and the difference is the whole point of it.
+	private string? FindVentoyExe(string root)
 	{
-		try { return Directory.Exists(root) ? Directory.GetFiles(root, "Ventoy2Disk.exe", SearchOption.AllDirectories).FirstOrDefault() : null; }
+		try
+		{
+			if (!Directory.Exists(root)) return null;
+			string[] found = Directory.GetFiles(root, "Ventoy2Disk.exe", SearchOption.AllDirectories);
+			if (found.Length == 1) return found[0];
+			if (found.Length > 1) Log("Refusing the cached multi-boot engine: " + found.Length
+				+ " copies of Ventoy2Disk.exe under " + root + ". Re-extracting from the official download.");
+			return null;
+		}
 		catch { return null; }
 	}
 

@@ -420,9 +420,128 @@ public class LocalizationTests
 			int line = code.Take(m.Index).Count(c => c == '\n') + 1;
 			offenders.Add($"line {line}: {m.Groups[1].Value}.Text = \"{value}\"");
 		}
+		// ...and the other three doors onto the same TextBlock. The rule above matches
+		// `<Name>Text.Text = "literal"`, which is one of FOUR ways the app writes the status line: SetBusy
+		// forwards its `status` argument to StatusText.Text, SetStage assigns it outright, and SetToolStatus
+		// writes the tools card's own line. Measured 2026-10-12: 147 such calls, exactly ONE with English
+		// typed into it — the multi-boot install, whose own finally comment quoted the string it left behind.
+		// One is all it takes, and no rule could see it.
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (string call in new[] { "SetBusy", "SetStage", "SetToolStatus" })
+				foreach (InvocationExpressionSyntax inv in SourceModel.Calls(root, call))
+				{
+					var args = inv.ArgumentList.Arguments;
+					// SetBusy's status is its second argument (named or positional); the other two take it first.
+					ArgumentSyntax status = call == "SetBusy"
+						? args.FirstOrDefault(a => a.NameColon?.Name.Identifier.Text == "status")
+							?? args.Skip(1).FirstOrDefault()
+						: args.FirstOrDefault();
+					if (status is null || !IsTypedProse(status.Expression)) continue;
+					offenders.Add($"{SourceModel.Where(file, inv)}  {call}(…, {Trim80(status.ToString())})");
+				}
+
 		Assert.True(offenders.Count == 0,
 			"UI text typed into the source instead of coming from a string key:\n  " + string.Join("\n  ", offenders));
 	}
+
+	/// <summary>
+	/// A dialog's words come from the table — its body AND its title.
+	///
+	/// The campaign has audited the two other channels user-facing text travels down: thrown sentences
+	/// (ShowError prints ex.Message verbatim — 84 of them) and widget text (the rule above, and
+	/// EveryNamedVisibleControlGetsItsTextFromSomewhereTranslatable). A MessageBox built from literals is
+	/// the third, and nothing watched it. Measured 2026-10-12 over 243 MessageBox.Show calls: FOUR were
+	/// English end to end and one more had an English title over a translated body.
+	///
+	/// They were not minor ones. The drive-health gate — the dialog that says the drive you are about to
+	/// ERASE is showing SMART warnings, shown by the clone, the Windows-USB build and all three restore
+	/// paths — was English, frame and warning items both, and the items were hand-typed copies of SmHealth
+	/// / SmWear / SmReadTotal / SmReadUnc / SmWriteTotal / SmWriteUnc, which have existed in all seventeen
+	/// languages the whole time. The scheduling dialog that sets up an unattended, recurring whole-disk
+	/// clone was English. And the support prompt, shown after EVERY completed task, was the most-seen
+	/// English dialog in the app — beside a Settings page whose own Ko-fi button was translated.
+	///
+	/// The filter that matters is the one for a key lookup, and it has to strip the WHOLE call: `L(cond ?
+	/// "KeyA" : "KeyB")` is how eight of this rule's twelve first hits were written, and a filter that only
+	/// understood `L("Literal")` called every one of them English because it could see the key names inside.
+	/// Two words of three letters or more is prose; "DriveForge" alone is the brand.
+	/// </summary>
+	[Fact]
+	public void EveryDialogTakesItsWordsFromTheTable()
+	{
+		var offenders = new List<string>();
+		int dialogs = 0;
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (InvocationExpressionSyntax inv in SourceModel.Calls(root, "Show"))
+			{
+				if (inv.Expression is not MemberAccessExpressionSyntax ma
+						|| (ma.Expression as IdentifierNameSyntax)?.Identifier.Text != "MessageBox") continue;
+				var args = inv.ArgumentList.Arguments;
+				if (args.Count == 0) continue;
+				dialogs++;
+				foreach (var (index, what) in new[] { (0, "body"), (1, "title") })
+				{
+					if (index >= args.Count) continue;
+					if (!IsTypedProse(args[index].Expression)) continue;
+					offenders.Add($"{SourceModel.Where(file, inv)}  {what}: {Trim80(args[index].ToString())}");
+				}
+			}
+
+		Assert.True(dialogs > 200,
+			$"Only {dialogs} MessageBox.Show call(s) found; there were 243. Re-read this rule rather than "
+				+ "leaving it passing over a scope that has moved.");
+		Assert.True(offenders.Count == 0,
+			"A dialog's words are typed into the source, so sixteen of seventeen languages read it in "
+				+ "English:\n  " + string.Join("\n  ", offenders));
+	}
+
+	/// <summary>
+	/// Is this argument prose somebody reads, rather than a key lookup or a value substituted into one?
+	///
+	/// Walked as syntax rather than scrubbed as text, because text-scrubbing got it wrong twice in two
+	/// different ways and both were measured:
+	///   - stripping `L\(([^()]*)\)` misses `L(DetectWipeMedia(disk) == WipeMedia.Flash ? "A" : "B")`,
+	///     whose own parentheses defeat the pattern, and then reports the key names inside it as English;
+	///   - and string.Format's ARGUMENTS are not text. `string.Format(L("MbBootTestConfirm"), …,
+	///     (uefi ? "UEFI" : "BIOS"), …)` put two perfectly good words in reach of any literal scan — and
+	///     they are technical tokens the app keeps identical in all seventeen languages on purpose.
+	/// Only the format TEMPLATE is the sentence; the rest are values.
+	///
+	/// A conditional counts as prose if EITHER branch does, for the same reason the thrown-sentence rule
+	/// examines branches one at a time: a translated branch must not vouch for an English one.
+	/// </summary>
+	private static bool IsTypedProse(ExpressionSyntax e) => e switch
+	{
+		ParenthesizedExpressionSyntax p => IsTypedProse(p.Expression),
+		ConditionalExpressionSyntax c => IsTypedProse(c.WhenTrue) || IsTypedProse(c.WhenFalse),
+		BinaryExpressionSyntax b when b.IsKind(SyntaxKind.AddExpression) =>
+			IsTypedProse(b.Left) || IsTypedProse(b.Right),
+		// This arm is what gives the rule its REACH, not its quiet: without it a
+		// `string.Format("English template {0}.", x)` body is never looked at (mutation-checked both ways).
+		InvocationExpressionSyntax f when IsStringFormat(f) =>
+			f.ArgumentList.Arguments.Count > 0 && IsTypedProse(f.ArgumentList.Arguments[0].Expression),
+		// Any L(...) is translated by construction, however its key is chosen. This arm is DOCUMENTATION:
+		// the default below already answers false for it, as mutation-checking showed. It stays so that a
+		// reader does not conclude an L(...) inside a concatenation is unhandled.
+		InvocationExpressionSyntax l when (l.Expression as IdentifierNameSyntax)?.Identifier.Text == "L" => false,
+		LiteralExpressionSyntax lit when lit.Token.IsKind(SyntaxKind.StringLiteralToken) =>
+			ReadsAsProse(lit.Token.ValueText),
+		InterpolatedStringExpressionSyntax interp => ReadsAsProse(string.Concat(
+			interp.Contents.OfType<InterpolatedStringTextSyntax>().Select(t => t.TextToken.ValueText))),
+		// Anything this does not understand is NOT reported. The rule is deliberately quiet rather than
+		// noisy: a dialog assembled by a helper is out of reach, and a false alarm in a rule that gates
+		// every build is worse than a gap a later screen can close.
+		_ => false,
+	};
+
+	private static bool IsStringFormat(InvocationExpressionSyntax inv) =>
+		inv.Expression is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "Format"
+			&& ma.Expression.ToString() is "string" or "String";
+
+	/// <summary>Two words of three letters or more. One token is a brand ("DriveForge"), a unit or an
+	/// identifier; two is a sentence.</summary>
+	private static bool ReadsAsProse(string text) =>
+		Regex.Matches(Regex.Replace(text, @"\{[^}]*\}", " "), "[A-Za-z]{3,}").Count >= 2;
 
 	/// <summary>
 	/// The verdict a diagnostic tool ends on comes from the dictionary, never from the source.

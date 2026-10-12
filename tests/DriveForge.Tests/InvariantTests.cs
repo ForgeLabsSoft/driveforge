@@ -2526,4 +2526,64 @@ public class InvariantTests
 			"These say the app does no checksum check, and it does — offered on the Create-USB screen, the "
 				+ "write-ISO screen, and after a download:\n  " + string.Join("\n  ", liars));
 	}
+
+	/// <summary>
+	/// A tool the app runs ELEVATED is never located by searching a tree for its name.
+	///
+	/// Both downloaded engines live under %LOCALAPPDATA%\DriveForge\Tools — which every program running as
+	/// this user can write to — and both are then started elevated. EnsureWimlibAsync says why that matters,
+	/// about itself: "at fixed paths rather than by searching the tree for anything named wimlib-imagex.exe
+	/// — that search returned the first match in enumeration order, which an attacker chooses."
+	///
+	/// FindVentoyExe was still doing exactly that: GetFiles(root, "Ventoy2Disk.exe", AllDirectories)
+	/// .FirstOrDefault(). A planted copy only has to sort earlier than the real one. The lesson had been
+	/// learnt, written down, and applied to one of the two siblings.
+	///
+	/// So: any recursive search for an executable must reject an ambiguous answer rather than pick one. The
+	/// scope is derived from what the search is FOR — a GetFiles call whose pattern names a .exe with
+	/// SearchOption.AllDirectories — so a third engine added tomorrow is in it the moment it is written.
+	/// </summary>
+	[Fact]
+	public void AnElevatedToolIsNeverTheFirstMatchOfATreeSearch()
+	{
+		var searches = new List<(string Where, InvocationExpressionSyntax Call)>();
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (InvocationExpressionSyntax inv in SourceModel.Calls(root, "GetFiles"))
+			{
+				string text = inv.ToString();
+				if (!text.Contains("AllDirectories", StringComparison.Ordinal)) continue;
+				if (!Regex.IsMatch(text, @"""[^""]*\.exe""", RegexOptions.IgnoreCase)) continue;
+				searches.Add((SourceModel.Where(file, inv), inv));
+			}
+
+		Assert.True(searches.Count >= 1,
+			"No recursive search for an executable found at all. This rule exists because one was used to "
+				+ "locate a binary that is then run elevated; if none is left, re-read it rather than "
+				+ "leaving it passing over nothing.");
+
+		var picked = new List<string>();
+		foreach (var (where, call) in searches)
+		{
+			// The statement the search feeds into: taking "the first" of an ambiguous answer is the defect,
+			// and counting the matches first is the fix.
+			SyntaxNode scope = call.FirstAncestorOrSelf<BlockSyntax>() ?? call.Parent ?? call;
+			string around = scope.ToString();
+			bool takesFirst = Regex.IsMatch(call.Parent?.ToString() ?? "",
+				@"\.\s*(?:FirstOrDefault|First|Single)\s*\(\s*\)");
+			// EXACTLY one. A bare "is there at least one" comparison is the same defect with a count in
+			// front of it: `found.Length >= 1 ? found[0] : null` still trusts whichever copy enumeration
+			// returned. Found by asking what the mutation for this rule would have to be.
+			bool countsFirst = Regex.IsMatch(around, @"\.\s*Length\s*==\s*1\b")
+				|| Regex.IsMatch(around, @"\.\s*Count\(\)\s*==\s*1\b");
+			if (takesFirst || !countsFirst)
+				picked.Add($"{where}  {Trim120(call.ToString())}");
+		}
+
+		Assert.True(picked.Count == 0,
+			"This locates an executable by searching a tree and then trusts whichever copy enumeration "
+				+ "returned. The folder is writable by every program running as this user and the binary is "
+				+ "started elevated, so a planted copy only has to sort earlier. Count the matches and refuse "
+				+ "an ambiguous answer — the caller re-extracts from the official download:\n  "
+				+ string.Join("\n  ", picked));
+	}
 }
