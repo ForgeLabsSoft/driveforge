@@ -1202,4 +1202,97 @@ public class LocalizationTests
 		Assert.True(problems.Count == 0,
 			"A renderer that does not expand references:\n  " + string.Join("\n  ", problems));
 	}
+
+	/// <summary>
+	/// A sentence never names a control nobody can see.
+	///
+	/// The reference sweep fixed the drift where a sentence copies a control's name and the copy goes stale.
+	/// This is its MIRROR: a sentence that names something nothing on screen is called. MbBackupCreated — the
+	/// backup's one instruction on how to get the data back — said: choose "Advanced: restore full disk image".
+	/// That is an item of ModeBox, the ComboBox that used to be the task selector and now sits inside a Border
+	/// with Visibility="Collapsed" which nothing ever shows; the sidebar replaced it. All seventeen languages
+	/// pointed at it. Thirteen kept the English phrase and four translated it, so those four named something
+	/// that exists in no language at all.
+	///
+	/// Scope is DERIVED. XAML says which named controls sit under a collapsed element; the code says which of
+	/// those elements can be shown again (only a NAMED one can — nothing else holds a handle on it); whatever
+	/// is left is unreachable, because a collapsed parent hides its whole subtree whatever the children say.
+	/// Its captions are then read from both places a caption comes from: the XAML attribute and the code that
+	/// assigns one. A rule over a hand-written list of phrases would have gone stale the first time the
+	/// ComboBox changed — which is exactly how the rule next door came to have four dead entries in it.
+	///
+	/// Two filters, each of which earned its place by removing a measured false positive out of 185,895 pairs:
+	///   - EQUALITY is fine, containment is not. A caption that IS a value is that control's own key, and
+	///     ApplyLanguage writing a translation into a hidden control harms nobody. The defect is a caption
+	///     sitting INSIDE a longer sentence, which is a sentence sending the reader to find it.
+	///   - 18 characters. "Select a disk" (RecommendationText, 13) appears inside PtNoDisk in English and
+	///     inside HintDisk, RfPickDrive, DToolSelectBegin and five more in ro/fr/it/pt/nl/ru/pl/uk/hi/id/ar —
+	///     31 hits, every one of them ordinary prose. At 18 all six ModeBox items (33–54), CreateKitButton's
+	///     caption (30) and Step5Title (18) are still covered.
+	///
+	/// What it does NOT catch: a translator who INVENTS a name for the hidden control, as ro/fr/de/nl had.
+	/// That half is held by EverySentenceWithAReferenceShowsThatLanguagesLabel — once the sentence carries
+	/// [[SbRestoreT]], every language's copy of it has to contain that language's own sidebar label.
+	/// </summary>
+	[Fact]
+	public void NoSentenceNamesAControlNobodyCanSee()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		string code = string.Concat(new[] { "MainWindow.cs", "UiCustomization.cs" }
+			.Select(f => File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", f))));
+
+		var captions = new HashSet<string>(StringComparer.Ordinal);
+		var unreachable = new List<string>();
+		foreach (System.Xml.Linq.XElement root in System.Xml.Linq.XDocument.Parse(xaml).Descendants())
+		{
+			if ((string)root.Attribute("Visibility") != "Collapsed") continue;
+			string rootName = NameOf(root);
+			// A collapsed element with a name that code assigns .Visibility on can come back; without one,
+			// nothing in the app can reach it, and WPF hides every descendant with it.
+			if (rootName.Length > 0 && Regex.IsMatch(code, @"\b" + Regex.Escape(rootName) + @"\s*\.\s*Visibility\s*=")) continue;
+			foreach (System.Xml.Linq.XElement el in root.DescendantsAndSelf())
+			{
+				foreach (string attr in new[] { "Text", "Content", "Header" })
+				{
+					string v = (string)el.Attribute(attr) ?? "";
+					if (v.Length > 0 && !v.StartsWith("{", StringComparison.Ordinal) && Regex.IsMatch(v, "[A-Za-z]{3}"))
+						captions.Add(v);
+				}
+				string name = NameOf(el);
+				if (name.Length == 0) continue;
+				unreachable.Add(name);
+				foreach (Match m in Regex.Matches(code,
+						Regex.Escape(name) + @"\s*\.\s*(?:Items\.Add\(|Content\s*=|Text\s*=|Header\s*=)\s*""([^""]+)"""))
+					captions.Add(m.Groups[1].Value);
+			}
+		}
+
+		// The premise is asserted, not assumed: if the window ever stops hiding anything, this rule has stopped
+		// protecting anything and should be read again rather than left passing.
+		Assert.True(unreachable.Count > 0,
+			"No named control is unreachable any more, so this rule now checks nothing — re-read it.");
+
+		string[] names = captions.Where(c => c.Trim().Length >= 18 && c.Trim().Contains(' ')).ToArray();
+		Assert.True(names.Length >= 6,
+			$"Only {names.Length} caption(s) of an unreachable control are long enough to protect; the six "
+				+ "ModeBox items alone used to make it six. Has the caption scan stopped finding them?");
+
+		var found = new List<string>();
+		foreach (string lang in Strings.Keys)
+			foreach (var (key, value) in Strings[lang])
+				foreach (string name in names)
+					if (!string.Equals(value, name, StringComparison.Ordinal)
+							&& value.Contains(name, StringComparison.Ordinal))
+						found.Add($"{key} [{lang}] names \"{name}\"");
+
+		Assert.True(found.Count == 0,
+			"These sentences send the reader to a control that is not on screen. Name the control that really "
+				+ "does it, as [[ItsKey]], so the text follows the label instead of a copy of it:\n  "
+				+ string.Join("\n  ", found));
+	}
+
+	private static string NameOf(System.Xml.Linq.XElement el) =>
+		(string)el.Attribute("Name")
+			?? (string)el.Attribute(System.Xml.Linq.XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))
+			?? "";
 }

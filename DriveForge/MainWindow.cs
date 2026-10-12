@@ -827,8 +827,12 @@ public partial class MainWindow : Window, IComponentConnector
 		_lastDriversAdded = -2; _lastDebloatApplied = false;
 		bool isClone = ModeBox.SelectedIndex == ModeCloneCurrentWindows || IsExperimentalNtfsMode(ModeBox.SelectedIndex);
 		bool isFfu = ModeBox.SelectedIndex == ModeRestoreSavedClone;
+		// x3 approximates an LZX archive's uncompressed content, which is right for a .wim/.esd/.ffu and wrong
+		// for a VHD/VHDX - see ImageFileSizeIsItsProvisionedSize.
 		long bytes = isClone ? GetCurrentWindowsUsedBytes()
-			: (!string.IsNullOrWhiteSpace(sourcePath) && File.Exists(sourcePath) ? new FileInfo(sourcePath).Length * 3 : 30L * 1024 * 1024 * 1024);
+			: (!string.IsNullOrWhiteSpace(sourcePath) && File.Exists(sourcePath)
+				? new FileInfo(sourcePath).Length * (ImageFileSizeIsItsProvisionedSize(sourcePath) ? 1 : 3)
+				: 30L * 1024 * 1024 * 1024);
 
 		// Show what is currently ON the target disk so the user can be 100% sure they picked the right one.
 		string contents = await GetDiskContentsAsync(disk.Number);
@@ -1420,7 +1424,15 @@ public partial class MainWindow : Window, IComponentConnector
 		long myScan = ++_diskScanSeq;   // identifies THIS scan, so a failing one cannot blank a newer scan's good list
 		try
 		{
-			if (!wasBusy) { SetBusy(busy: true, L("BzScanDisks")); _refreshOwnsBusy = true; _refreshBusyScan = myScan; }   // set AFTER: SetBusy(true) clears the token
+			// A SILENT rescan is the device-change one, and it is passive by design everywhere else - its failures
+			// are logged instead of shown - so it must not take the status line either. It fires moments after an
+			// operation ends, because the app's own teardown makes a volume disappear (the backup deleting its VSS
+			// snapshot does exactly that), finds nothing holding busy, claims it, and announces "Scanning disks…"
+			// over the verdict the operation had just written. Measured: stopping a backup left "Ready." on the
+			// line, and with this rescan silenced it leaves "Stopped." The Ready reset further down then has a
+			// verdict to preserve rather than its own announcement to tidy away.
+			// `status: null` also leaves _operationStatusText alone, which is what both reset guards compare against.
+			if (!wasBusy) { SetBusy(busy: true, silent ? null : L("BzScanDisks")); _refreshOwnsBusy = true; _refreshBusyScan = myScan; }   // set AFTER: SetBusy(true) clears the token
 			// Enumerate FIRST, then swap the lists in one synchronous block. Clearing before the await let two
 			// overlapping refreshes interleave as clear(A) -> clear(B) -> add(A) -> add(B), leaving every physical
 			// drive listed twice (reachable from Eject, which refreshes after a modal while a device-change refresh
@@ -1482,7 +1494,17 @@ public partial class MainWindow : Window, IComponentConnector
 			// Comparing the ticket gives true per-invocation identity, so a nested or overtaken scan stays quiet
 			// instead of painting "Ready" over a running operation — worst case SsdSecureEraseFlow, which refreshes
 			// and then runs a multi-minute ReTrim.
-			if (_refreshOwnsBusy && _refreshBusyScan == myScan) StatusText.Text = L("SxReady");
+			//
+			// ...and only over the rescan's OWN line. The purpose here is to clear "Scanning disks…", not to have
+			// the last word: a rescan that the app itself provokes — deleting the backup's VSS snapshot makes a
+			// volume disappear — fires just AFTER the operation ends, finds nothing holding busy, claims it, and
+			// wrote "Ready." over "Stopped." about two seconds after the user read it. Measured: the status line
+			// after stopping a backup said "Ready.", and it said "Backup failed." for exactly as long before this
+			// screen was looked at. SetBusy draws the same distinction with the same comparison against the same
+			// field, five lines of its own, and for the same reason.
+			if (_refreshOwnsBusy && _refreshBusyScan == myScan
+					&& string.Equals(StatusText.Text, _operationStatusText, StringComparison.Ordinal))
+				StatusText.Text = L("SxReady");
 		}
 		catch (Exception ex)
 		{
@@ -1513,6 +1535,7 @@ public partial class MainWindow : Window, IComponentConnector
 			else ShowError(L("ErrDiskScan"), ex);
 			// Say so in the status bar as well. Without this the bar keeps reading "Scanning disks…" for ever, which
 			// next to a now-empty picker (and, when silent, no dialog at all) looks exactly like a hung app.
+			// A failed scan next to an emptied picker is worth saying over anything else that was there.
 			if (_refreshOwnsBusy && _refreshBusyScan == myScan) StatusText.Text = L("ErrDiskScan");
 			// A silent scan is the device-change rescan, and its timer already stopped itself, so re-arming here is
 			// the only way a transient failure during a plug/unplug storm heals without a manual Refresh. BOUND it:
@@ -1778,7 +1801,16 @@ public partial class MainWindow : Window, IComponentConnector
 
 			StartButton.Content = isoWriteMode ? L("StartWriteIso") : backupMode ? L("StartBackup") : cloneMode ? L("StartClone") : restoreMode ? L("StartRestore") : L("StartInstall");
 
-			SourcePathBox.Text = cloneMode ? "Current Windows on this computer" : backupMode ? "This PC (saved to a file you choose)" : "";
+			// Always "", and the assignment is still needed for that: switching away from Restore has to clear
+			// the path shown here before `sourcePath = null` below drops the file it pointed at, or the box keeps
+			// naming a source the app no longer has.
+			//
+			// It used to read `cloneMode ? "Current Windows on this computer" : backupMode ? "This PC (saved to a
+			// file you choose)" : ""` - two English literals with no key anywhere in the table. They were never on
+			// screen: SourceFileRow, the Grid holding this box, is collapsed for precisely those two modes (see
+			// its Visibility a few lines up), because neither of them has a file to browse for. Dead text, and
+			// translating text into a control nobody can see is what NoSentenceNamesAControlNobodyCanSee forbids.
+			SourcePathBox.Text = "";
 			sourcePath = null;
 			EditionBox.Items.Clear();
 			CreateKitButton.Visibility = Visibility.Collapsed;
@@ -2586,7 +2618,11 @@ public partial class MainWindow : Window, IComponentConnector
 					catch (Exception ex)
 					{
 						cloneFailed = true;
-						StatusText.Text = L("SxCloneFailed");
+						// The clone's DIALOG has always answered a Stop properly - it throws StoppedException, which
+						// ShowError types as information. The status line did not: it read "Clone failed." behind an
+						// "Stopped at your request." dialog, and the line is what stays on screen after the dialog is
+						// dismissed. Same assignment, same question, in all four places that write a failure there.
+						StatusText.Text = L(stopRequested ? "SxStopped" : "SxCloneFailed");
 						NotifyOperationDone(false);
 						SaveLogToDesktop();
 						ShowError(L("ErrCloneThisPc"), ex);
@@ -2723,7 +2759,16 @@ public partial class MainWindow : Window, IComponentConnector
 			catch (Exception ex)
 			{
 				operationFailed = true;
-				StatusText.Text = L("SxFailed");
+				// A Stop is answered here for every engine behind this button, because a Stop reaches them all the
+				// same way: StopButton_Click kills the child, the child exits non-zero, and RunProcessAsync turns that
+				// into an exception carrying its exit code. Printed raw, that read as a red failure naming "wimlib-
+				// imagex.exe exited with code -1" - and said nothing about the target, which every path behind this
+				// button cleans and formats BEFORE it writes. The clone and the .vhdx restore already threw
+				// StoppedException themselves; the .wim restore, the .ffu restore and the Windows-USB build did not, so
+				// the same key press got two different answers depending on which file the user had picked. Rewritten
+				// only when the exception is not ALREADY a cancellation, so a path that words its own stop keeps its words.
+				if (stopRequested && ex is not OperationCanceledException) ex = new StoppedException(L("OpStoppedPartial"));
+				StatusText.Text = L(stopRequested ? "SxStopped" : "SxFailed");
 				NotifyOperationDone(false);
 				SaveLogToDesktop();
 				ShowError(L("ErrCreateUsb"), ex);
@@ -3245,7 +3290,8 @@ public partial class MainWindow : Window, IComponentConnector
 
 	// Backup: capture the running Windows to a compressed .wim image file (VSS snapshot). Uses wimlib (LZX + incremental
 	// append); on a wimlib read-failure (typically real-time antivirus blocking its reads) a full backup retries with the
-	// AV-trusted Microsoft engine (DISM). No disk is formatted. Restorable via "Advanced: restore full disk image".
+	// AV-trusted Microsoft engine (DISM). No disk is formatted. Restorable from the sidebar's "Restore image"
+	// task (SbRestoreT) - NOT via the ModeBox item of that name, which no user can see.
 	private async Task BackupThisPcToImageAsync()
 	{
 		if (!IsAdministrator())
@@ -3370,9 +3416,12 @@ public partial class MainWindow : Window, IComponentConnector
 			if (!await WimIsValidAsync(wimlibPath, capturePath))
 			{
 				if (!incremental) TryDeleteFile(capturePath);   // discard the bad new image; the existing backup is left untouched
-				throw new InvalidOperationException(incremental
-					? "The incremental backup did not pass verification — your existing image may be damaged; make a fresh full backup."
-					: "The captured backup failed verification (it may be truncated or corrupt) and was discarded.");
+				// Both of these are the app's own verdict on its own artefact, with the action a person takes next
+				// baked in - not a tool's stderr - so both are keys. The incremental branch reuses MbBackupIncFailed,
+				// which the catch below already shows for this case and which says exactly this; it was duplicated here
+				// in English and thrown away. UserFacingException so ShowError prints it WITHOUT the
+				// "Technical detail:" label, which is for text the app did not write.
+				throw new UserFacingException(incremental ? L("MbBackupIncFailed") : L("ErrBackupVerifyFull"));
 			}
 			if (!incremental) File.Move(capturePath, outPath, overwrite: true);   // replace the old backup only now that the new one verified
 			bool ok = File.Exists(outPath) && new FileInfo(outPath).Length > 0;
@@ -3406,14 +3455,23 @@ public partial class MainWindow : Window, IComponentConnector
 			// Full capture writes to a TEMP file, so on any failure just drop the temp — the existing backup is untouched.
 			// Incremental append modifies the existing .wim in place, so it is kept (it may still hold prior restore points).
 			if (!incremental) TryDeleteFile(capturePath);
-			StatusText.Text = L("SxBackupFailed");
+			StatusText.Text = L(stopRequested ? "SxStopped" : "SxBackupFailed");
 			NotifyOperationDone(false);
 			SaveLogToDesktop();
+			// A stopped FULL capture is the one interruption on this screen that costs the user nothing: the
+			// capture goes to <name>.wim.dfnew and is swapped over the real file only after it verifies, so the
+			// TryDeleteFile above is the whole of the damage. Saying so is the point - what the user is actually
+			// weighing is whether the backup they already had survived. The incremental branch says the opposite,
+			// correctly, because an append rewrites the real file in place; it is tested FIRST for that reason.
 			if (incremental)
 			{
 				// The append rewrites the existing image in place; an interrupted/failed append can leave it damaged, and
 				// it was NOT discarded. Be honest so the user re-verifies it / makes a fresh full backup.
 				MessageBox.Show(L("MbBackupIncFailed"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Warning);
+			}
+			else if (stopRequested)
+			{
+				MessageBox.Show(L("MbBackupStopped"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Information);
 			}
 			else if (IsWimlibReadFailure(ex))
 			{
@@ -6377,6 +6435,18 @@ exit 0
 		return true;
 	}
 
+	// A VHD/VHDX file IS its provisioned size - a fixed one from the moment it is created, an expandable
+	// one from its high-water mark, which does not shrink when the contents do. Every estimate taken from
+	// a file length needs to know this, and the two that exist disagreed: EstimateRequiredBytes spelt the
+	// fact out in a comment and acted on it, while ConfirmOperationSummary multiplied the same file by 3 as
+	// though it were a compressed archive - so the last dialog before the disk is erased announced a 256 GB
+	// image holding 60 GB as 768 GB of work. One owner, asked by both.
+	private static bool ImageFileSizeIsItsProvisionedSize(string path)
+	{
+		string ext = Path.GetExtension(path).ToLowerInvariant();
+		return ext == ".vhd" || ext == ".vhdx";
+	}
+
 	private long EstimateRequiredBytes()
 	{
 		long margin = 12L * 1024L * 1024L * 1024L;
@@ -6391,8 +6461,7 @@ exit 0
 			// 128 GB drive it fits on easily, with "the selected drive is too small". RestoreVhdxToDriveAsync says
 			// exactly this in its own comment and defers the check to after the read-only attach, where the real
 			// used size is known - and this gate, which runs first, made that deferral unreachable.
-			string restoreExt = Path.GetExtension(sourcePath).ToLowerInvariant();
-			if (restoreExt == ".vhd" || restoreExt == ".vhdx") return 0L;
+			if (ImageFileSizeIsItsProvisionedSize(sourcePath)) return 0L;
 			return new FileInfo(sourcePath).Length + margin;
 		}
 		return 64L * 1024L * 1024L * 1024L;

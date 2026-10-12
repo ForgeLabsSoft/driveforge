@@ -1769,14 +1769,23 @@ public class InvariantTests
 				if (!oc.Type.ToString().EndsWith("Exception", StringComparison.Ordinal)) continue;
 				ExpressionSyntax? first = oc.ArgumentList?.Arguments.FirstOrDefault()?.Expression;
 				if (first is null) continue;
-				// A message built from L(...) is translated by construction, whatever else is concatenated on.
-				if (SourceModel.Calls(first, "L").Any()) continue;
-				string literal = LiteralPartsOf(first);
-				if (!ReadsAsASentence(literal)) continue;
-				string owner = OwningMethodName(oc);
-				if (!found.TryGetValue(owner, out List<string> list))
-					found[owner] = list = new List<string>();
-				list.Add($"{SourceModel.Where(file, oc)}  {Trim120(literal)}");
+				// A conditional is examined BRANCH BY BRANCH. LiteralPartsOf had no case for one, so it fell to
+				// `_ => ""`, ReadsAsASentence("") is false, and `throw new X(cond ? "..." : "...")` was skipped in
+				// silence. Exactly one such site existed in the app - on the backup screen, carrying two English
+				// sentences, one of which reached a dialog - and this rule was passing over it the whole time.
+				// Branch by branch also stops a translated branch from vouching for an English one, which a single
+				// Calls(first, "L") over the whole conditional would have done.
+				foreach (ExpressionSyntax alt in MessageAlternatives(first))
+				{
+					// A message built from L(...) is translated by construction, whatever else is concatenated on.
+					if (SourceModel.Calls(alt, "L").Any()) continue;
+					string literal = LiteralPartsOf(alt);
+					if (!ReadsAsASentence(literal)) continue;
+					string owner = OwningMethodName(oc);
+					if (!found.TryGetValue(owner, out List<string> list))
+						found[owner] = list = new List<string>();
+					list.Add($"{SourceModel.Where(file, oc)}  {Trim120(literal)}");
+				}
 			}
 
 		var complaints = new List<string>();
@@ -1802,10 +1811,23 @@ public class InvariantTests
 				+ string.Join("\n  ", complaints));
 	}
 
+	/// <summary>The alternative messages one argument can produce: a conditional yields BOTH branches,
+	/// recursively, and anything else yields itself. One exception object can carry two different sentences,
+	/// and each has to answer for itself.</summary>
+	private static IEnumerable<ExpressionSyntax> MessageAlternatives(ExpressionSyntax e) => e switch
+	{
+		ParenthesizedExpressionSyntax p => MessageAlternatives(p.Expression),
+		ConditionalExpressionSyntax c => MessageAlternatives(c.WhenTrue).Concat(MessageAlternatives(c.WhenFalse)),
+		_ => new[] { e },
+	};
+
 	/// <summary>The string-literal text in an expression: a literal, an interpolated string's text runs,
 	/// or either side of a concatenation. Interpolation holes contribute nothing.</summary>
 	private static string LiteralPartsOf(ExpressionSyntax e) => e switch
 	{
+		// Reached only for a conditional NESTED inside something else - `"a" + (c ? "b" : "d")` - because
+		// MessageAlternatives flattens a top-level one before this is called.
+		ConditionalExpressionSyntax cond => LiteralPartsOf(cond.WhenTrue) + " " + LiteralPartsOf(cond.WhenFalse),
 		LiteralExpressionSyntax lit when lit.Token.IsKind(SyntaxKind.StringLiteralToken) => lit.Token.ValueText,
 		InterpolatedStringExpressionSyntax interp => string.Concat(interp.Contents
 			.OfType<InterpolatedStringTextSyntax>().Select(t => t.TextToken.ValueText)),
@@ -2154,5 +2176,135 @@ public class InvariantTests
 		Assert.True(problems.Count == 0,
 			"Rows left ticked with no sentence explaining them read as a bug in the program rather than "
 				+ "as the invitation to try again that they are:" + "\n  " + string.Join("\n  ", problems));
+	}
+
+	/// <summary>
+	/// A run the person stopped is never called a failure on the status line.
+	///
+	/// The DIALOG has been right for a while: ShowError types a StoppedException as information and prints its
+	/// own sentence. The status line is written literally at each site, and it is what stays on screen after
+	/// the dialog is dismissed — so a Stop read "Clone failed." / "Backup failed." / "Failed." in three of the
+	/// four places that write one, under a dialog that had just said "Stopped at your request."
+	///
+	/// Measured 2026-10-12, behind one button: of the seven write paths StartButton_Click dispatches, four had
+	/// nothing to say about a Stop at all. A Stop reaches every one of them the same way — StopButton_Click
+	/// kills the child, the child exits non-zero, RunProcessAsync turns that into an exception carrying its
+	/// exit code — so "wimlib-imagex.exe exited with code -1" was the whole of the answer, with no word about
+	/// the target, which each of those paths cleans and formats BEFORE it writes. The clone and the .vhdx
+	/// restore threw StoppedException themselves; the .wim restore, the .ffu restore and the Windows-USB build
+	/// did not. The same key press, the same screen, two different answers depending on the file picked.
+	///
+	/// Scope is derived from the assignment itself, so a new flow is in it the moment it writes one. The one
+	/// site that legitimately has no stop to report is the disk rescan, and it says so in its own guard:
+	/// _refreshOwnsBusy is the app's existing name for "busy, but not an operation the user started" —
+	/// ShowError consults the same field for the same reason, two methods away.
+	/// </summary>
+	[Fact]
+	public void AStoppedRunIsNotCalledAFailureOnTheStatusLine()
+	{
+		var sites = new List<(string Where, string Line, bool AsksAboutStop)>();
+		foreach (var (file, root) in SourceModel.Parsed)
+			foreach (AssignmentExpressionSyntax a in root.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+			{
+				if (a.Left is not MemberAccessExpressionSyntax target
+						|| target.Name.Identifier.Text != "Text"
+						|| (target.Expression as IdentifierNameSyntax)?.Identifier.Text != "StatusText") continue;
+				string rhs = a.Right.ToString();
+				// Only a key that NAMES a failure. A status line that reports progress, or a stage, has no
+				// stop to distinguish; the defect is specifically calling a cancellation a failure.
+				if (!Regex.IsMatch(rhs, @"L\(.*(?:Fail|Err)")) continue;
+				// A rescan is not an operation the person started, so it has no Stop of its own. The guard it is
+				// already written under says exactly that, and nothing else in the app reads that field. Read
+				// from the enclosing `if` CONDITIONS, not from the assignment's own statement - the assignment
+				// is its own statement and the guard sits on the `if` above it.
+				if (a.Ancestors().OfType<IfStatementSyntax>()
+						.Any(i => i.Condition.ToString().Contains("_refreshOwnsBusy", StringComparison.Ordinal)))
+					continue;
+				sites.Add((SourceModel.Where(file, a), a.ToString(),
+					rhs.Contains("stopRequested", StringComparison.Ordinal)));
+			}
+
+		// The premise: if nothing writes a failure into the status line any more, this rule guards nothing.
+		Assert.True(sites.Count >= 3,
+			$"Only {sites.Count} place(s) write a failure into the status line; there were three. Re-read this "
+				+ "rule rather than leaving it passing over a scope that has moved.");
+
+		string[] silent = sites.Where(s => !s.AsksAboutStop).Select(s => $"{s.Where}  {s.Line}").ToArray();
+		Assert.True(silent.Length == 0,
+			"These write a failure into the status line without asking whether the person pressed Stop, so a "
+				+ "run they cut short short reads as one that broke. Ask in the assignment: "
+				+ "L(stopRequested ? \"SxStopped\" : \"Sx...Failed\").\n  " + string.Join("\n  ", silent));
+	}
+
+	/// <summary>
+	/// The disk rescan speaks on the status line only when it has the floor.
+	///
+	/// This is the companion to the rule above, and it exists because that rule's fix was INVISIBLE without
+	/// it. After a stopped backup the catch wrote "Stopped." and the screen still read "Ready." — twice, on
+	/// two hardware runs, before the reason turned up. The rescan is provoked by the app's OWN teardown: the
+	/// backup deletes its VSS snapshot, a volume disappears, the device-change debounce fires moments after
+	/// the operation ended, nothing is holding busy any more, so the rescan claims it and announces
+	/// "Scanning disks…" — over the verdict. Then its own tidy-up at the end replaced that announcement with
+	/// "Ready.", and the verdict was gone about two seconds after being written.
+	///
+	/// A background activity that overwrites a foreground verdict is the defect class, and the fix is the
+	/// same shape as the campaign's others: the rescan asks whether the line is its to write. So no write in
+	/// here is unconditional. Each one sits under `silent` (the device-change rescan is passive by design
+	/// everywhere else too), under `_refreshOwnsBusy` plus its scan ticket (this invocation holds busy), or
+	/// under the comparison against _operationStatusText (the line is still the rescan's own text) — and the
+	/// one that reports a failed scan is allowed to speak over anything, because an empty picker with no
+	/// explanation beside it is worse.
+	/// </summary>
+	[Fact]
+	public void TheDiskRescanDoesNotSpeakOverAnOperationsVerdict()
+	{
+		var refresh = SourceModel.Methods().Where(m => m.Name == "RefreshDisksAsync").ToArray();
+		Assert.True(refresh.Length == 1, $"expected one RefreshDisksAsync, found {refresh.Length}");
+		SyntaxNode body = refresh[0].Method;
+
+		// Every way this method can put text on the status line: a direct assignment, or SetBusy with a
+		// status argument that is not plainly null.
+		var writes = new List<(SyntaxNode Node, string Text)>();
+		foreach (AssignmentExpressionSyntax a in body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+			if (a.Left is MemberAccessExpressionSyntax t && t.Name.Identifier.Text == "Text"
+					&& (t.Expression as IdentifierNameSyntax)?.Identifier.Text == "StatusText")
+				writes.Add((a, a.ToString()));
+		foreach (InvocationExpressionSyntax inv in SourceModel.Calls(body, "SetBusy"))
+		{
+			ArgumentSyntax status = inv.ArgumentList.Arguments.FirstOrDefault(
+				x => x.NameColon?.Name.Identifier.Text == "status")
+				?? inv.ArgumentList.Arguments.Skip(1).FirstOrDefault();
+			if (status is null) continue;
+			if (status.Expression.IsKind(SyntaxKind.NullLiteralExpression)) continue;
+			writes.Add((inv, inv.ToString()));
+		}
+
+		Assert.True(writes.Count >= 3,
+			$"Only {writes.Count} status-line write(s) found in RefreshDisksAsync; there were four. Re-read "
+				+ "this rule rather than leaving it passing over a scope that has moved.");
+
+		var unguarded = new List<string>();
+		foreach (var (node, text) in writes)
+		{
+			// The guard may be the enclosing `if`, or a condition written into the value itself
+			// (`silent ? null : L("BzScanDisks")`), which is how the claim at the top of the method asks.
+			string conditions = string.Join(" ", node.Ancestors().TakeWhile(n => n != body)
+				.OfType<IfStatementSyntax>().Select(i => i.Condition.ToString()));
+			string inValue = string.Join(" ", node.DescendantNodes().OfType<ConditionalExpressionSyntax>()
+				.Select(c => c.Condition.ToString()));
+			string asked = conditions + " " + inValue;
+			bool hasFloor = asked.Contains("silent", StringComparison.Ordinal)
+				|| asked.Contains("_refreshOwnsBusy", StringComparison.Ordinal)
+				|| asked.Contains("_operationStatusText", StringComparison.Ordinal);
+			// A failed scan beside an emptied picker speaks over anything.
+			if (text.Contains("ErrDiskScan", StringComparison.Ordinal)) continue;
+			if (!hasFloor) unguarded.Add($"{SourceModel.Where(refresh[0].File, node)}  {Trim120(text)}");
+		}
+
+		Assert.True(unguarded.Count == 0,
+			"A rescan writes the status line here without asking whether the line is its to write, so it can "
+				+ "paint over the verdict an operation just left there. Gate it on `silent`, on "
+				+ "`_refreshOwnsBusy && _refreshBusyScan == myScan`, or on the line still being the rescan's "
+				+ "own text.\n  " + string.Join("\n  ", unguarded));
 	}
 }
