@@ -2354,4 +2354,73 @@ public class InvariantTests
 			"The override must be written by name (userAsked: true), so the call says what it is claiming: "
 				+ overrides[0]);
 	}
+
+	/// <summary>
+	/// Every option the confirmation promised is accounted for when the run ends.
+	///
+	/// ConfirmOperationSummary is the last dialog before the disk is erased and it lists the options that
+	/// are about to be applied. Three of them can then quietly not happen, and two of the three say so:
+	/// drivers that were asked for and not added (MbDriversNone), registry edits a security suite blocked
+	/// (HiveBlockedDone). The data partition did not. The run checks whether enough space is left over
+	/// after Windows, and when it is not it writes "Data partition requested but skipped" to the LOG and
+	/// carries on — so the confirmation said "Create an extra data partition", the drive came back with one
+	/// partition, and the completion dialog mentioned neither.
+	///
+	/// The pattern that works is already here: a field carries the outcome out of the run, a Build…Summary
+	/// renders it, and the completion dialog concatenates every one of them. So the rule is derived from
+	/// that pattern rather than from a list of options: whatever is reset in ConfirmOperationSummary's
+	/// per-operation reset is an outcome the dialog owes an answer about, and every Build…Summary that
+	/// exists has to reach the dialog. Add a fourth outcome field and the first half fails until something
+	/// reports it; write a reporter and forget to call it and the second half fails.
+	/// </summary>
+	[Fact]
+	public void EveryPromisedOptionIsAccountedForWhenTheRunEnds()
+	{
+		var confirm = SourceModel.Methods().Where(m => m.Name == "ConfirmOperationSummary").ToArray();
+		Assert.True(confirm.Length == 1, $"expected one ConfirmOperationSummary, found {confirm.Length}");
+
+		// The per-operation reset: the fields this method clears before an operation starts are exactly the
+		// ones whose value at the end is this operation's own.
+		var outcomes = new HashSet<string>(StringComparer.Ordinal);
+		foreach (AssignmentExpressionSyntax a in confirm[0].Method.DescendantNodes()
+				.OfType<AssignmentExpressionSyntax>())
+			if (a.Left is IdentifierNameSyntax id && id.Identifier.Text.StartsWith("_", StringComparison.Ordinal))
+				outcomes.Add(id.Identifier.Text);
+		foreach (InvocationExpressionSyntax inv in SourceModel.Calls(confirm[0].Method, "Clear"))
+			if (inv.Expression is MemberAccessExpressionSyntax ma
+					&& ma.Expression is IdentifierNameSyntax list
+					&& list.Identifier.Text.StartsWith("_", StringComparison.Ordinal))
+				outcomes.Add(list.Identifier.Text);
+
+		Assert.True(outcomes.Count >= 4,
+			$"Only {outcomes.Count} per-operation outcome field(s) found in ConfirmOperationSummary; there "
+				+ "were four. Re-read this rule rather than leaving it passing over a scope that has moved: "
+				+ string.Join(", ", outcomes.OrderBy(o => o, StringComparer.Ordinal)));
+
+		// Every Build…Summary in the app, and what each one reads.
+		var summaries = new Dictionary<string, string>(StringComparer.Ordinal);
+		foreach (var m in SourceModel.Methods())
+			if (m.Name.StartsWith("Build", StringComparison.Ordinal)
+					&& m.Name.EndsWith("Summary", StringComparison.Ordinal))
+				summaries[m.Name] = m.Method.ToString();
+
+		string[] unreported = outcomes
+			.Where(f => !summaries.Values.Any(body => body.Contains(f, StringComparison.Ordinal)))
+			.OrderBy(f => f, StringComparer.Ordinal).ToArray();
+		Assert.True(unreported.Length == 0,
+			"These outcomes are reset per operation — so they are this run's own answer about an option the "
+				+ "confirmation listed — and no Build…Summary reads them, which means the completion dialog "
+				+ "cannot mention them. An option promised and silently dropped reads as a program that did "
+				+ "something else:\n  " + string.Join("\n  ", unreported));
+
+		// ...and each reporter has to actually reach the dialog.
+		var start = SourceModel.Methods().Where(m => m.Name == "StartButton_Click").ToArray();
+		Assert.True(start.Length == 1, $"expected one StartButton_Click, found {start.Length}");
+		string dispatch = start[0].Method.ToString();
+		string[] uncalled = summaries.Keys.Where(n => !dispatch.Contains(n + "()", StringComparison.Ordinal))
+			.OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(uncalled.Length == 0,
+			"These build a line for the completion dialog and the completion dialog never asks for it:\n  "
+				+ string.Join("\n  ", uncalled));
+	}
 }

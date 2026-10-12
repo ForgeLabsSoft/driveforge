@@ -1237,19 +1237,11 @@ public class LocalizationTests
 	[Fact]
 	public void NoSentenceNamesAControlNobodyCanSee()
 	{
-		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
-		string code = string.Concat(new[] { "MainWindow.cs", "UiCustomization.cs" }
-			.Select(f => File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", f))));
+		var (xaml, code) = WindowSources();
 
 		var captions = new HashSet<string>(StringComparer.Ordinal);
 		var unreachable = new List<string>();
-		foreach (System.Xml.Linq.XElement root in System.Xml.Linq.XDocument.Parse(xaml).Descendants())
-		{
-			if ((string)root.Attribute("Visibility") != "Collapsed") continue;
-			string rootName = NameOf(root);
-			// A collapsed element with a name that code assigns .Visibility on can come back; without one,
-			// nothing in the app can reach it, and WPF hides every descendant with it.
-			if (rootName.Length > 0 && Regex.IsMatch(code, @"\b" + Regex.Escape(rootName) + @"\s*\.\s*Visibility\s*=")) continue;
+		foreach (System.Xml.Linq.XElement root in UnreachableSubtrees(xaml, code))
 			foreach (System.Xml.Linq.XElement el in root.DescendantsAndSelf())
 			{
 				foreach (string attr in new[] { "Text", "Content", "Header" })
@@ -1265,7 +1257,6 @@ public class LocalizationTests
 						Regex.Escape(name) + @"\s*\.\s*(?:Items\.Add\(|Content\s*=|Text\s*=|Header\s*=)\s*""([^""]+)"""))
 					captions.Add(m.Groups[1].Value);
 			}
-		}
 
 		// The premise is asserted, not assumed: if the window ever stops hiding anything, this rule has stopped
 		// protecting anything and should be read again rather than left passing.
@@ -1295,4 +1286,121 @@ public class LocalizationTests
 		(string)el.Attribute("Name")
 			?? (string)el.Attribute(System.Xml.Linq.XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))
 			?? "";
+
+	/// <summary>
+	/// The XAML subtrees nothing in the app can bring back on screen: a Visibility="Collapsed" element whose
+	/// own .Visibility is never assigned in code. Only a NAMED element can be, because nothing else holds a
+	/// handle on it, and WPF hides every descendant with its collapsed parent whatever the children say.
+	///
+	/// One owner, asked by both rules that need it. It was written out twice first, and the copies were
+	/// identical for about ten minutes - which is the same mistake as a sentence copying a control's name.
+	/// </summary>
+	private static IEnumerable<System.Xml.Linq.XElement> UnreachableSubtrees(string xaml, string code)
+	{
+		foreach (System.Xml.Linq.XElement root in System.Xml.Linq.XDocument.Parse(xaml).Descendants())
+		{
+			if ((string)root.Attribute("Visibility") != "Collapsed") continue;
+			string rootName = NameOf(root);
+			if (rootName.Length > 0
+					&& Regex.IsMatch(code, @"\b" + Regex.Escape(rootName) + @"\s*\.\s*Visibility\s*=")) continue;
+			yield return root;
+		}
+	}
+
+	/// <summary>The window's XAML and the code that renders into it — the two inputs both reachability
+	/// rules read.</summary>
+	private static (string Xaml, string Code) WindowSources() => (
+		File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml")),
+		string.Concat(new[] { "MainWindow.cs", "UiCustomization.cs" }
+			.Select(f => File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", f)))));
+
+	/// <summary>A leading "2. " / "3) " — the shape of a numbered step heading.</summary>
+	private static readonly Regex LeadingEnumerator = new(@"^\s*\d{1,2}[.)]\s", RegexOptions.Compiled);
+
+	/// <summary>
+	/// The panel's step numbering is the same in every language, and the headings a person can see are not
+	/// numbered at all.
+	///
+	/// Read off the screen 2026-10-12. In ENGLISH the Create-USB panel reads "Windows source / Target drive
+	/// (USB / SSD / HDD) / Options" — no numbers — and five separate messages pointed at numbers anyway:
+	/// both orange readiness hints ("Choose a Windows ISO / WIM / ESD in step 2.") and the three
+	/// too-early refusals ("Select the target drive first (step 3)."). In Romanian the same headings read
+	/// "2. Sursă Windows / 3. Țintă / 4. Opțiuni" and those five messages matched — so English, the language
+	/// the author reads and every translation's reference, was the inconsistent one.
+	///
+	/// And the numbering could not be rescued. Slot 2's heading is swapped for Step2ImageFile or
+	/// Step2IsoImage when the task changes, and those carry no number in ANY language, so the Romanian screen
+	/// then read "Fișier imagine / 3. Țintă / 4. Opțiuni". The sidebar replaced the old step-1 task picker and
+	/// Step5Section is collapsed, so the sequence started at 2 and ended at 4 with neither 1 nor 5 on screen.
+	///
+	/// Two halves. The first needs no vocabulary and is the real guard: ENGLISH decides. A rule that looked
+	/// for the WORD for "step" beside a digit would need a list of that word in seventeen languages — the
+	/// hand-written list this campaign keeps finding behind a green rule — and measuring the obvious
+	/// alternative (the same numbers in every language) gave 30 false positives out of 19,408 pairs, all of
+	/// them honest translation: Arabic writes "one pass" as a word, Japanese adds a counter to "4 GB per
+	/// file". Whether a value STARTS with an enumerator is not a translator's choice, so that one is exact.
+	///
+	/// The second says what the screen's design now is, so renumbering every language at once cannot quietly
+	/// pass the first. Its scope is derived the same way NoSentenceNamesAControlNobodyCanSee derives its
+	/// own — which is what keeps Step5Title, numbered in all seventeen and collapsed out of sight, from
+	/// having to be named in an exception list.
+	/// </summary>
+	[Fact]
+	public void TheStepNumberingAgreesWithEnglishAndNoVisibleHeadingIsNumbered()
+	{
+		var disagree = new List<string>();
+		int pairs = 0;
+		foreach (var (key, enValue) in Strings[Base])
+		{
+			bool enNumbered = LeadingEnumerator.IsMatch(enValue);
+			foreach (string lang in Strings.Keys.Where(l => l != Base))
+			{
+				if (!Strings[lang].TryGetValue(key, out string value)) continue;
+				pairs++;
+				if (LeadingEnumerator.IsMatch(value) != enNumbered)
+					disagree.Add($"{key} [{lang}] {(enNumbered ? "drops" : "adds")} a leading number: "
+						+ $"[en] \"{Trim80(enValue)}\" vs [{lang}] \"{Trim80(value)}\"");
+			}
+		}
+		Assert.True(pairs > 15000, $"Only {pairs} pairs compared; the table should give far more.");
+		Assert.True(disagree.Count == 0,
+			"A heading is numbered in one language and not in another, so the panel reads as a numbered "
+				+ "sequence for some people and not for others — and any sentence pointing at a step number "
+				+ "is then right for some and wrong for the rest:\n  " + string.Join("\n  ", disagree));
+
+		// The headings a person can actually see. Reachability is derived, not listed, by the same owner
+		// NoSentenceNamesAControlNobodyCanSee asks — which is what keeps Step5Title, numbered in all
+		// seventeen languages and collapsed out of sight, from needing a name in an exception list.
+		var (xaml, code) = WindowSources();
+		var unreachable = new HashSet<string>(StringComparer.Ordinal);
+		foreach (System.Xml.Linq.XElement root in UnreachableSubtrees(xaml, code))
+			foreach (System.Xml.Linq.XElement el in root.DescendantsAndSelf())
+				if (NameOf(el).Length > 0) unreachable.Add(NameOf(el));
+
+		var headings = new List<string>();
+		foreach (Match m in Regex.Matches(xaml, @"\bName=""(Step\d+(?:Title|Desc))"""))
+			if (!unreachable.Contains(m.Groups[1].Value)) headings.Add(m.Groups[1].Value);
+
+		Assert.True(headings.Count >= 3,
+			$"Only {headings.Count} reachable step heading(s) found; the panel has three plus a description. "
+				+ "Re-read this rule rather than leaving it passing over a scope that has moved.");
+
+		var numbered = new List<string>();
+		foreach (string name in headings)
+			foreach (string lang in Strings.Keys)
+				if (Strings[lang].TryGetValue(name, out string value) && LeadingEnumerator.IsMatch(value))
+					numbered.Add($"{name} [{lang}] = \"{Trim80(value)}\"");
+
+		Assert.True(numbered.Count == 0,
+			"A heading a person can see carries a step number. The panel is not a numbered sequence any "
+				+ "more: the sidebar replaced step 1, step 5 is collapsed, and slot 2's own heading changes "
+				+ "with the task. If numbering comes back it has to come back everywhere, including the two "
+				+ "alternate titles for slot 2:\n  " + string.Join("\n  ", numbered));
+	}
+
+	private static string Trim80(string s)
+	{
+		string t = Regex.Replace(s, @"\s+", " ").Trim();
+		return t.Length > 80 ? t.Substring(0, 80) + "…" : t;
+	}
 }

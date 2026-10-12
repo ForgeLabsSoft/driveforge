@@ -667,6 +667,12 @@ public partial class MainWindow : Window, IComponentConnector
 	private int _lastDriversAdded = -2;
 	private bool _lastDebloatApplied = false;
 
+	// Was a data partition asked for and then not made? The option is listed in the last dialog before the
+	// disk is erased, and the run drops it when too little space is left over - which it recorded in the log
+	// and nowhere the user would look. Same treatment as _lastDriversAdded and _hiveEditsSkipped: carry the
+	// answer out to the completion dialog, so an option that was promised is always accounted for.
+	private bool _dataPartitionSkipped = false;
+
 	// Why an offline hive can refuse to open, in one sentence, for logs and reports (English, like every
 	// other Log() line). reg.exe reports the refusal as "The filename or extension is too long", which is
 	// true of nothing here and sends people looking at their paths; measured on a machine with Bitdefender,
@@ -704,6 +710,11 @@ public partial class MainWindow : Window, IComponentConnector
 
 	// Named in the completion dialog when some offline-registry tuning had to be skipped, so "finished" never
 	// stands alone over a drive that is missing settings the user ticked.
+	// An option that was listed in the confirmation and then not carried out says so, next to the drivers
+	// and hive-edit answers in the same dialog.
+	private string BuildSkippedDataPartitionSummary() =>
+		_dataPartitionSkipped ? "\n\n" + L("MbDataPartSkipped") : "";
+
 	private string BuildSkippedHiveSummary()
 	{
 		if (_hiveEditsSkipped.Count == 0) return "";
@@ -824,7 +835,7 @@ public partial class MainWindow : Window, IComponentConnector
 		// dialog that reads them is the shared success tail for the RESTORE paths too - so restoring an image in
 		// the same session as an earlier USB build announced "Drivers from this PC: 12 package(s) added" about a
 		// run that injected nothing. -2 is the "not requested" sentinel.
-		_lastDriversAdded = -2; _lastDebloatApplied = false;
+		_lastDriversAdded = -2; _lastDebloatApplied = false; _dataPartitionSkipped = false;
 		bool isClone = ModeBox.SelectedIndex == ModeCloneCurrentWindows || IsExperimentalNtfsMode(ModeBox.SelectedIndex);
 		bool isFfu = ModeBox.SelectedIndex == ModeRestoreSavedClone;
 		// x3 approximates an LZX archive's uncompressed content, which is right for a .wim/.esd/.ffu and wrong
@@ -2752,7 +2763,7 @@ public partial class MainWindow : Window, IComponentConnector
 					// Start button dispatches - so a full PC backup written back onto a drive used to finish with
 					// "USB creation finished."
 					string doneHead = ModeBox.SelectedIndex == ModeRestoreSavedClone ? L("MbRestoreDone") : L("MbUsbDone");
-					MessageBox.Show(doneHead + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + BuildSkippedHiveSummary() + avNote, "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
+					MessageBox.Show(doneHead + bootHelp + (bitLockerEncrypting ? L("MbBitLockerNote") : "") + (bitLockerFailedThisRun ? "\n\n" + L("MbUsbBitlockerFailed") : "") + BuildDriverDebloatSummary() + BuildSkippedDataPartitionSummary() + BuildSkippedHiveSummary() + avNote, "DriveForge", MessageBoxButton.OK, bitLockerFailedThisRun ? MessageBoxImage.Exclamation : MessageBoxImage.Asterisk);
 					if (EjectWhenDoneCheck.IsChecked == true && !bitLockerEncrypting) await EjectDiskAsync(diskItem.Number);
 				}
 			}
@@ -3027,7 +3038,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async Task CreateWindowsToGoFromImageAsync(string path, DiskItem disk)
 	{
-		_lastDriversAdded = -2; _lastDebloatApplied = false; // reset per-run so the completion summary is accurate
+		_lastDriversAdded = -2; _lastDebloatApplied = false; _dataPartitionSkipped = false; // reset per-run so the completion summary is accurate
 		string mountedIso = null;
 		string diskpartPath = null;
 		try
@@ -3098,7 +3109,10 @@ public partial class MainWindow : Window, IComponentConnector
 				}
 				else
 				{
-					Log("Data partition requested but skipped: not enough leftover space. Windows will use the whole disk.");
+					// The last dialog before the disk was erased listed this option. Record the refusal where the
+				// completion dialog can say so; the log alone is not an answer to a promise.
+				_dataPartitionSkipped = true;
+				Log("Data partition requested but skipped: not enough leftover space. Windows will use the whole disk.");
 				}
 			}
 
@@ -6428,10 +6442,15 @@ exit 0
 		long required = EstimateRequiredBytes();
 		if (required > 0 && disk.Size < required)
 		{
-			message = $"The selected drive is too small.\n\nRequired: {FormatBytes(required)}\nSelected drive: {FormatBytes(disk.Size)}";
+			// ErrDriveTooSmall, not a second copy of it in English. This is the FIRST refusal the Create-USB
+		// screen can show: it runs in StartButton_Click, before the flow that carries the translated one, so
+		// the refusal a person actually meets was the untranslated copy and the key was unreachable for this
+		// path. Its tail - "nothing was changed, the drive was not formatted" - is true here too, because
+		// this gate runs before anything is touched.
+		message = string.Format(L("ErrDriveTooSmall"), FormatBytes(required), FormatBytes(disk.Size));
 			return false;
 		}
-		message = "OK";
+		message = "";   // never read: the caller only shows this when the answer is false
 		return true;
 	}
 
