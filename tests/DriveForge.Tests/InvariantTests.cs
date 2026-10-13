@@ -2866,17 +2866,33 @@ public class InvariantTests
 	/// snapshot later, after the antivirus prompt had already been answered for the other engine. And one more
 	/// escaped by being one method down: EnableBitLockerAsync asked the screen itself, at 96%.
 	///
-	/// SCOPE, measured, so this is not mistaken for a guarantee about the app: the clone is the only one of six
-	/// write flows with a snapshot block. CreateWindowsToGoFromImageAsync reads five options up to 114 lines in
-	/// (BitLocker at 92%), StartButton_Click five up to 211 lines in, WriteIsoImageFlowAsync three and
-	/// WriteIsoImageToManyFlowAsync four. Those are a screen each, and each needs its own hardware run; the
-	/// assertion below names them, so fixing one asks for this rule to be widened rather than quietly passing.
+	/// WIDENED 2026-10-13 to CreateWindowsToGoFromImageAsync, which had six live reads and was the worse of
+	/// the two: measured against the source order, CompactImageCheck was read AFTER diskpart had already
+	/// partitioned the disk, and both driver boxes and both BitLocker boxes AFTER dism had finished applying
+	/// the image. Ticking "Add all drivers" while watching the progress bar injected drivers the confirmation
+	/// never promised; unticking BitLocker dropped encryption it did.
+	///
+	/// SCOPE, measured, so this is not mistaken for a guarantee about the app: three write flows still have no
+	/// snapshot block. StartButton_Click reads five up to 211 lines in, WriteIsoImageFlowAsync three and
+	/// WriteIsoImageToManyFlowAsync four — though in the two ISO flows the reads sit between the confirmation
+	/// and the long work rather than inside it, so the window is narrow. The assertion below names all three
+	/// with their counts, so fixing one asks for this rule to be widened rather than quietly passing.
 	/// </summary>
 	[Fact]
 	public void ARunDoesNotChangeItsOwnParametersHalfwayThrough()
 	{
-		var clone = SourceModel.Methods().Where(m => m.Name == "RunExperimentalFullRootUsbCloneAsync").ToArray();
-		Assert.True(clone.Length == 1, $"expected one clone flow, found {clone.Length}");
+		// Each covered flow with the floor its own block must clear. The floor is what stops the rule being
+		// blinded: every snapshot line is written with `?.`, so disarming the null-conditional arm below drops
+		// the count to zero and fails here rather than passing over nothing.
+		var covered = new Dictionary<string, int>(StringComparer.Ordinal)
+		{
+			["RunExperimentalFullRootUsbCloneAsync"] = 8,
+			["CreateWindowsToGoFromImageAsync"] = 6,
+		};
+		foreach (var (flowName, floor) in covered.Select(c => (c.Key, c.Value)))
+		{
+		var clone = SourceModel.Methods().Where(m => m.Name == flowName).ToArray();
+		Assert.True(clone.Length == 1, $"expected one {flowName}, found {clone.Length}");
 
 		// Both access forms, because `X?.IsChecked` is a ConditionalAccessExpression and not a member access,
 		// and the whole snapshot block is written with the null-conditional one.
@@ -2902,13 +2918,14 @@ public class InvariantTests
 		// `?.`, so disarming the null-conditional arm above drops this count to zero and fails here. Measured
 		// — that mutation goes red on this line, which is the property last session's version of this check
 		// did not have, where a blind arm simply passed.
-		Assert.True(snapshotted >= 8,
-			$"Only {snapshotted} option(s) snapshotted in the clone; there were eight. Re-read this rule rather "
-				+ "than leaving it passing over a scope that has moved.");
+		Assert.True(snapshotted >= floor,
+			$"Only {snapshotted} option(s) snapshotted in {flowName}; there were {floor}. Re-read this rule "
+				+ "rather than leaving it passing over a scope that has moved.");
 		Assert.True(live.Count == 0,
-			"The clone reads these off the screen after its snapshot block, so the operation can change the "
+			$"{flowName} reads these off the screen after its snapshot block, so the operation can change the "
 				+ "parameters the person approved while it runs. Snapshot it at the top with the others:\n  "
 				+ string.Join("\n  ", live));
+		}
 
 		// ...and nothing it calls asks the screen on its behalf. EnableBitLockerAsync is the one that did: it
 		// runs at 96% of the clone and read the "let me remove the drive early" box itself, which is how an
@@ -2923,8 +2940,6 @@ public class InvariantTests
 		// live. If one of them grows one, widen this rule to it instead of letting this list go stale.
 		var expected = new Dictionary<string, int>(StringComparer.Ordinal)
 		{
-			["CreateWindowsToGoFromImageAsync"] = 6,   // its own five, plus the resume box EnableBitLockerAsync
-													   // used to read for it, now read at this call site
 			["StartButton_Click"] = 5,
 			["WriteIsoImageFlowAsync"] = 3,
 			["WriteIsoImageToManyFlowAsync"] = 4,

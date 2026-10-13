@@ -3135,6 +3135,19 @@ public partial class MainWindow : Window, IComponentConnector
 	private async Task CreateWindowsToGoFromImageAsync(string path, DiskItem disk)
 	{
 		_lastDriversAdded = -2; _lastDebloatApplied = false; _promisesWithheld.Clear(); // reset per-run so the completion summary is accurate
+		// Snapshot every option this run depends on, before anything is written. SetBusy disables four
+		// buttons and nothing else - the Options panel stays live for the whole run, and this one runs for
+		// tens of minutes. Measured against the source order: CompactImageCheck was read AFTER diskpart had
+		// already partitioned the disk, and both driver boxes and both BitLocker boxes AFTER dism had
+		// finished applying the image. So a box ticked while watching the progress bar changed what the run
+		// did, long after the confirmation had said otherwise - drivers injected that were never promised,
+		// or encryption dropped that was. Same shape, and same reason, as the clone's block.
+		bool optDataPartition = DataPartitionCheck?.IsChecked == true;
+		bool optCompactImage = CompactImageCheck?.IsChecked == true;
+		bool optAllDrivers = AddAllDriversCheck?.IsChecked == true;
+		bool optNetworkDrivers = AddNetworkDriversCheck?.IsChecked == true;
+		bool optBitLocker = BitLockerCheck?.IsChecked == true;
+		bool optBitLockerResume = BitLockerResumeCheck?.IsChecked == true;
 		string mountedIso = null;
 		string diskpartPath = null;
 		try
@@ -3184,7 +3197,7 @@ public partial class MainWindow : Window, IComponentConnector
 			// Optional data partition: cap Windows and give the rest to an NTFS "Data" partition.
 			int windowsSizeMb = 0;
 			char dataLetter = '\0';
-			if (DataPartitionCheck.IsChecked == true)
+			if (optDataPartition)
 			{
 				// Size Windows from the actual image (~3× the compressed WIM/ESD) + 8 GiB headroom, not the flat 64 GB
 				// estimate — so the requested data partition survives on modest drives. Keep a 40 GiB floor.
@@ -3212,7 +3225,7 @@ public partial class MainWindow : Window, IComponentConnector
 			await File.WriteAllTextAsync(diskpartPath, BuildWindowsToGoDiskpartScript(disk.Number, bootLetter, windowsLetter, windowsSizeMb, dataLetter), Encoding.ASCII);
 			await RunProcessAsync("diskpart.exe", "/s \"" + diskpartPath + "\"");
 			SetStage(L("StgApplyDism"), 20.0);
-			string compactArg = CompactImageCheck.IsChecked == true ? " /Compact" : "";
+			string compactArg = optCompactImage ? " /Compact" : "";
 			await RunProcessAsync("dism.exe", $"/Apply-Image /ImageFile:\"{imageFile}\" /Index:{index} /ApplyDir:{windowsLetter}:\\{compactArg}");
 
 			// Post-apply integrity check: confirm DISM produced a complete, bootable Windows root.
@@ -3230,11 +3243,11 @@ public partial class MainWindow : Window, IComponentConnector
 			await MarkPortableWindowsAsync(windowsLetter);
 			await ConfigurePortablePagefileAsync(windowsLetter);
 			await ApplyInstallBypassOptionsAsync(windowsLetter);
-			if (AddAllDriversCheck.IsChecked == true)
+			if (optAllDrivers)
 			{
 				await InjectCurrentPcDriversAsync(windowsLetter, allDrivers: true);
 			}
-			else if (AddNetworkDriversCheck.IsChecked == true)
+			else if (optNetworkDrivers)
 			{
 				await InjectCurrentPcDriversAsync(windowsLetter, allDrivers: false);
 			}
@@ -3245,11 +3258,11 @@ public partial class MainWindow : Window, IComponentConnector
 			// Guarantee the UEFI removable fallback \EFI\Boot\bootx64.efi so the stick UEFI-boots on any PC
 			// (bcdboot only writes it for media it detects as removable; many USB SSDs report as fixed).
 			EnsureUefiRemovableFallback(bootLetter);
-			if (BitLockerCheck.IsChecked == true)
+			if (optBitLocker)
 			{
 				// A BitLocker start-failure must NOT abort an already-complete, bootable Windows To Go as a total failure
 				// (which would also skip the volume flush below). Mirror the clone path: keep the drive, flush, and warn.
-				try { await EnableBitLockerAsync(windowsLetter, BitLockerResumeCheck.IsChecked == true); }
+				try { await EnableBitLockerAsync(windowsLetter, optBitLockerResume); }
 				catch (Exception blEx)
 				{
 					bitLockerFailedThisRun = true;
