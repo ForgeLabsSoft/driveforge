@@ -12,7 +12,7 @@ Commands:
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.5.0/DriveForge.exe
-  InstallerSha256: D4C4C3DA56A478710BFE3A6295FE81BFDFC57FA4D33B51F53252D2199EAA8B11
+  InstallerSha256: BCFF7AA71B1E64BDAB19899145FF7C7553B769589B6A997D845804BF3BFCEFB1
 ManifestType: installer
 ManifestVersion: 1.12.0
 ReleaseDate: 2026-10-13

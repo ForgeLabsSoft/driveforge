@@ -11,7 +11,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.5.0/DriveForge.exe",
-            "hash": "d4c4c3da56a478710bfe3a6295fe81bfdfc57fa4d33b51f53252d2199eaa8b11"
+            "hash": "bcff7aa71b1e64bdab19899145ff7c7553b769589b6a997d845804bf3bfcefb1"
         }
     },
     "bin": [
