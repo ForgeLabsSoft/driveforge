@@ -69,8 +69,5 @@ ReleaseNotes: |-
   were English end to end - including the one shown before erasing a drive.
 
 ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.5.0
-Documentations:
-- DocumentLabel: Wiki
-  DocumentUrl: https://github.com/ForgeLabsSoft/driveforge/wiki
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0
