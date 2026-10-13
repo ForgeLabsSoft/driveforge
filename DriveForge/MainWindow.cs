@@ -1546,6 +1546,7 @@ public partial class MainWindow : Window, IComponentConnector
 				int? selectedDiskNumber = (DiskBox.SelectedItem as DiskItem)?.Number;
 				disks.Clear();
 				_syncingDisk = true;
+				_rebuildingDiskList = true;   // the selection churn below is the app's, not the person's
 				DiskBox.Items.Clear();
 				if (DiagDiskBox != null) DiagDiskBox.Items.Clear();
 				foreach (DiskItem item in found)
@@ -1617,6 +1618,7 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				disks.Clear();
 				_syncingDisk = true;
+				_rebuildingDiskList = true;   // the selection churn below is the app's, not the person's
 				DiskBox.Items.Clear();
 				if (DiagDiskBox != null) DiagDiskBox.Items.Clear();
 				PartitionMapGrid?.Children.Clear();   // else the vanished disk's map stays drawn beside an empty picker
@@ -1647,7 +1649,8 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		finally
 		{
-			_syncingDisk = false;   // never leave the selection-sync suppressor stranded true if the scan threw mid-rebuild
+			_syncingDisk = false;   // never leave the selection-sync suppressor stranded true if the scan threw mid
+			_rebuildingDiskList = false;   // same reason, and a stranded true would silently disable the clear-rebuild
 			// Release only a busy state THIS invocation still owns. Both conditions are needed: the ticket says WE
 			// took it (a nested refresh, or a straggler from an earlier scan, must never release another refresh's
 			// state), and the token says nobody has taken over since (a real operation that started during the scan
@@ -7517,6 +7520,24 @@ exit 0
 		string overviewKey = DiskBox.SelectedItem is DiskItem selDisk ? DiskIdentityKey(selDisk) : "";
 		if (overviewKey == _lastOverviewDiskKey) return;
 		_lastOverviewDiskKey = overviewKey;
+		// The transcript and the status line describe an operation on a drive, so they stop being true the
+		// moment a different drive is selected - a "Format completed." line and a diskpart transcript,
+		// standing under a drive nothing has been done to. Thirteen of the twenty-one transcripts carry no
+		// drive in their header at all.
+		// Keyed on the drive the output was WRITTEN for, not on "the selection changed": seven tools call
+		// RefreshDisksAsync immediately after writing their output, and that rebuild changes the selection -
+		// so clearing on any change would erase the very result the tool had just produced.
+		// ...and not while the disk list is being rebuilt. Adding items to an emptied ComboBox makes it
+		// select the first row on its own, which reaches here looking exactly like a deliberate change of
+		// drive - measured: a Refresh took the transcript from 1864 characters to 0. _syncingDisk is
+		// _rebuildingDiskList says exactly that and nothing else.
+		if (!_rebuildingDiskList && overviewKey.Length > 0 && _toolOutputDiskKey.Length > 0
+			&& !string.Equals(overviewKey, _toolOutputDiskKey, StringComparison.OrdinalIgnoreCase))
+		{
+			ToolOutputBox.Text = "";
+			_toolOutputDiskKey = "";
+			ToolStatusText.Text = L("ToolStatusText");   // the XAML default, translated under its control name
+		}
 		if (!(DiskBox.SelectedItem is DiskItem disk))
 		{
 			ToolDriveTitleText.Text = L("DToolNoDrive");
@@ -7531,6 +7552,7 @@ exit 0
 			HealthStatusCard.Background = new System.Windows.Media.SolidColorBrush(HealthCardColor(""));   // grey, matches "Unknown"
 			if (HealthTrendText != null) HealthTrendText.Text = "";
 			if (HealthTrendBox != null) HealthTrendBox.Visibility = Visibility.Collapsed;
+			ShowSpeedFor(null);
 			return;
 		}
 		// If we already hold a health/SMART report for this disk (e.g. a Refresh or re-selection rebuilt the
@@ -7544,7 +7566,7 @@ exit 0
 			&& string.Equals(DiskIdentityKey(_diagDisk), DiskIdentityKey(disk), StringComparison.OrdinalIgnoreCase))
 		{
 			UpdateHealthVisuals(disk, _diagReport, recordTrend: false);
-			if (speedResults.TryGetValue(disk.Number, out SpeedResult cachedSpeed)) UpdateSpeedVisuals(cachedSpeed);
+			ShowSpeedFor(disk);
 			return;
 		}
 		// No report yet for this disk — clear any stale SMART rows left over from a previously selected disk.
@@ -7566,10 +7588,7 @@ exit 0
 		ToolInterfaceText.Text = string.Format(L("DToolIfFmt"), disk.BusType, disk.MediaType);
 		ToolSizeText.Text = string.Format(L("DToolSizeLetters"), FormatBytes(disk.Size), FormatDriveLetters(disk));
 		ToolRecommendationDetailText.Text = disk.IsSystem ? L("DToolSysBlocked") : L("DToolRunDetails");
-		if (speedResults.TryGetValue(disk.Number, out SpeedResult speed))
-		{
-			UpdateSpeedVisuals(speed);
-		}
+		ShowSpeedFor(disk);
 	}
 
 	// Last health/SMART report rendered — kept so the diagnostics view can be re-rendered in a new
@@ -7790,6 +7809,23 @@ exit 0
 	{
 		UpdateHealthVisuals(disk, report);
 		ToolRecommendationDetailText.Text = L("DSmartLoaded");
+	}
+
+	// The speed panel belongs to the drive it was measured on. It had ONE writer, UpdateSpeedVisuals,
+	// reachable only when a cached result exists - so after the first test the panel could never go back
+	// to the idle state, which is why selecting a drive that has not been tested left the previous
+	// drive's MB/s and its verdict sitting under the new drive's name. The dangerous direction is the
+	// flattering one: a fast NVMe's "Good for Windows To Go" reading, left standing over a cheap stick.
+	// The idle texts are the XAML defaults, already translated in all 17 languages under their control
+	// names, so nothing new is needed - the code simply never returned to them.
+	private void ShowSpeedFor(DiskItem? disk)
+	{
+		if (disk != null && speedResults.TryGetValue(disk.Number, out SpeedResult cached))
+			{ UpdateSpeedVisuals(cached); return; }
+		SequentialSpeedBar.Value = 0;
+		RandomSpeedBar.Value = 0;
+		SpeedVisualText.Text = L("SpeedVisualText");
+		SpeedAdviceText.Text = L("SpeedAdviceText");
 	}
 
 	private void UpdateSpeedVisuals(SpeedResult speedResult)
@@ -17939,10 +17975,20 @@ exit 0
 		Log("Tool: " + message);
 	}
 
+	// Raised only while the disk list is being rebuilt. NOT _syncingDisk: that one is raised on every
+	// selection the person makes in the diagnostics combo too, because mirroring it onto DiskBox fires
+	// DiskBox_SelectionChanged synchronously - so using it here suppressed the clear always.
+	private bool _rebuildingDiskList;
+
+	// Which drive the transcript is about, so a disk-list rebuild cannot be mistaken for the person
+	// picking a different drive. Empty means "nothing worth keeping".
+	private string _toolOutputDiskKey = "";
+
 	private void SetToolOutput(string output)
 	{
 		ToolOutputBox.Text = output ?? "";
 		ToolOutputBox.ScrollToEnd();
+		_toolOutputDiskKey = DiskBox.SelectedItem is DiskItem outDisk ? DiskIdentityKey(outDisk) : "";
 	}
 
 	/// <summary>Marks a failure whose message is already in the user's language, so ShowError prints it

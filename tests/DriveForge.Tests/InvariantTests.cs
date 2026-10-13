@@ -3217,4 +3217,114 @@ public class InvariantTests
 				+ "reads. Shipped v4.4.5 served ubuntu-24.04.4 out of a directory that held 24.04.5.1 for "
 				+ "exactly this reason. Repeat the group with \"*\":\n  " + string.Join("\n  ", bounded));
 	}
+
+	/// <summary>
+	/// RULE — on the tools screen, a result is shown for the drive it was taken from, or not at all.
+	///
+	/// UpdateDriveToolOverview rewrites thirteen things for the newly selected drive — title, health,
+	/// temperature, firmware, serial, interface, size, recommendation, SMART rows, trend text, trend box,
+	/// card colour, partition map — and its own comments say why each one must not be left behind. Three
+	/// result surfaces were left behind anyway.
+	///
+	/// The speed panel had ONE writer, UpdateSpeedVisuals, reachable only when a cached result exists, so
+	/// after the first test the panel could never return to idle: selecting an untested drive left the
+	/// previous drive's MB/s and its verdict standing under the new drive's name — directly below the
+	/// title, serial, interface and size, which had all just been rewritten for the new drive. The
+	/// dangerous direction is the flattering one: a fast NVMe's "Good for Windows To Go" reading, left
+	/// over a cheap stick that cannot take it.
+	///
+	/// (The Speed summary CARD is not a second opinion here, as a first draft of this rule claimed: that
+	/// whole Grid is Visibility="Collapsed" — "info now lives in the Overview tab" — so nobody sees it.
+	/// UpdateDiskSummary keeps writing to it, which is deliberate and documented in the XAML.)
+	///
+	/// The idle texts were there the whole time — XAML defaults, translated into all 17 languages under
+	/// their control names — just unreachable. So the panel gets an owner, ShowSpeedFor, and every exit
+	/// from the overview goes through it.
+	///
+	/// The transcript box and status line are cleared on a change of drive, and the trap is in HOW: seven
+	/// tools call RefreshDisksAsync immediately after writing their output, and that rebuild changes the
+	/// selection. Clearing on "the selection changed" would erase the result the tool had just produced, so
+	/// the clear is keyed on the drive the output was WRITTEN for. That half is pinned here too, because
+	/// the obvious simplification is the bug.
+	/// </summary>
+	[Fact]
+	public void AToolResultBelongsToTheDriveItCameFrom()
+	{
+		string[] panel = { "SpeedVisualText", "SpeedAdviceText", "SequentialSpeedBar", "RandomSpeedBar" };
+
+		// --- the speed panel is written in two places, and one of them is the idle state ----------------
+		var writers = SourceModel.Methods()
+			.Where(m => m.Method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+				.Any(a => panel.Any(c => a.Left.ToString().StartsWith(c + ".", StringComparison.Ordinal))))
+			.Select(m => m.Name).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray();
+		Assert.True(writers.SequenceEqual(new[] { "ShowSpeedFor", "UpdateSpeedVisuals" }),
+			"The speed panel must be written only by its owner and by the renderer it delegates to, so that "
+				+ "\"this drive has no result\" is a state the code can reach. Written by: "
+				+ string.Join(", ", writers));
+
+		var owner = SourceModel.Methods().Where(m => m.Name == "ShowSpeedFor").ToArray();
+		Assert.True(owner.Length == 1, $"expected one ShowSpeedFor, found {owner.Length}");
+		string ownerBody = owner[0].Method.ToString();
+		foreach (string idle in new[] { "L(\"SpeedVisualText\")", "L(\"SpeedAdviceText\")" })
+			Assert.True(ownerBody.Contains(idle, StringComparison.Ordinal),
+				$"ShowSpeedFor must restore {idle}: the idle text is the translated XAML default, and without "
+					+ "it the panel can never stop describing the previous drive.");
+
+		// --- the overview never renders a speed result itself ------------------------------------------
+		var overview = SourceModel.Methods().Where(m => m.Name == "UpdateDriveToolOverview").ToArray();
+		Assert.True(overview.Length == 1, $"expected one UpdateDriveToolOverview, found {overview.Length}");
+		var calls = overview[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Select(i => i.Expression.ToString()).ToArray();
+		Assert.True(!calls.Contains("UpdateSpeedVisuals"),
+			"UpdateDriveToolOverview must go through ShowSpeedFor, never render a cached result directly: "
+				+ "a direct call is reachable only when a result exists, which is exactly how the panel lost "
+				+ "its idle state.");
+		int through = calls.Count(c => c == "ShowSpeedFor");
+		Assert.True(through >= 3,
+			$"Only {through} ShowSpeedFor call(s) in UpdateDriveToolOverview; it has three exits that each "
+				+ "settle what the panel shows (no drive, cached report, no report yet). An exit that skips "
+				+ "the owner leaves the previous drive's reading on screen.");
+
+		// --- the transcript is cleared by WHOSE it is, not by "something changed" ----------------------
+		var clears = overview[0].Method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+			.Where(a => a.Left.ToString() == "ToolOutputBox.Text").ToArray();
+		Assert.True(clears.Length == 1,
+			$"Expected exactly one place where the overview clears the transcript, found {clears.Length}.");
+		// Tied to the GUARD, not to the method merely mentioning the field: a rule keyed on a name stays
+		// green when the name survives and the condition behind it does not.
+		var guard = clears[0].Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
+		Assert.True(guard != null && guard.Condition.ToString()
+				.Contains("_toolOutputDiskKey", StringComparison.Ordinal),
+			"The transcript may only be cleared under a test on _toolOutputDiskKey — the drive the output was "
+				+ "written FOR. Clearing because \"the selection changed\" erases the result the tool just "
+				+ "produced, because seven tools call RefreshDisksAsync immediately after writing it. Guard "
+				+ "found: " + (guard == null ? "(none)" : Trim120(guard.Condition.ToString())));
+
+		// ...and the rebuild is recognised by the flag that means ONLY that. _syncingDisk looks like the
+		// same thing and is not: DiagDiskBox_SelectionChanged raises it on every selection the person makes,
+		// because mirroring onto DiskBox fires DiskBox_SelectionChanged synchronously. Measured on hardware:
+		// with _syncingDisk here, changing drive stopped clearing the transcript at all. Both directions of
+		// this are wrong in opposite ways, which is why both are pinned.
+		string cond = guard!.Condition.ToString();
+		Assert.True(cond.Contains("_rebuildingDiskList", StringComparison.Ordinal),
+			"The guard must exempt a disk-list REBUILD, or a tool's own RefreshDisksAsync wipes the output it "
+				+ "just wrote. Guard: " + Trim120(cond));
+		Assert.True(!cond.Contains("_syncingDisk", StringComparison.Ordinal),
+			"_syncingDisk is not the rebuild flag — it is raised for every selection made in the diagnostics "
+				+ "combo as well, so it suppresses the clear always. Guard: " + Trim120(cond));
+
+		var raised = SourceModel.Methods()
+			.SelectMany(m => m.Method.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+			.Count(a => a.Left.ToString() == "_rebuildingDiskList" && a.Right.ToString() == "true");
+		Assert.True(raised == 2,
+			$"_rebuildingDiskList is raised {raised} time(s); the disk list is rebuilt in two places and both "
+				+ "must be covered, or a refresh down one of them still erases the transcript.");
+
+		var setter = SourceModel.Methods().Where(m => m.Name == "SetToolOutput").ToArray();
+		Assert.True(setter.Length == 1, $"expected one SetToolOutput, found {setter.Length}");
+		Assert.True(setter[0].Method.ToString().Contains("_toolOutputDiskKey =", StringComparison.Ordinal),
+			"SetToolOutput must record which drive the transcript is about. Without it the clear can only be "
+				+ "keyed on \"the selection changed\" — and seven tools refresh the disk list immediately "
+				+ "after writing their output, so that would erase the result they had just produced.");
+	}
 }
