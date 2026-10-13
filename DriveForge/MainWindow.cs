@@ -14221,8 +14221,15 @@ exit 0
 		// serving 26.04.1 LTS, and this pattern resolves to ubuntu-26.04.1-desktop-amd64.iso. The label drops
 		// the version with it, because a label naming a version is the same pin wearing a different hat.
 		new IsoEntry { Label = "Ubuntu LTS — Desktop (64-bit)", Kind = IsoKind.TwoStep, A = "https://releases.ubuntu.com/", B = "[0-9]*[02468]\\.04(?:\\.[0-9]+)*/", C = "ubuntu-[0-9.]+-desktop-amd64\\.iso" },
-		new IsoEntry { Label = "Linux Mint — Cinnamon (64-bit)", Kind = IsoKind.TwoStep, A = "https://mirrors.edge.kernel.org/linuxmint/stable/", B = "[0-9]+(?:\\.[0-9]+)?/", C = "linuxmint-[0-9.]+-cinnamon-64bit\\.iso" },
-		new IsoEntry { Label = "Linux Mint — Xfce (64-bit)", Kind = IsoKind.TwoStep, A = "https://mirrors.edge.kernel.org/linuxmint/stable/", B = "[0-9]+(?:\\.[0-9]+)?/", C = "linuxmint-[0-9.]+-xfce-64bit\\.iso" },
+		// "*", nu "?", si pe directoarele lui Mint. Un "?" admite UN singur grup de puncte, deci tiparul
+		// nu poate EXPRIMA o versiune cu patru grupuri - si asta e a doua jumatate a defectului raportat pe
+		// 2026-10-13: intrarea Ubuntu livrata in v4.4.5 indexa /24.04/, al carui index CHIAR contine
+		// ubuntu-24.04.5.1-desktop-amd64.iso, dar "ubuntu-24\\.04(?:\\.\\d+)?-desktop-amd64\\.iso" nu-l poate
+		// potrivi, asa ca servea 24.04.4 dintr-un director care avea deja .5.1 in el. Masurat azi peste
+		// indexul real. Mint foloseste doua grupuri azi (22.3), deci largirea nu schimba nimic acum - de
+		// asta e ieftina: scoate ultima aparitie a formei care a ascuns un punct de lansare intreg.
+		new IsoEntry { Label = "Linux Mint — Cinnamon (64-bit)", Kind = IsoKind.TwoStep, A = "https://mirrors.edge.kernel.org/linuxmint/stable/", B = "[0-9]+(?:\\.[0-9]+)*/", C = "linuxmint-[0-9.]+-cinnamon-64bit\\.iso" },
+		new IsoEntry { Label = "Linux Mint — Xfce (64-bit)", Kind = IsoKind.TwoStep, A = "https://mirrors.edge.kernel.org/linuxmint/stable/", B = "[0-9]+(?:\\.[0-9]+)*/", C = "linuxmint-[0-9.]+-xfce-64bit\\.iso" },
 		new IsoEntry { Label = "Debian — Live GNOME (64-bit)", Kind = IsoKind.Index, A = "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/", B = "debian-live-[0-9.]+-amd64-gnome\\.iso" },
 		new IsoEntry { Label = "Debian — Live Xfce (64-bit)", Kind = IsoKind.Index, A = "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/", B = "debian-live-[0-9.]+-amd64-xfce\\.iso" },
 		new IsoEntry { Label = "Arch Linux (64-bit)", Kind = IsoKind.Direct, A = "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso" },

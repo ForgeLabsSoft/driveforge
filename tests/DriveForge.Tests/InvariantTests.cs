@@ -3159,4 +3159,62 @@ public class InvariantTests
 				$"OwnWindowIsUp must test {half}: one of the two kinds of window this app shows is invisible to "
 					+ "the other test.");
 	}
+
+	/// <summary>
+	/// RULE — an ISO catalog pattern can express a point release with any number of groups.
+	///
+	/// The sibling rule above forbids a PINNED version. This one forbids a pattern that cannot
+	/// EXPRESS one, which is the same bug arriving by the other door and is how half of a real user
+	/// report on 2026-10-13 was still true after the pin was gone.
+	///
+	/// Shipped v4.4.5 indexed https://releases.ubuntu.com/24.04/ with
+	/// "ubuntu-24\.04(?:\.\d+)?-desktop-amd64\.iso". That index CONTAINS
+	/// ubuntu-24.04.5.1-desktop-amd64.iso — measured over the real index — but "(?:\.\d+)?" admits ONE
+	/// trailing group, so a four-group version cannot match it, and the app handed out 24.04.4 from a
+	/// directory that already held .5.1. Nothing was pinned to .4; the pattern simply had no way to say it.
+	///
+	/// So the test is on the QUANTIFIER, not on any digits: a group that contains an escaped dot is a
+	/// version-component group, and it must repeat without a ceiling — "*" or "+". A bare group ("exactly
+	/// one") and "?" ("at most one") are both ceilings, and a ceiling is a version the catalog cannot reach.
+	/// The C fields need no group at all: "ubuntu-[0-9.]+-desktop-amd64\.iso" is unbounded by construction,
+	/// and passes this rule vacuously, which is the right answer.
+	/// </summary>
+	[Fact]
+	public void AnIsoPatternCanExpressAnyPointRelease()
+	{
+		var catalog = SourceModel.Parsed
+			.SelectMany(p => p.Root.DescendantNodes().OfType<FieldDeclarationSyntax>())
+			.Where(f => f.Declaration.Variables.Any(v => v.Identifier.Text == "IsoCatalog"))
+			.ToArray();
+		Assert.True(catalog.Length == 1, $"expected one IsoCatalog field, found {catalog.Length}");
+
+		string[] literals = catalog[0].DescendantNodes().OfType<LiteralExpressionSyntax>()
+			.Where(l => l.Token.IsKind(SyntaxKind.StringLiteralToken))
+			.Select(l => l.Token.ValueText).ToArray();
+
+		int groupsSeen = 0;
+		var bounded = new List<string>();
+		foreach (string lit in literals)
+			foreach (Match g in Regex.Matches(lit, @"\(\?:[^()]*\\\.[^()]*\)([*+?]|\{[^}]*\})?"))
+			{
+				groupsSeen++;
+				string q = g.Groups[1].Value;
+				if (q != "*" && q != "+")
+					bounded.Add($"\"{Trim120(lit)}\"  caps its version at \"{g.Value}\""
+						+ (q.Length == 0 ? " (no quantifier — exactly one group)" : $" (quantifier \"{q}\")"));
+			}
+
+		// A floor, so the rule notices when it has been blinded rather than reporting a clean sweep of
+		// nothing: the Ubuntu directory pattern and both Mint directory patterns each carry one such group.
+		Assert.True(groupsSeen >= 3,
+			$"Only {groupsSeen} version-component group(s) found in IsoCatalog; there were three. Either the "
+				+ "catalog shrank or this rule stopped recognising the shape it exists for — re-read it rather "
+				+ "than leaving it passing over nothing.");
+
+		Assert.True(bounded.Count == 0,
+			"These catalog patterns put a ceiling on how many groups a version may have, so a point release "
+				+ "with one more group is invisible even when it is sitting in the index the entry already "
+				+ "reads. Shipped v4.4.5 served ubuntu-24.04.4 out of a directory that held 24.04.5.1 for "
+				+ "exactly this reason. Repeat the group with \"*\":\n  " + string.Join("\n  ", bounded));
+	}
 }
