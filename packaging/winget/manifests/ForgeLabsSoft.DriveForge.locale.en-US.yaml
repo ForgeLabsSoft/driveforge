@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 
 PackageIdentifier: ForgeLabsSoft.DriveForge
-PackageVersion: 4.4.5
+PackageVersion: 4.5.0
 PackageLocale: en-US
 Publisher: ForgeLabsSoft
 PublisherUrl: https://github.com/ForgeLabsSoft
@@ -37,27 +37,38 @@ Tags:
 - portable
 - open-source
 ReleaseNotes: |-
-  Fixed: on a plain USB flash drive, a drive could be emptied and then told the operation had failed.
+  A screen-by-screen audit of the whole application, driven on real hardware rather than read.
+  Thirty-eight changes, and nearly all of them are one fault in different clothes: the app knew
+  something and did not say it. Nothing here changes a file format or a saved setting.
 
-  Every destructive tool starts with the same command, and on a plain flash drive Windows often refuses it
-  with "Access is denied" - after the partition table is already gone. The tool then showed a hexadecimal
-  error code and created nothing, so the drive was left blank and the message explained nothing. Eleven
-  places started with that command, among them the SSD erase, Format, the full-overwrite Wipe and writing
-  an ISO to a stick.
+  A run now reports what it actually did. A clone could take back three of the four options it had
+  offered you, into the log alone. Writing an image to several drives reported "6 of 6 written" when
+  it had refused two of them, and also dropped drives that vanished while the confirmation was up and
+  ticks with no drive connected. "Windows is keeping this disk offline" reached one report out of two.
+  A read-only file-system scan could call a drive healthy, as could Create partition and Delete volume,
+  which decided their verdict from a variable set to true and never lowered. The speed test spent 80 MB
+  and spoke for the whole drive; the disk-space analyser counted the Recycle Bin as free space. Clean
+  traces reported a stopped run as a finished one and a plain delete as a secure wipe, and named
+  sanitising standards it does not implement.
 
-  They all now look at the disk instead of reading an exit code, and finish the job: when the partition
-  table is already gone they carry on, otherwise they try two further routes before stopping. If all of
-  them fail, the message says in plain language that nothing new was created and that unplugging the drive
-  and trying again usually clears it.
+  Screens that hid the thing they exist for. Recover would not list the one volume it exists for.
+  Cleanup gave four different answers to "what is on screen". Three finished tools had no button
+  anywhere. The file-system menu stopped repeating the 32 GB FAT32 limit, which was measured to be
+  wrong, and now asks rather than refusing.
 
-  Four more faults in the same chain were found the same way and fixed: an emptied disk that still reported
-  its old partition table could never be given a new one; a drive that cannot TRIM failed the whole erase;
-  a partition that was created but not formatted was abandoned with no file system on it; and the progress
-  line called a flash drive an SSD immediately after warning that it is not one.
+  Stop is answered as a Stop on every path behind the Start button; several treated it as a failure,
+  and one saved a log file to the Desktop on the way out.
 
-  All of it was measured by driving the application on a real flash drive, and the erase was then run
-  through it four times from end to end.
-ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.4.5
+  Download an ISO: "Get latest" for Ubuntu was two LTS releases behind and could not have caught up,
+  with 24.04 written into the entry three times over. It now reads Ubuntu's release server and takes
+  the newest LTS. Reported by Keith Weisshar. The SHA-256 check is now offered where a download
+  finishes, which is the one screen that did not have it.
+
+  Also: the step numbers are gone from the interface, sentences that point at a button now name it,
+  and 46 of the 84 error sentences a person could see are translated, along with four dialogs that
+  were English end to end - including the one shown before erasing a drive.
+
+ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.5.0
 Documentations:
 - DocumentLabel: Wiki
   DocumentUrl: https://github.com/ForgeLabsSoft/driveforge/wiki

@@ -2,6 +2,92 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.5.0 — 2026-10-13
+
+A screen-by-screen audit of the whole app, driven on real hardware rather than read. Thirty-eight changes,
+and almost all of them are the same fault wearing different clothes: **the app knew something and did not
+say it.** A value was stored where it should have been worked out, a copy drifted from the thing it copied,
+a promise was made with nobody responsible for keeping it, or a run wrote something down and then reported
+a number that contradicted it.
+
+Nothing here changes a file format or a saved setting. Updating is safe from any 4.x.
+
+### Fixed — a run now reports what it actually did
+
+- **A clone could take back three of the four options it offered you, into the log alone.** The confirmation
+  lists what the clone will do. If the data partition did not fit under an 8 GB floor it was silently
+  dropped; if the layout had only two spare primaries the extra data partitions were capped and the final
+  dialog counted only the ones it had *attempted*; and "Verify cloned data after writing" was skipped
+  whenever the Microsoft engine ran — which the app can choose *for* you when you answer Yes to a prompt
+  about speed. Each of the three is now named in the completion dialog, in all seventeen languages.
+- **Writing an image to several USB drives reported "6 of 6 drives written" when it had refused two of
+  them.** The refusal had a name and a reason in the code, both report layouts drew them, and nothing ever
+  produced one. The same report also dropped drives that disappeared while the confirmation was on screen,
+  and ticks with no drive connected. All three now appear, with the reason under each drive.
+- **"Windows is keeping this disk offline" reached one report out of two.** The list shown after several
+  drives said it; the single-drive dialog — the ordinary case — said "Done, plug it into the target PC"
+  with an information icon, over a drive you will not find in Explorer.
+- **A read-only file-system scan could call a drive healthy.** So could Create partition and Delete volume,
+  which decided their verdict from a variable set to true and never lowered. Four flows announced a disk
+  state without reading the disk back afterwards.
+- **The speed test spent 80 MB and spoke for the whole drive**, and the disk-space analyser counted the
+  Recycle Bin as free space. The capacity test now claims only what it actually wrote, which matters: it is
+  the test that tells you whether a cheap flash drive is genuine.
+- **"Verify cloned data after writing" did not re-read every file**, and now says what it does check.
+- **Clean traces: a stopped run was reported as a finished one, and a plain delete as a secure wipe.** The
+  wipe also named disk-sanitising standards it does not implement; it now asks which method you want before
+  it promises anything about the result.
+- **Recovery now says when it was stopped**, instead of only how many files came back — including inside
+  recovered archives.
+
+### Fixed — screens that hid the thing they exist for
+
+- **Recover: the one volume the screen exists for was the one it would not list.** Its retry hint was also
+  gated on a counter that was treating failures as successes.
+- **Cleanup gave four different answers to "what is on screen"**, depending on which part you asked.
+- **Three finished tools had no button anywhere**, and the Scan page's resting advice described behaviour
+  that had already changed.
+- **The file-system menu stopped repeating the 32 GB FAT32 limit.** Measured: FAT32 over 32 GB works, and no
+  diskpart refusal exits with code 0 — the app was reading an exit code that cannot carry that meaning. It
+  now asks rather than refusing.
+
+### Fixed — Stop
+
+- **Stop is answered as a Stop on every path behind the Start button.** Several paths treated it as a
+  failure, reported it as one, and one of them saved a log file to your Desktop on the way out.
+
+### Fixed — Download an ISO
+
+- **"Get latest" for Ubuntu was two LTS releases behind, and could not have caught up.** The entry had 24.04
+  written into it three times over — the label, the folder it looked in, and the filename it matched — under
+  a comment promising the catalogue had no versions written into it. It now reads Ubuntu's release server,
+  keeps the LTS releases and takes the newest. Reported by Keith Weisshar; thank you.
+- **Even inside 24.04 it served an older build than the one in the folder it was reading.** The filename
+  pattern could only express three number groups, so 24.04.5.1 was invisible to it and it handed out 24.04.4.
+  A test now fails the build if any catalogue entry picks up a ceiling like that again.
+
+### Added
+
+- **The SHA-256 check is offered where an ISO arrives.** The app always had the check, reachable only from
+  two other screens — and the download screen's own warning used to tell you outright that there was none.
+  When a download finishes you are now offered the check and the folder.
+
+### Changed
+
+- **The step numbers are gone from the interface.** Half the app had already stopped following them.
+- **Sentences that point at a button now name the button**, in every language.
+- **46 of the 84 English error sentences a person could actually see are translated**, four dialogs that were
+  English end to end — including the one shown before erasing a drive — and the surface test's verdict now
+  speaks the window's language.
+
+### Internal
+
+- 16 string keys nothing displayed and 272 translations with them, and 18 members nothing called, are gone —
+  with rules that stop them coming back, plus a guard on the join between a string key and the code that
+  fills it.
+- The test suite is now 170 invariants, each one written against a defect that was present and mutation-
+  tested to confirm it fails when that defect returns.
+
 ## v4.4.5 — 2026-10-10
 
 Everything here was found by driving the app on a plain 4 GB USB flash drive — the kind of drive the person

@@ -1,5 +1,5 @@
 {
-    "version": "4.4.5",
+    "version": "4.5.0",
     "description": "Create bootable Windows USB drives, clone or back up your PC, recover deleted files, securely wipe drives and check drive health",
     "homepage": "https://forgelabssoft.com",
     "license": "GPL-3.0-only",
@@ -10,8 +10,8 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.4.5/DriveForge.exe",
-            "hash": "3a95e96c1cda812906557e066df7d10de052f3f373f7e2a96949f9c0fffe6dfd"
+            "url": "https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.5.0/DriveForge.exe",
+            "hash": "d4c4c3da56a478710bfe3a6295fe81bfdfc57fa4d33b51f53252d2199eaa8b11"
         }
     },
     "bin": [
