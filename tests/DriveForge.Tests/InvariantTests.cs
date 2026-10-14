@@ -1110,6 +1110,71 @@ public class InvariantTests
 	}
 
 	/// <summary>
+	/// RULE - a tool this app downloads and then runs ELEVATED is checked against what its publisher
+	/// published, before it is unpacked.
+	///
+	/// The multi-boot engine is fetched from GitHub into %LOCALAPPDATA%\DriveForge\Tools - a folder every
+	/// program running as this user can write to - and is then started with administrator rights and
+	/// /PhyDrive:N, which erases a whole disk. The gate that stood there was an Authenticode check with a
+	/// prompt on failure, and its comment says it "Guards a MITM'd download or a poisoned cache".
+	///
+	/// Measured on hardware 2026-10-14: Ventoy2Disk.exe is NotSigned. Get-AuthenticodeSignature returns
+	/// NotSigned, no signer, no issuer. So that gate can never succeed - every person sees the same
+	/// warning every time, and a planted binary produces the identical prompt to the genuine one. A check
+	/// whose answer is a constant carries no information, and the question it asks the person is one they
+	/// cannot answer from what they are shown.
+	///
+	/// What exists instead: Ventoy publishes SHA-256 for every asset, in the release body this flow has
+	/// ALREADY downloaded to find the URL. So the bytes are checked against the publisher's own number,
+	/// with no extra request, before anything is extracted or run. A release that publishes no hash is
+	/// logged rather than refused - breaking the feature on a future release that drops the practice
+	/// would be a worse answer than saying so.
+	///
+	/// The Authenticode gate stays: it is not replaced by this, and the day Ventoy starts signing, it
+	/// starts meaning something. This rule holds both.
+	/// </summary>
+	[Fact]
+	public void ADownloadedToolIsCheckedAgainstWhatItsPublisherPublished()
+	{
+		var owner = SourceModel.Methods().Where(m => m.Name == "ExpectedSha256For").ToArray();
+		Assert.True(owner.Length == 1,
+			$"expected one ExpectedSha256For - the one place that reads a published hash - found {owner.Length}.");
+		
+		var fetch = SourceModel.Methods().Where(m => m.Name == "EnsureVentoyAsync").ToArray();
+		Assert.True(fetch.Length == 1, $"expected one EnsureVentoyAsync, found {fetch.Length}");
+		var calls = fetch[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>().ToArray();
+		string[] names = calls.Select(c => c.Expression.ToString()).ToArray();
+		
+		Assert.True(names.Any(n => n.EndsWith("ExpectedSha256For", StringComparison.Ordinal)),
+			"EnsureVentoyAsync no longer reads the hash its publisher published, so the only thing standing "
+			+ "between a substituted download and an elevated whole-disk write is a signature check that "
+			+ "cannot succeed - measured: Ventoy2Disk.exe is NotSigned.");
+		Assert.True(fetch[0].Method.ToString().Contains("SHA256.Create", StringComparison.Ordinal),
+			"EnsureVentoyAsync no longer computes a SHA-256 of what it downloaded.");
+		
+		// Before the unpacking, not after: a check that runs once the files are already on disk has let
+		// the thing it was checking out of the box.
+		var extract = calls.Where(c => c.Expression.ToString().EndsWith("ExtractToDirectory", StringComparison.Ordinal)).ToArray();
+		Assert.True(extract.Length == 1,
+			$"EnsureVentoyAsync should unpack in exactly one place; found {extract.Length}.");
+		var hashRead = calls.Where(c => c.Expression.ToString().EndsWith("ExpectedSha256For", StringComparison.Ordinal)).ToArray();
+		Assert.True(hashRead[0].SpanStart < extract[0].SpanStart,
+			"The download is unpacked before it is checked against the published hash.");
+		
+		// And the signature gate is still there - this adds to it, it does not replace it. The day Ventoy
+		// starts signing its binaries, that check starts carrying information again.
+		// BOTH, not at least one: the binary just downloaded AND the one already in the cache. The cached
+		// path is the poisoned-cache case the gate exists for, and a rule that accepted one call passed
+		// while the other was being removed - found by mutation.
+		int gates = names.Count(n => n.EndsWith("EnsureVentoyTrustedAsync", StringComparison.Ordinal));
+		Assert.True(gates == 2,
+			$"EnsureVentoyAsync puts {gates} of its two binaries through the Authenticode gate. Both have "
+			+ "to go through it: the one just downloaded, and the one already sitting in a folder every "
+			+ "program running as this user can write to. The hash check does not replace it - one says "
+			+ "the bytes are the published ones, the other would say who vouches for them.");
+	}
+
+	/// <summary>
 	/// Every flow that asks for a partition style must look at the answer.
 	///
 	/// EnsureDiskPartitionStyleAsync returns bool because Windows can refuse. A discarded bool is the same
@@ -2035,7 +2100,10 @@ public class InvariantTests
 		["CreateWindowsToGoFromImageAsync"] = 1,
 		["CreateShadowCopyAsync"] = 1,
 		["GetDosDeviceTarget"] = 1,
-		["EnsureVentoyAsync"] = 3,
+		// 3 -> 4: the download is now checked against the SHA-256 its publisher publishes, and a mismatch
+		// refuses the file. Same shape as its three neighbours here - an infrastructure failure of the
+		// download itself, where the text that matters in a bug report is the two hashes, verbatim.
+		["EnsureVentoyAsync"] = 4,
 		["MultiBootFlowAsync"] = 1,
 		["RunVentoyAsync"] = 1,
 		["StreamCloneWithWimlibAsync"] = 4,

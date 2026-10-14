@@ -14730,6 +14730,20 @@ exit 0
 
 	// Ensures the Ventoy engine is available locally (cached in LocalAppData). Downloads the latest Windows
 	// release on first use after asking the user. Returns the path to Ventoy2Disk.exe, or null if declined.
+	// The SHA-256 the publisher published for one release asset, taken from the release JSON this flow
+	// has already downloaded - no extra request, and the same TLS connection that produced the URL.
+	//
+	// Ventoy publishes them twice: as a sha256.txt asset and as lines in the release body, of the shape
+	//     082c478e...a9  ventoy-1.1.18-windows.zip
+	// Matching on the FILE NAME rather than on position is what keeps this correct when the release adds
+	// or reorders assets - there are four of them, and only one is the Windows zip.
+	private static string? ExpectedSha256For(string releaseJson, string fileName)
+	{
+		if (string.IsNullOrWhiteSpace(releaseJson) || string.IsNullOrWhiteSpace(fileName)) return null;
+		var m = Regex.Match(releaseJson, @"\b([0-9a-fA-F]{64})\b[^0-9a-fA-F\n\r]{1,8}" + Regex.Escape(fileName));
+		return m.Success ? m.Groups[1].Value.ToLowerInvariant() : null;
+	}
+
 	private async Task<string?> EnsureVentoyAsync()
 	{
 		string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DriveForge", "Tools", "ventoy");
@@ -14756,6 +14770,30 @@ exit 0
 				throw new InvalidOperationException("Unexpected Ventoy download host (not github.com): " + url);
 			Log("Downloading Ventoy: " + url);
 			byte[] bytes = await http.GetByteArrayAsync(url);
+			// Verify the bytes against the hash the publisher published, BEFORE extracting and before anything
+			// is run. Measured 2026-10-14: Ventoy2Disk.exe is NotSigned, so the Authenticode gate further down
+			// can never succeed - it asks the person the same question whether the file is genuine or planted,
+			// which is a question nobody can answer from what they are shown. This one has an answer.
+			//
+			// A release that publishes no hash is not treated as a failure: that would break the feature on a
+			// future release that drops the practice. It is written to the log instead, so the difference
+			// between 'verified' and 'nothing to verify against' is visible rather than assumed.
+			string assetName = url.Substring(url.LastIndexOf('/') + 1);
+			string? expected = ExpectedSha256For(api, assetName);
+			if (expected == null)
+				Log("WARNING: the Ventoy release publishes no SHA-256 for " + assetName + "; the download could "
+					+ "not be checked against a published hash.");
+			else
+			{
+				string actual;
+				using (var sha = System.Security.Cryptography.SHA256.Create())
+					actual = Convert.ToHexString(sha.ComputeHash(bytes)).ToLowerInvariant();
+				if (!string.Equals(actual, expected, StringComparison.Ordinal))
+					throw new InvalidOperationException("The downloaded Ventoy engine does not match the checksum "
+						+ "its publisher published, so it was not used.\r\n\r\nFile: " + assetName
+						+ "\r\nPublished: " + expected + "\r\nDownloaded: " + actual);
+				Log("Ventoy download verified against the published SHA-256 (" + expected.Substring(0, 16) + "...).");
+			}
 			string zip = Path.Combine(root, "ventoy-windows.zip");
 			await File.WriteAllBytesAsync(zip, bytes);
 			ZipFile.ExtractToDirectory(zip, root, overwriteFiles: true);
