@@ -3214,10 +3214,11 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 				// Size Windows from the actual image (~3× the compressed WIM/ESD) + 8 GiB headroom, not the flat 64 GB
 				// estimate — so the requested data partition survives on modest drives. Keep a 40 GiB floor.
+				// The same question as the capacity gate, so the same answer: this is where the estimate was
+				// first written down with its reason, and it now lives in EstimateImagePayloadBytes. imageFile
+				// is the mounted install.wim, so this one has the better input of the two.
 				long imgLen = 0; try { imgLen = new FileInfo(imageFile).Length; } catch { }
-				long est = imgLen > 0 ? imgLen * 3 + 8L * 1024 * 1024 * 1024
-					: (requiredBytes > 0 ? requiredBytes + 8L * 1024 * 1024 * 1024 : 40L * 1024 * 1024 * 1024);
-				long winBytes = Math.Max(40L * 1024 * 1024 * 1024, est);
+				long winBytes = EstimateImagePayloadBytes(imgLen);
 				// Size the data partition from the MBR-usable span (~2 TiB max, 2^32 sectors × 512 B), not the full disk:
 				// diskpart silently caps the trailing 'create partition primary' at the MBR limit, so basing the reported
 				// size on disk.Size would over-promise (log a size that is never created) on a >2 TB target.
@@ -3851,7 +3852,11 @@ public partial class MainWindow : Window, IComponentConnector
 			int windowsSizeMb = 0;
 			var extraPartitions = new List<ExtraPartitionSpec>();
 			var dataCloneJobs = new List<(char Source, char Target, string Label)>();
-			long winBytesPlan = Math.Max(64L * 1024 * 1024 * 1024, (long)(GetCurrentWindowsUsedBytes() * 1.4) + 12L * 1024 * 1024 * 1024);
+			// Found by the rule below, not by reading: the same flat 64 GiB floor, in the clone's partition
+			// plan. The number with a reason here is the data this clone will copy, inflated for VSS and
+			// hardlinks; the floor only has to catch a used-bytes read that came back empty.
+			long winBytesPlan = Math.Max(MinimumWindowsTargetBytes(),
+				(long)(GetCurrentWindowsUsedBytes() * 1.4) + 12L * 1024 * 1024 * 1024);
 			long bootSlack = 350L * 1024 * 1024 + 200L * 1024 * 1024;
 			// A faithful clone builds an MBR target (BuildRealNtfsUsbLayoutDiskpartScript uses no `convert gpt`), which
 			// addresses at most ~2 TiB; diskpart silently caps the trailing partition there. Size the data partitions from
@@ -6611,12 +6616,40 @@ exit 0
 		return ext == ".vhd" || ext == ".vhdx";
 	}
 
+	// How much room an image install needs on the target. There were TWO answers to this question
+	// inside one run, 24 GiB apart: this gate returned a flat 64 GiB, while the data-partition sizer a
+	// few lines into CreateWindowsToGoFromImageAsync used max(40 GiB, image * 3 + 8 GiB) and wrote down
+	// why. The one with the reason wins, and both ask here now.
+	//
+	// What the flat 64 GiB cost: this app's "GB" is GiB, so 64 GB meant 68.7e9 bytes, and a nominal
+	// 64 GB stick is 64.0e9 bytes = 59.6 GiB. EVERY 64 GB drive - the commonest size bought for this
+	// job - was refused outright, with "Needed: 64.0 GB" under it. Measured on hardware: a 60 GiB
+	// target refused for an image that, applied with Compact, occupies 13.57 GB (Windows 11 Pro 26H2).
+	// 64 GiB is Microsoft's figure for system storage on a NORMAL install; it is not what a portable
+	// Windows needs, and it was never what this image writes.
+	//
+	// The 40 GiB floor is kept deliberately: an installed Windows needs room to take updates and hold a
+	// pagefile, so the floor is about running, not about copying. It still refuses a nominal 32 GB stick
+	// (29.8 GiB), which is a judgement the measurement above is now available to revisit.
+	// The floor, on its own name because it answers its own question: how much room an installed Windows
+	// needs in order to RUN - updates, a pagefile, temp - as opposed to how much the copy needs in order
+	// to land. Three places had this as a flat 64 GiB and one of them was found by the rule, not by
+	// reading. 64 GiB is 68.7e9 bytes, which no drive sold as 64 GB (64.0e9 = 59.6 GiB) can satisfy.
+	private static long MinimumWindowsTargetBytes() => 40L * 1024L * 1024L * 1024L;
+
+	private static long EstimateImagePayloadBytes(long imageFileBytes)
+	{
+		return Math.Max(MinimumWindowsTargetBytes(), imageFileBytes * 3 + 8L * 1024L * 1024L * 1024L);
+	}
+
 	private long EstimateRequiredBytes()
 	{
 		long margin = 12L * 1024L * 1024L * 1024L;
 		if (ModeBox.SelectedIndex == ModeCloneCurrentWindows || ModeBox.SelectedIndex == ModeCloneInternal)
 		{
-			return Math.Max(64L * 1024L * 1024L * 1024L, GetCurrentWindowsUsedBytes() + margin);
+			// Same floor, same place: the clone's own number (the data it will copy, plus headroom) is the one
+			// with a reason, and the floor only has to catch a used-bytes read that failed.
+			return Math.Max(MinimumWindowsTargetBytes(), GetCurrentWindowsUsedBytes() + margin);
 		}
 		if (ModeBox.SelectedIndex == ModeRestoreSavedClone && !string.IsNullOrWhiteSpace(sourcePath) && File.Exists(sourcePath))
 		{
@@ -6628,7 +6661,17 @@ exit 0
 			if (ImageFileSizeIsItsProvisionedSize(sourcePath)) return 0L;
 			return new FileInfo(sourcePath).Length + margin;
 		}
-		return 64L * 1024L * 1024L * 1024L;
+		// The image install. Mounting has not happened yet here, so this is the length of the file the
+		// person picked (an .iso) rather than the install.wim inside it - which reaches the same answer for
+		// every real image, because of the floor.
+		long pickedBytes = 0;
+		try
+		{
+			if (!string.IsNullOrWhiteSpace(sourcePath) && File.Exists(sourcePath))
+				pickedBytes = new FileInfo(sourcePath).Length;
+		}
+		catch { }
+		return EstimateImagePayloadBytes(pickedBytes);
 	}
 
 	// Lets the user choose the local account (name + optional password) created during OOBE so the install

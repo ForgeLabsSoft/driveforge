@@ -1022,6 +1022,77 @@ public class InvariantTests
 			+ "them:\n  " + string.Join("\n  ", literals));
 	}
 
+	/// <summary>
+	/// RULE - how much room an image needs is one question with one answer, and the answer is not in a
+	/// unit that excludes the drive people buy.
+	///
+	/// Met on hardware: a 60 GiB target refused with "The selected drive is too small for this. Needed:
+	/// 64.0 GB / Selected drive: 60.0 GB". The refusal itself was exemplary - it ran before anything was
+	/// touched and said so - but the number was wrong twice over.
+	///
+	/// Wrong as arithmetic: this app's "GB" is GiB, so 64 GB means 68.7e9 bytes, while a nominal 64 GB
+	/// stick holds 64.0e9 = 59.6 GiB. Every 64 GB drive on the market was refused outright for a
+	/// Windows-To-Go build - the commonest size bought for exactly this.
+	///
+	/// Wrong as a fact: measured the same afternoon, Windows 11 Pro 26H2 applied with Compact occupies
+	/// 13.57 GB on the stick. 64 GiB is Microsoft's figure for system storage on a normal install.
+	///
+	/// And the flow already held a second, better answer to the same question - max(40 GiB, image * 3 +
+	/// 8 GiB), with its reason written beside it - used a few lines later to size the Windows partition
+	/// when a data partition is asked for. Two answers, 24 GiB apart, in one run. There is one now.
+	/// </summary>
+	[Fact]
+	public void HowMuchRoomAnImageNeedsHasOneAnswer()
+	{
+		var est = SourceModel.Methods().Where(m => m.Name == "EstimateImagePayloadBytes").ToArray();
+		Assert.True(est.Length == 1,
+			$"expected one EstimateImagePayloadBytes - the single answer this rule is about - found {est.Length}.");
+		
+		// The floor has its own name and its own owner: it answers "how much room does an installed
+		// Windows need to RUN", which is a different question from "how much does this image need to
+		// land". Mixing them under one name is how the gate ended up quoting an install-media figure.
+		var floorOwner = SourceModel.Methods().Where(m => m.Name == "MinimumWindowsTargetBytes").ToArray();
+		Assert.True(floorOwner.Length == 1,
+			$"expected one MinimumWindowsTargetBytes, found {floorOwner.Length}.");
+		
+		// Everyone who asks either question asks one of those two. All three of these answered it
+		// themselves, and the third was found by this rule rather than by reading the flow.
+		foreach (string asker in new[] { "EstimateRequiredBytes", "CreateWindowsToGoFromImageAsync",
+				"RunExperimentalFullRootUsbCloneAsync" })
+		{
+			var m = SourceModel.Methods().Where(x => x.Name == asker).ToArray();
+			Assert.True(m.Length == 1, $"expected one {asker}, found {m.Length}");
+			// An APEL, not a text match: Method.ToString() carries the comments too, and the comment beside
+			// each of these call sites names the helper - so a text check passed on prose while the call had
+			// been replaced by the arithmetic it exists to own. Found by mutation.
+			var asked = m[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+				.Select(i => i.Expression.ToString())
+				.Where(n => n.EndsWith("EstimateImagePayloadBytes", StringComparison.Ordinal)
+					|| n.EndsWith("MinimumWindowsTargetBytes", StringComparison.Ordinal))
+				.ToArray();
+			Assert.True(asked.Length >= 1,
+				$"{asker} works out how much room a Windows needs on its own again. That is how the gate came "
+					+ "to demand 64 GiB while the partition sizer asked for 40 GiB in the same run.");
+		}
+		
+		// No capacity requirement is a flat 64 GiB any more: in GiB that is 68.7e9 bytes, which no nominal
+		// 64 GB drive can satisfy. Matched on the literal shape this file writes GiB with.
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		var flats = new List<string>();
+		foreach (Match m in Regex.Matches(src, @"64L?\s*\*\s*1024L?\s*\*\s*1024L?\s*\*\s*1024L?"))
+		{
+			int lineStart = src.LastIndexOf('\n', m.Index) + 1;
+			int lineEnd = src.IndexOf('\n', m.Index);
+			string line = src.Substring(lineStart, (lineEnd < 0 ? src.Length : lineEnd) - lineStart);
+			if (line.TrimStart().StartsWith("//", StringComparison.Ordinal)) continue;   // prose about the rule
+			flats.Add($"offset {m.Index}: {Trim120(line.Trim())}");
+		}
+		Assert.True(flats.Count == 0,
+			"A capacity requirement is written as a flat 64 GiB. A nominal 64 GB drive is 59.6 GiB, so this "
+			+ "refuses the drive size people buy for this job, and the number it prints is not what the image "
+			+ "writes (measured: 13.57 GB):\n  " + string.Join("\n  ", flats));
+	}
+
 	/// <summary>The SSD erase must obtain its GPT table explicitly, and stop if it does not get it.</summary>
 	[Fact]
 	public void TheSsdEraseVerifiesItGotAGptTable()
