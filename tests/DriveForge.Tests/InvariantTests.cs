@@ -1549,6 +1549,25 @@ public class InvariantTests
 				+ string.Join("\n  ", missing));
 	}
 
+	/// <summary>
+	/// What counts as a read of a checkbox, in BOTH access forms: `X.IsChecked` is a
+	/// MemberAccessExpression, `X?.IsChecked` is a ConditionalAccessExpression wrapping a
+	/// MemberBindingExpression. Looking only at the first form has already cost this file one green rule
+	/// over a live defect - the export and the clone were both written with the null-conditional form -
+	/// and the lesson was then written down TWICE, in two rules with a copy of the test each. This is the
+	/// one copy. Blinding it has to turn every rule that depends on it red.
+	/// </summary>
+	private static bool IsOptionRead(SyntaxNode n, out string box)
+	{
+		if (n is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "IsChecked")
+		{ box = ma.Expression.ToString(); return true; }
+		if (n is ConditionalAccessExpressionSyntax ca
+			&& ca.WhenNotNull is MemberBindingExpressionSyntax mb && mb.Name.Identifier.Text == "IsChecked")
+		{ box = ca.Expression.ToString(); return true; }
+		box = "";
+		return false;
+	}
+
 	/// <summary>Highest {N} in a format string, plus one. 0 when it has no placeholders.</summary>
 	private static int HolesIn(string text)
 	{
@@ -2734,20 +2753,15 @@ public class InvariantTests
 
 		// Nothing reads those two checkboxes behind the owners' backs — except persistence, which stores
 		// what the person set; "was this offered for THIS task" is a question for the read, not for the file.
-		// BOTH access forms. `X.IsChecked` is a MemberAccessExpression; `X?.IsChecked` is a
-		// ConditionalAccessExpression wrapping a MemberBindingExpression, and looking only at the first
-		// missed the null-conditional form — which is precisely what the export and the clone were written
-		// with, two of this defect's four sites. Found by mutation: planting the clone's original line back
-		// left the rule GREEN.
+		// Nothing reads those two checkboxes behind the owners' backs - except persistence, which stores
+		// what the person set; "was this offered for THIS task" is a question for the read, not for the file.
+		// Both access forms, via the one IsOptionRead above: this rule used to carry its own copy of that
+		// test, and a second copy of the comment explaining why both forms matter.
 		var reads = new List<(SyntaxNode Node, string Target, string File)>();
 		foreach (var (file, root) in SourceModel.Parsed)
 		{
-			foreach (MemberAccessExpressionSyntax ma in root.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
-				if (ma.Name.Identifier.Text == "IsChecked")
-					reads.Add((ma, ma.Expression.ToString(), file));
-			foreach (ConditionalAccessExpressionSyntax ca in root.DescendantNodes().OfType<ConditionalAccessExpressionSyntax>())
-				if (ca.WhenNotNull is MemberBindingExpressionSyntax mb && mb.Name.Identifier.Text == "IsChecked")
-					reads.Add((ca, ca.Expression.ToString(), file));
+			foreach (SyntaxNode n in root.DescendantNodes())
+				if (IsOptionRead(n, out string box)) reads.Add((n, box, file));
 		}
 
 		var behind = new List<string>();
@@ -2966,15 +2980,29 @@ public class InvariantTests
 	/// the image. Ticking "Add all drivers" while watching the progress bar injected drivers the confirmation
 	/// never promised; unticking BitLocker dropped encryption it did.
 	///
-	/// SCOPE, measured, so this is not mistaken for a guarantee about the app: three write flows still have no
-	/// snapshot block. StartButton_Click reads five up to 211 lines in, WriteIsoImageFlowAsync three and
-	/// WriteIsoImageToManyFlowAsync four — though in the two ISO flows the reads sit between the confirmation
-	/// and the long work rather than inside it, so the window is narrow. The assertion below names all three
-	/// with their counts, so fixing one asks for this rule to be widened rather than quietly passing.
+	/// WIDENED again 2026-10-14 to WriteIsoImageToManyFlowAsync, which was not reading its options late -
+	/// it was reading them TWICE: once to build the option list its confirmation shows, once again as
+	/// arguments to RunImageWriteQueueAsync, with a duplicator window and a per-target identity re-check in
+	/// between. One read now serves both.
+	///
+	/// SCOPE, measured and not tallied, so this is not mistaken for a guarantee about the app: two write
+	/// flows have no snapshot block, and the measurement says they need none - every option read in them
+	/// happens before the work starts, which is the only thing a block is for. What this rule checks for
+	/// them is therefore the POSITION of each read, at the end of this test.
+	///
+	/// What that replaced, and why it mattered: a plain `\bIsChecked\b` count over each method's text
+	/// (5 / 3 / 4). A count says nothing about position, and it misread all three flows it named.
+	/// StartButton_Click's "five, the latest 211 lines in" is four reads in the interactive phase before
+	/// anything is written, plus EjectWhenDoneCheck read after the run has already finished - and ejecting
+	/// is not one of the promises ConfirmOperationSummary lists, so the current intent is the right one to
+	/// read there. WriteIsoImageFlowAsync passes both of its boxes INTO the queue call as arguments, which
+	/// is a snapshot taken at the call instead of at the top. Obeying the count would have produced three
+	/// snapshot blocks nobody needed, and silenced the rule while the measurement stayed wrong.
 	/// </summary>
 	[Fact]
 	public void ARunDoesNotChangeItsOwnParametersHalfwayThrough()
 	{
+
 		// Each covered flow with the floor its own block must clear. The floor is what stops the rule being
 		// blinded: every snapshot line is written with `?.`, so disarming the null-conditional arm below drops
 		// the count to zero and fails here rather than passing over nothing.
@@ -2982,25 +3010,18 @@ public class InvariantTests
 		{
 			["RunExperimentalFullRootUsbCloneAsync"] = 8,
 			["CreateWindowsToGoFromImageAsync"] = 6,
+			["WriteIsoImageToManyFlowAsync"] = 2,
 		};
 		foreach (var (flowName, floor) in covered.Select(c => (c.Key, c.Value)))
 		{
 		var clone = SourceModel.Methods().Where(m => m.Name == flowName).ToArray();
 		Assert.True(clone.Length == 1, $"expected one {flowName}, found {clone.Length}");
 
-		// Both access forms, because `X?.IsChecked` is a ConditionalAccessExpression and not a member access,
-		// and the whole snapshot block is written with the null-conditional one.
 		var live = new List<string>();
 		int snapshotted = 0;
 		foreach (SyntaxNode n in clone[0].Method.DescendantNodes())
 		{
-			string box;
-			if (n is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "IsChecked")
-				box = ma.Expression.ToString();
-			else if (n is ConditionalAccessExpressionSyntax ca
-					&& ca.WhenNotNull is MemberBindingExpressionSyntax mb && mb.Name.Identifier.Text == "IsChecked")
-				box = ca.Expression.ToString();
-			else continue;
+			if (!IsOptionRead(n, out string box)) continue;
 
 			// The snapshot: the initializer of a local called opt-something. Anything else is a read of the
 			// screen while the operation the person approved is already running.
@@ -3030,27 +3051,63 @@ public class InvariantTests
 			"EnableBitLockerAsync runs at the very end of a clone and must take its options as arguments; "
 				+ "reading a checkbox here puts an hour between the person's choice and its use.");
 
-		// The scope, named. These are the write flows that have no snapshot block, with the count each reads
-		// live. If one of them grows one, widen this rule to it instead of letting this list go stale.
-		var expected = new Dictionary<string, int>(StringComparer.Ordinal)
+		// The scope, measured. Two write flows have no snapshot block and need none: every option read in
+		// them happens before the work starts. So what is checked here is each read's POSITION, with a floor
+		// on how many were found - the floor is what fails if OptionRead above is ever blinded.
+
+		// WriteIsoImageFlowAsync hands its writing to RunImageWriteQueueAsync, so a read is in time if it is
+		// lexically before that call OR is one of its arguments - an argument is evaluated before the callee
+		// runs, which is exactly what a snapshot is.
+		var queue = SourceModel.Methods().Where(m => m.Name == "WriteIsoImageFlowAsync").ToArray();
+		Assert.True(queue.Length == 1, $"expected one WriteIsoImageFlowAsync, found {queue.Length}");
+		var queueCall = queue[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Where(i => i.Expression.ToString().EndsWith("RunImageWriteQueueAsync", StringComparison.Ordinal)).ToArray();
+		Assert.True(queueCall.Length == 1,
+			$"WriteIsoImageFlowAsync should hand its writing to exactly one RunImageWriteQueueAsync call; "
+				+ $"found {queueCall.Length}.");
+		var afterWorkStarts = new List<string>();
+		int beforeWorkStarts = 0;
+		foreach (SyntaxNode n in queue[0].Method.DescendantNodes())
 		{
-			["StartButton_Click"] = 5,
-			["WriteIsoImageFlowAsync"] = 3,
-			["WriteIsoImageToManyFlowAsync"] = 4,
-		};
-		var actual = new Dictionary<string, int>(StringComparer.Ordinal);
-		foreach (var (file, method, name) in SourceModel.Methods())
-		{
-			if (!expected.ContainsKey(name)) continue;
-			actual[name] = Regex.Matches(method.ToString(), @"\bIsChecked\b").Count;
+			if (!IsOptionRead(n, out string box)) continue;
+			if (n.SpanStart < queueCall[0].SpanStart || queueCall[0].Span.Contains(n.Span))
+			{ beforeWorkStarts++; continue; }
+			afterWorkStarts.Add($"{box}.IsChecked - {Trim120(n.Parent?.ToString() ?? n.ToString())}");
 		}
-		var drifted = expected.Where(e => !actual.TryGetValue(e.Key, out int c) || c != e.Value)
-			.Select(e => $"{e.Key}: expected {e.Value} live read(s), found "
-				+ (actual.TryGetValue(e.Key, out int c2) ? c2.ToString() : "the method is gone")).ToArray();
-		Assert.True(drifted.Length == 0,
-			"This rule covers the clone only, and says so by naming what it does NOT cover. One of those "
-				+ "counts has changed — widen the rule to that flow if it now snapshots, or update the count:\n  "
-				+ string.Join("\n  ", drifted));
+		Assert.True(beforeWorkStarts >= 3,
+			$"Only {beforeWorkStarts} option read(s) reach the queue call in WriteIsoImageFlowAsync; there were "
+				+ "three. Re-read this rule rather than leaving it passing over a scope that has moved.");
+		Assert.True(afterWorkStarts.Count == 0,
+			"WriteIsoImageFlowAsync reads these after RunImageWriteQueueAsync has begun writing, so the run can "
+				+ "change the parameters the person approved while it runs:\n  "
+				+ string.Join("\n  ", afterWorkStarts));
+
+		// StartButton_Click reads everything in the pre-write phase, which ends at the last confirmation -
+		// except EjectWhenDoneCheck, read when the run is already over. That one name is the WHOLE exception,
+		// so a second read creeping into the success tail fails here.
+		var starter = SourceModel.Methods().Where(m => m.Name == "StartButton_Click").ToArray();
+		Assert.True(starter.Length == 1, $"expected one StartButton_Click, found {starter.Length}");
+		var confirms = starter[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Where(i => i.Expression.ToString().EndsWith("ConfirmOperationSummary", StringComparison.Ordinal)).ToArray();
+		Assert.True(confirms.Length == 2,
+			$"StartButton_Click confirms once per branch - two calls; found {confirms.Length}.");
+		int preWriteEnds = confirms.Max(c => c.Span.End);
+		var afterTheRun = new List<string>();
+		int inPreWrite = 0;
+		foreach (SyntaxNode n in starter[0].Method.DescendantNodes())
+		{
+			if (!IsOptionRead(n, out string box)) continue;
+			if (n.SpanStart < preWriteEnds) { inPreWrite++; continue; }
+			afterTheRun.Add(box);
+		}
+		Assert.True(inPreWrite >= 4,
+			$"Only {inPreWrite} option read(s) in StartButton_Click's pre-write phase; there were four. "
+				+ "Re-read this rule rather than leaving it passing over a scope that has moved.");
+		Assert.True(afterTheRun.SequenceEqual(new[] { "EjectWhenDoneCheck" }),
+			"StartButton_Click reads these after the run has finished. EjectWhenDoneCheck is allowed there: "
+				+ "ejecting is a post-run action the confirmation never promises, so the current intent is the "
+				+ "right one to read. Anything else belongs before the confirmation:\n  "
+				+ string.Join("\n  ", afterTheRun));
 	}
 
 	/// <summary>

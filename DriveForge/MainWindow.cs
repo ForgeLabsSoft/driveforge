@@ -9471,8 +9471,15 @@ exit 0
 		StatusText.Text = L("SxReady");
 
 		var opts = new List<string>();
-		if (VerifyImageWriteCheck.IsChecked == true) opts.Add(L("VerifyImageWriteCheck"));
-		if (EjectWhenDoneCheck.IsChecked == true) opts.Add(L("EjectWhenDoneCheck"));
+		// Read ONCE, here, and used both for the promise below and for the work at the bottom. They were
+		// read twice - once to build this list, once again as arguments to RunImageWriteQueueAsync - with a
+		// duplicator window and a per-target identity re-check in between. Nothing destructive runs in that
+		// gap, so this is not a story about a drive; it is the same shape as every other defect in this
+		// campaign - a second read of one source, which can only ever agree by luck.
+		bool optVerifyWrite = VerifyImageWriteCheck.IsChecked == true;
+		bool optEjectWhenDone = EjectWhenDoneCheck.IsChecked == true;
+		if (optVerifyWrite) opts.Add(L("VerifyImageWriteCheck"));
+		if (optEjectWhenDone) opts.Add(L("EjectWhenDoneCheck"));
 		string footer = opts.Count > 0 ? string.Format(L("CoOptions"), string.Join(", ", opts)) : L("CoOptionsNone");
 
 		if (!ShowDuplicatorWindow(
@@ -9499,8 +9506,7 @@ exit 0
 		if (finalTargets.Count == 0)
 		{ MessageBox.Show(L("Mb007"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 
-		await RunImageWriteQueueAsync(finalTargets, src, isoSize,
-			VerifyImageWriteCheck.IsChecked == true, EjectWhenDoneCheck.IsChecked == true, refused, missing);
+		await RunImageWriteQueueAsync(finalTargets, src, isoSize, optVerifyWrite, optEjectWhenDone, refused, missing);
 	}
 
 	// Runs the image write over its targets, one after another, and owns EVERY process-wide thing exactly once per
