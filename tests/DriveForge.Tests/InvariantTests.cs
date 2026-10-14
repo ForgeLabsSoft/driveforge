@@ -973,6 +973,55 @@ public class InvariantTests
 			"Something tells the person their own Stop was a failure:\n  " + string.Join("\n  ", problems));
 	}
 
+	/// <summary>
+	/// RULE - a chooser does not offer an option the run will silently replace.
+	///
+	/// The export's size chooser offered Auto / 128 / 256 / 512 / 1024 GB, and the core then computed
+	/// Math.Max(the choice, EstimateExportVhdxMaximumMb()) - so on any machine with more than ~88 GB of
+	/// data, "128 GB" was a button that did nothing it said. Measured on the machine this was found on:
+	/// 442.6 GB of data, "128 GB" chosen, and Get-Disk reported the created virtual disk at 483.5 GB.
+	/// The only record of the substitution was a log line - on the diagnostics page, inside a collapsed
+	/// expander, which is not where someone is looking while they pick a size.
+	///
+	/// So the list is built from the same estimate the core enforces, and the impossible entries are not
+	/// offered. Checked by POSITION: the estimate must be read before the chooser is shown, and no fixed
+	/// size may be passed to it as a literal - a literal cannot have been filtered.
+	/// </summary>
+	[Fact]
+	public void AChooserDoesNotOfferWhatTheRunWillReplace()
+	{
+		var core = SourceModel.Methods().Where(m => m.Name == "ExportBootableVhdxCoreAsync").ToArray();
+		Assert.True(core.Length == 1, $"expected one ExportBootableVhdxCoreAsync, found {core.Length}");
+		Assert.True(Regex.IsMatch(core[0].Method.ToString(),
+			@"Math\.Max\(\s*maxMbOverride\s*,\s*EstimateExportVhdxMaximumMb\(\)\s*\)"),
+			"The core no longer raises the chosen size to its own estimate. That raise is the reason this "
+			+ "rule exists; if it is gone, re-read the rule rather than leaving it passing over a scope that "
+			+ "has moved.");
+		
+		var click = SourceModel.Methods().Where(m => m.Name == "ExportVhdx_Click").ToArray();
+		Assert.True(click.Length == 1, $"expected one ExportVhdx_Click, found {click.Length}");
+		var chooser = click[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Where(i => i.Expression.ToString().EndsWith("ShowChooserDialog", StringComparison.Ordinal)).ToArray();
+		Assert.True(chooser.Length == 1,
+			$"ExportVhdx_Click should show exactly one chooser; found {chooser.Length}.");
+		
+		// The estimate has to be read BEFORE the list is shown, or the list cannot have been filtered by it.
+		var estimates = click[0].Method.DescendantNodes().OfType<InvocationExpressionSyntax>()
+			.Where(i => i.Expression.ToString().EndsWith("EstimateExportVhdxMaximumMb", StringComparison.Ordinal))
+			.Where(i => i.SpanStart < chooser[0].SpanStart).ToArray();
+		Assert.True(estimates.Length >= 1,
+			"ExportVhdx_Click shows the size chooser without reading EstimateExportVhdxMaximumMb first, so "
+			+ "it is offering sizes the core will raise. Build the list from the estimate.");
+		
+		// ...and no fixed size is handed to the chooser as a literal: a literal was never filtered.
+		var literals = chooser[0].ArgumentList.DescendantNodes().OfType<LiteralExpressionSyntax>()
+			.Where(l => Regex.IsMatch(l.Token.ValueText ?? "", @"^\s*\d+\s*(GB|MB|TB)\s*$", RegexOptions.IgnoreCase))
+			.Select(l => l.Token.ValueText).ToArray();
+		Assert.True(literals.Length == 0,
+			"These sizes are offered as literals, so nothing can have checked whether the run would honour "
+			+ "them:\n  " + string.Join("\n  ", literals));
+	}
+
 	/// <summary>The SSD erase must obtain its GPT table explicitly, and stop if it does not get it.</summary>
 	[Fact]
 	public void TheSsdEraseVerifiesItGotAGptTable()

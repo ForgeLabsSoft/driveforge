@@ -10330,10 +10330,27 @@ exit 0
 		// there: the mirror of the reference sweep, in the one place [[Key]] had never reached, because a
 		// chooser option is not a keyed control — it is a literal in an array. The sizes stay literal: they
 		// are numbers and a unit.
-		int? sizePick = ShowChooserDialog(L("TbExportVhdx"), L("MbExportVhdxSizePrompt"),
-			new[] { L("AmExportSizeAuto"), "128 GB", "256 GB", "512 GB", "1024 GB" }, 0);
+		// Do not offer a size the run will silently replace. The core computes
+		// Math.Max(maxMbOverride, EstimateExportVhdxMaximumMb()), so any choice under that estimate was
+		// never honoured. Measured on a machine with 442.6 GB of data: "128 GB" picked from this list,
+		// 483.5 GB created - read back from Get-Disk, not from the app - and nothing on screen said so.
+		// The only record was a log line, which lives on the diagnostics page inside a collapsed
+		// expander: a surface the person is not looking at while choosing a size.
+		//
+		// Dropping the impossible sizes and giving Auto its real number needs no new translated text:
+		// both are a number and a unit. The prompt beside them already explains what Auto means.
+		long autoMb = EstimateExportVhdxMaximumMb();
+		var sizeLabels = new List<string> { L("AmExportSizeAuto") + " (" + (autoMb / 1024) + " GB)" };
+		var sizeValues = new List<long> { 0 };
+		foreach (long gb in new[] { 128L, 256L, 512L, 1024L })
+		{
+			if (gb * 1024 < autoMb) continue;
+			sizeLabels.Add(gb + " GB");
+			sizeValues.Add(gb * 1024);
+		}
+		int? sizePick = ShowChooserDialog(L("TbExportVhdx"), L("MbExportVhdxSizePrompt"), sizeLabels.ToArray(), 0);
 		if (sizePick == null) { SetBusy(false); return; }
-		long maxMbChoice = sizePick.Value switch { 1 => 128L * 1024, 2 => 256L * 1024, 3 => 512L * 1024, 4 => 1024L * 1024, _ => 0 };
+		long maxMbChoice = sizeValues[sizePick.Value];
 
 		// NOTE: do NOT delete an existing destination file up front. The VHDX is built at a fresh-GUID WORK path and
 		// only renamed onto the user's path (File.Move overwrite:true) AFTER it is complete — so a failed export can
