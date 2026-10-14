@@ -781,6 +781,100 @@ public class InvariantTests
 			+ string.Join("\n  ", problems));
 	}
 
+	/// <summary>
+	/// RULE - building one drive does not rewrite the HOST machine's disk policy.
+	///
+	/// SanPolicy (HKLM\...\Services\partmgr\Parameters) decides what Windows does with a disk it has just
+	/// discovered. This app has a strong opinion about it and writes it into every image it builds: 4,
+	/// "keep host disks offline", for a portable Windows, so the stick cannot auto-mount the internal disks
+	/// of whatever PC it is plugged into; 1 for a normal internal install. It re-asserts the 4 in
+	/// unattend.xml at every specialize pass and reports it to the person as a feature.
+	///
+	/// And the first line of BuildRealNtfsUsbLayoutDiskpartScript was `san policy=OnlineAll` - the same
+	/// setting, value 1, written to the RUNNING machine, persistently, by three flows (the experimental
+	/// full-root clone and two restore paths). Two things made that worse than untidy:
+	///
+	///   - it never did the job it looked like it was doing. The SAN policy governs disks discovered
+	///     LATER; it does not bring the already-selected disk online. The script's own `assign letter=`
+	///     lines were doing that work.
+	///   - measured on the machine this was found on, which boots Windows from a USB SSD: SanPolicy=4 and
+	///     the internal NVMe reported IsOffline=True, IsReadOnly=True. Building a stick would have set it
+	///     to 1, and that portable Windows would then have auto-mounted the next PC's internal disks
+	///     read-write - the exact hazard its own SanPolicy=4 exists to prevent, undone by the app that
+	///     wrote it.
+	///
+	/// So: no diskpart script in this app sets the SAN policy, every SanPolicy write goes into a hive
+	/// mounted from the TARGET (or into the target's unattend.xml), and the layout script brings its own
+	/// disk online explicitly instead - which is what the other six places in the file already do.
+	/// </summary>
+	[Fact]
+	public void BuildingOneDriveDoesNotRewriteTheHostsDiskPolicy()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		var problems = new List<string>();
+		
+		// Same comment/`rem` stripping as the convert rule above: this file carries prose that explains why
+		// the policy must NOT be used, and naming the rule is not the same as breaking it.
+		static bool IsProse(string src, int index)
+		{
+			int lineStart = src.LastIndexOf('\n', index) + 1;
+			int lineEnd = src.IndexOf('\n', index);
+			string line = src.Substring(lineStart, (lineEnd < 0 ? src.Length : lineEnd) - lineStart);
+			string trimmed = line.TrimStart().TrimStart('"');
+			return trimmed.StartsWith("//") || trimmed.StartsWith("///")
+				|| trimmed.StartsWith("rem ", StringComparison.OrdinalIgnoreCase);
+		}
+		
+		// --- no diskpart script sets the machine's SAN policy ---------------------------------------
+		foreach (Match m in Regex.Matches(src, @"san\s+policy\s*=", RegexOptions.IgnoreCase))
+		{
+			if (IsProse(src, m.Index)) continue;
+			problems.Add($"`{m.Value.Trim()}` at offset {m.Index}: this writes the PERSISTENT machine-wide "
+				+ "SanPolicy of the host, which outlives the run and the reboot, and it does not bring the "
+				+ "selected disk online either - the policy only governs disks discovered later. Use `online "
+				+ "disk noerr` on the selected disk, as the rest of this file does.");
+		}
+		
+		// --- every SanPolicy WRITE targets the TARGET, never the running machine ---------------------
+		// A write, not a mention: this file also names SanPolicy=4 in a log line and in a report, and the
+		// first version of this rule flagged both. The two forms that actually set it are a `reg.exe add
+		// ... /v SanPolicy` and the <SanPolicy> element of the answer file; a read for the report is a third
+		// form and is nobody's problem.
+		int writes = 0;
+		foreach (Match m in Regex.Matches(src, @"/v\s+SanPolicy"))
+		{
+			if (IsProse(src, m.Index)) continue;
+			int lineStart = src.LastIndexOf('\n', m.Index) + 1;
+			int lineEnd = src.IndexOf('\n', m.Index);
+			string line = src.Substring(lineStart, (lineEnd < 0 ? src.Length : lineEnd) - lineStart).Trim();
+			// The path has to come from a hive mounted off the target. Written against a live HKLM path it
+			// changes what the HOST does with every disk it meets from then on.
+			if (line.Contains("hiveRoot", StringComparison.Ordinal)) { writes++; continue; }
+			problems.Add($"`{Trim120(line)}` at offset {m.Index}: a SanPolicy write must address a hive "
+				+ "mounted from the target. Written against the live registry it changes what the HOST does "
+				+ "with every disk it meets from then on.");
+		}
+		writes += Regex.Matches(src, @"<SanPolicy>\d+</SanPolicy>").Count;   // the target's answer file
+		Assert.True(writes >= 4,
+			$"Only {writes} SanPolicy write(s) into a target; there were four - the two hive branches "
+			+ "(portable 4, internal install 1), the WinToGo re-assert, and the unattend.xml element. "
+			+ "Re-read this rule rather than leaving it passing over a scope that has moved.");
+		
+		// --- and the layout script onlines its own disk, so dropping the policy loses nothing --------
+		var layout = SourceModel.Methods()
+			.Where(m => m.Name == "BuildRealNtfsUsbLayoutDiskpartScript").ToArray();
+		Assert.True(layout.Length == 1,
+			$"expected one BuildRealNtfsUsbLayoutDiskpartScript, found {layout.Length}");
+		string layoutText = layout[0].Method.ToString();
+		Assert.True(Regex.IsMatch(layoutText, @"""online disk noerr"""),
+			"The layout script no longer brings its selected disk online. That is the per-disk replacement "
+			+ "for the machine-wide SAN policy this rule forbids; without it, a target left offline by an "
+			+ "OfflineAll host silently fails every line after `select`.");
+		
+		Assert.True(problems.Count == 0,
+			"Something in this app writes the host machine's disk policy:\n  " + string.Join("\n  ", problems));
+	}
+
 	/// <summary>The SSD erase must obtain its GPT table explicitly, and stop if it does not get it.</summary>
 	[Fact]
 	public void TheSsdEraseVerifiesItGotAGptTable()

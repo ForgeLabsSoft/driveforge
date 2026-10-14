@@ -3337,8 +3337,25 @@ public partial class MainWindow : Window, IComponentConnector
 		// source PC's other data partitions).
 		var lines = new List<string>
 		{
-			"san policy=OnlineAll",
+			// `san policy=OnlineAll` was the first line of this script. It does not do what it looks like: the
+			// SAN policy governs disks DISCOVERED LATER, not the one selected below, so it never brought this
+			// target online - and it is PERSISTENT and machine-wide (SanPolicy under partmgr), so it outlived
+			// the run, the app and the reboot.
+			//
+			// Worse, it is the very setting this app writes as 4 - "keep host disks offline" - into every
+			// portable Windows it builds, re-asserts in unattend.xml at every specialize pass, and reports as a
+			// feature. A host that is itself a portable Windows therefore had its own protection rewritten to 1
+			// by building a stick, and would auto-mount the next PC's internal disks read-write. Three flows
+			// reach this script.
+			//
+			// The two lines after `select` are the per-disk, non-persistent way to the same end, and they are
+			// what the other six places in this file already use - including BuildAttachBlankVhdxDiskpartScript,
+			// whose comment spells out why the policy must not be used. readonly is cleared twice because the
+			// attribute can come back when a disk onlines.
 			$"select disk {diskNumber}",
+			"attributes disk clear readonly noerr",
+			"online disk noerr",
+			"attributes disk clear readonly noerr",
 			"detail disk",
 			// `clean` is NOT in this script, on purpose: inside a script a refused clean aborts every line after
 			// it, so the stick is left emptied with nothing created on it. The caller empties the disk first,
