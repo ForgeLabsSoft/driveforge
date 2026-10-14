@@ -637,7 +637,20 @@ public partial class MainWindow : Window, IComponentConnector
 	// Plays a sound and flashes the taskbar when a long operation finishes, so the user can step away.
 	private void NotifyOperationDone(bool success)
 	{
-		if (SoundOnFinishCheck?.IsChecked == true)
+		// A Stop is neither ending, and this took a bool to answer two different questions: which
+		// sound, and whether a task finished well enough to ask the person for support. Measured: the
+		// two write flows pass false on a Stop, so pressing the button a person pressed on purpose
+		// plays the Windows ERROR sound (the box is ticked out of the factory); five other flows pass
+		// !stopRequested, so a stopped wipe plays the SUCCESS chime and is then followed by a request
+		// for support for a task that was cancelled. Both wrong, in opposite directions, from the same
+		// missing third state.
+		//
+		// Read here rather than added to every call site: every caller is the tail of an operation, and
+		// the flag still says what the person asked for - the flows that publish a verdict clear it
+		// after, not before. One place, and all thirty call sites become honest at once - five of them
+		// had worked this out for themselves and twenty-five had not.
+		bool stopped = stopRequested;
+		if (SoundOnFinishCheck?.IsChecked == true && !stopped)
 			try { (success ? System.Media.SystemSounds.Asterisk : System.Media.SystemSounds.Hand).Play(); } catch { }
 		if (FlashOnFinishCheck?.IsChecked == true)
 		{
@@ -661,7 +674,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		// Offer the support prompt after EVERY completed task (not just Create-USB). MaybeOfferDonation()
 		// itself respects the Settings toggle and the "1st + every 5th" throttle, and skips headless runs.
-		if (success) MaybeOfferDonation();
+		if (success && !stopped) MaybeOfferDonation();
 	}
 
 	// Outcome of the optional driver-inject + debloat steps, surfaced in the completion dialog so the user can
@@ -2745,7 +2758,7 @@ public partial class MainWindow : Window, IComponentConnector
 						// "Failed after hh:mm:ss" message was immediately overwritten with a bare "Progress: 0.0%".
 						if (cloneFailed)
 						{
-							ProgressStatsText.Text = string.Format(L("ProgFailed"), FormatDuration(operationStopwatch.Elapsed));
+							ProgressStatsText.Text = string.Format(L(stopRequested ? "ProgStopped" : "ProgFailed"), FormatDuration(operationStopwatch.Elapsed));
 							// The op is over and has reported its verdict — drop the flag. It is global and sticky, so
 							// leaving it set meant the NEXT SetBusy(false) from anywhere (a device-change refresh when
 							// the user unplugs the stick, the Refresh button, a health read) re-ran the stop-reset and
@@ -2890,7 +2903,7 @@ public partial class MainWindow : Window, IComponentConnector
 				// the most common route to operationFailed.
 				if (operationFailed)
 				{
-					ProgressStatsText.Text = string.Format(L("ProgFailed"), FormatDuration(operationStopwatch.Elapsed));
+					ProgressStatsText.Text = string.Format(L(stopRequested ? "ProgStopped" : "ProgFailed"), FormatDuration(operationStopwatch.Elapsed));
 					stopRequested = false;   // see the clone path: the sticky flag would let a later refresh wipe this line
 				}
 			}
@@ -8441,7 +8454,7 @@ exit 0
 			await Task.Run(() => WipeFreeSpaceCore(letter, fills, cap));
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
-			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
+			SetBusy(busy: false); NotifyOperationDone(true);   // a Stop is sorted out inside, for every caller
 			await RefreshDisksAsync();
 			// Honesty: on flash the app already warned that overwriting free space does NOT reliably erase old data
 			// (wear-levelling keeps copies the OS can't reach). Claiming "can no longer be recovered" here retracted
@@ -8925,7 +8938,7 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			progressDoneGiB = progressTotalGiB; UpdateProgressStats();
 			SetBusy(busy: false);
-			NotifyOperationDone(!stopRequested);
+			NotifyOperationDone(true);   // a Stop is sorted out inside, for every caller
 			await RefreshDisksAsync();
 			// Quick (sel 0) passes an EMPTY fills array: it runs diskpart clean and overwrites nothing at all. The
 			// confirm dialog shown before the method was chosen promises "Every sector will be OVERWRITTEN. Data will
@@ -13311,7 +13324,7 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
 			UpdateProgressStats();   // refresh the stats LINE too — the timer has stopped, so nothing else will
-			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
+			SetBusy(busy: false); NotifyOperationDone(true);   // a Stop is sorted out inside, for every caller
 			// Unreadable sectors are now skipped rather than aborting the image, but the user must be told how much
 			// of the copy is zeros — recovery run against it will silently come up short in exactly those regions.
 			if (badSectors > 0)
@@ -13395,7 +13408,7 @@ exit 0
 			operationTimer.Stop(); operationStopwatch.Stop();
 			ProgressBar.Value = 100.0; if (ProgressPercentText != null) ProgressPercentText.Text = "100%";
 			UpdateProgressStats();
-			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
+			SetBusy(busy: false); NotifyOperationDone(true);   // a Stop is sorted out inside, for every caller
 			if (badSectors > 0)
 				Log($"WARNING: {badSectors} sector(s) could not be read and were written to the image as zeros — the image is INCOMPLETE in those regions.");
 			// A stopped run matters more here than on the volume path: a half-read drive image is not a short file, it
@@ -15140,7 +15153,7 @@ exit 0
 			// 2.9 MB erasure report "100.0% (1.0 / 1.0 GiB)" - a claim about how much was overwritten, from a tool
 			// whose whole job is overwriting. With the real total the size is simply omitted until it is worth showing.
 			progressDoneGiB = progressTotalGiB; ProgressBar.Value = 100.0; UpdateProgressStats();
-			SetBusy(busy: false); NotifyOperationDone(!stopRequested);
+			SetBusy(busy: false); NotifyOperationDone(true);   // a Stop is sorted out inside, for every caller
 			// Three separate outcomes, reported separately: overwritten and deleted, deleted but NOT overwritten
 			// (compressed / sparse / EFS — the original clusters could not be reached), and not erased at all.
 			// Folding the middle group into "securely erased" is what made the summary dishonest. These were also

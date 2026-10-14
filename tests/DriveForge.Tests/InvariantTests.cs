@@ -875,6 +875,104 @@ public class InvariantTests
 			"Something in this app writes the host machine's disk policy:\n  " + string.Join("\n  ", problems));
 	}
 
+	/// <summary>
+	/// RULE - a Stop is not a failure, on every surface that reports how an operation ended.
+	///
+	/// Measured on hardware: Stop pressed 75 seconds into a real Windows-To-Go write. Three of the four
+	/// surfaces told the truth - the confirmation ("Stop the current operation? The USB may be unfinished
+	/// and need to be formatted again."), the dialog after it ("Stopped before the copy finished, so what
+	/// is on the target is incomplete."), and the status line ("Stopped."). The fourth, the verdict line
+	/// under the progress bar, read `Elapsed: 00:01:36 | Failed` - and it is the only one of the four that
+	/// STAYS on screen once the dialog is dismissed. It also survives a Refresh, which this file already
+	/// made sure of for the opposite reason.
+	///
+	/// Both sites that write it carry a comment saying a user Stop is the most common way to reach them
+	/// ("the most common way to reach cloneFailed IS the user's Stop"), and then print the word "Failed".
+	/// The knowledge was already written down next to the line that contradicted it. ProgStopped now
+	/// exists in all seventeen tables, composed from each language's own ProgFailed prefix and its own
+	/// SxStopped word - no invented translations.
+	///
+	/// The same bool was answering two questions in NotifyOperationDone: which sound to play, and whether
+	/// a task finished well enough to ask the person for support. So a Stop in the two write flows played
+	/// the Windows ERROR sound (SoundOnFinishCheck is ticked out of the factory), while five flows that
+	/// passed !stopRequested played the SUCCESS chime for a cancelled task and then asked for a donation.
+	/// Both wrong, in opposite directions, from one missing third state - now read in one place, so all
+	/// thirty call sites are honest at once.
+	///
+	/// SaveLogToDesktop already learned this (it refuses to drop an 850 KB file on the Desktop for a Stop
+	/// nobody asked a log for) and is checked here so the three halves of one claim stay together.
+	/// </summary>
+	[Fact]
+	public void AStopIsNotAFailure()
+	{
+		string src = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "MainWindow.cs"));
+		var problems = new List<string>();
+		
+		// --- the verdict line -----------------------------------------------------------------------
+		// Every write of the failure verdict must choose its word from stopRequested. Matched on the
+		// statement, not the file, so a second site added later without the choice is caught.
+		int verdicts = 0;
+		foreach (Match m in Regex.Matches(src, @"ProgressStatsText\.Text = string\.Format\(L\(([^)]*)\)"))
+		{
+			string chosen = m.Groups[1].Value;
+			if (!chosen.Contains("ProgFailed", StringComparison.Ordinal)) continue;
+			verdicts++;
+			if (chosen.Contains("stopRequested", StringComparison.Ordinal)
+				&& chosen.Contains("ProgStopped", StringComparison.Ordinal)) continue;
+			problems.Add($"`{Trim120(m.Value)}` at offset {m.Index}: this prints \"Failed\" for a Stop the "
+				+ "person pressed on purpose, and it is the one surface that stays on screen after the dialog "
+				+ "is dismissed. Choose the word from stopRequested, as the status line next to it does.");
+		}
+		Assert.True(verdicts >= 2,
+			$"Only {verdicts} verdict-line write(s); there were two (the clone and the image install). "
+			+ "Re-read this rule rather than leaving it passing over a scope that has moved.");
+		
+		// --- the sound and the request for support --------------------------------------------------
+		var notify = SourceModel.Methods().Where(m => m.Name == "NotifyOperationDone").ToArray();
+		Assert.True(notify.Length == 1, $"expected one NotifyOperationDone, found {notify.Length}");
+		string body = notify[0].Method.ToString();
+		Assert.True(Regex.IsMatch(body, @"bool\s+stopped\s*=\s*stopRequested"),
+			"NotifyOperationDone no longer reads stopRequested. Its bool answers two questions - which "
+			+ "sound, and whether to ask for support - and a Stop is neither ending, so without this the "
+			+ "error sound plays for a button the person pressed on purpose.");
+		// The guard can sit on the statement itself or on the `if` just above it, and the comment that
+		// explains why the support prompt exists names it too - so: the first line that is not a comment,
+		// read together with the one before it.
+		string[] bodyLines = body.Split('\n');
+		foreach (var (what, needle) in new[] { ("the sound", ".Play()"), ("the support prompt", "MaybeOfferDonation(") })
+		{
+			int at = -1;
+			for (int i = 0; i < bodyLines.Length; i++)
+			{
+				if (bodyLines[i].TrimStart().StartsWith("//", StringComparison.Ordinal)) continue;
+				if (!bodyLines[i].Contains(needle, StringComparison.Ordinal)) continue;
+				at = i;
+				break;
+			}
+			Assert.True(at >= 0, $"NotifyOperationDone no longer contains {needle} outside a comment.");
+			string pair = (at > 0 ? bodyLines[at - 1] : "") + " " + bodyLines[at];
+			if (!pair.Contains("!stopped", StringComparison.Ordinal))
+				problems.Add($"{what} is not held back on a Stop: {Trim120(bodyLines[at].Trim())}");
+		}
+		
+		// --- and the log file nobody asked for ------------------------------------------------------
+		var saver = SourceModel.Methods().Where(m => m.Name == "SaveLogToDesktop").ToArray();
+		Assert.True(saver.Length == 1, $"expected one SaveLogToDesktop, found {saver.Length}");
+		Assert.True(Regex.IsMatch(saver[0].Method.ToString(), @"!userAsked\s*&&\s*stopRequested"),
+			"SaveLogToDesktop lost its Stop guard. Nine of its ten callers are catch blocks, which a Stop "
+			+ "reaches by design, so without the guard every Stop drops a log file on the Desktop with "
+			+ "nothing on screen to explain it.");
+		
+		// --- the word exists to choose ---------------------------------------------------------------
+		var en = ((Dictionary<string, Dictionary<string, string>>)Mw.Field("Strings"))["en"];
+		Assert.True(en.ContainsKey("ProgStopped") && en["ProgStopped"].Contains("{0}", StringComparison.Ordinal),
+			"ProgStopped is gone from the English table, so there is no honest word for the verdict line to "
+			+ "use. LocalizationTests covers the other sixteen.");
+		
+		Assert.True(problems.Count == 0,
+			"Something tells the person their own Stop was a failure:\n  " + string.Join("\n  ", problems));
+	}
+
 	/// <summary>The SSD erase must obtain its GPT table explicitly, and stop if it does not get it.</summary>
 	[Fact]
 	public void TheSsdEraseVerifiesItGotAGptTable()
