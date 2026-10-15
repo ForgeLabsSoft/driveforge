@@ -11151,11 +11151,50 @@ exit 0
 		catch { return true; }
 	}
 
+	// The folder a .NET single-file app unpacks itself into, and runs from.
+	//
+	// DriveForge's own release IS such an exe (PublishSingleFile + IncludeNativeLibrariesForSelfExtract), so at
+	// startup it writes its native libraries and mixed-mode assemblies under %TEMP%\.net\<app>\<hash>\ and
+	// executes them from there. The "Temporary files" category walks Path.GetTempPath() recursively - so the
+	// sweep was deleting the code of the very process running it. MEASURED on the published exe: 12 of the 15
+	// extracted files went, vcruntime140_cor3.dll among them, and closing the app then threw
+	// DllNotFoundException out of a mixed-mode module's CRT teardown - which is what a user reported, with a
+	// crash log identical to the one reproduced here.
+	//
+	// Not only ours, either: every single-file .NET app on the machine extracts under the same base, and the
+	// name is theirs to choose (DOTNET_BUNDLE_EXTRACT_BASE_DIR), so that variable is read before the default.
+	// What lives there is a running program's code, not rubbish, and the few MB are not worth breaking one.
+	private static readonly string _bundleExtractBase = BundleExtractBase();
+	private static string BundleExtractBase()
+	{
+		try
+		{
+			string b = Environment.GetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR") ?? "";
+			if (b.Trim().Length == 0) b = Path.Combine(Path.GetTempPath(), ".net");
+			return Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+		}
+		catch { return ""; }
+	}
+	
+	/// <summary>True for the single-file extraction base itself and anything under it. Fails CLOSED.</summary>
+	private static bool IsLiveProgramCodeDir(string dir)
+	{
+		if (_bundleExtractBase.Length == 0) return false;   // could not resolve it: nothing to exclude
+		try
+		{
+			string full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+			if (string.Equals(full, _bundleExtractBase, StringComparison.OrdinalIgnoreCase)) return true;
+			return full.StartsWith(_bundleExtractBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+		}
+		catch { return true; }
+	}
+	
 	// Enumerates files safely (no throw) under a folder, optionally recursing, optionally by pattern.
 	private static IEnumerable<string> SafeFiles(string dir, string pattern = "*", bool recurse = true)
 	{
 		if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) yield break;
 		if (IsUnsafeCleanRoot(dir)) yield break;   // never enumerate a profile/root as a "temp" folder
+		if (IsLiveProgramCodeDir(dir)) yield break;   // never sweep a running program out of its own folder
 		var stack = new Stack<string>();
 		stack.Push(dir);
 		while (stack.Count > 0)
@@ -11172,6 +11211,9 @@ exit 0
 				foreach (var s in subs)
 				{
 					try { if ((File.GetAttributes(s) & FileAttributes.ReparsePoint) != 0) continue; } catch { }
+					// Checked on the way DOWN as well: %TEMP%\.net is reached as a CHILD of the temp folder, so a
+					// guard only at the entry point would never see it.
+					if (IsLiveProgramCodeDir(s)) continue;
 					stack.Push(s);
 				}
 			}

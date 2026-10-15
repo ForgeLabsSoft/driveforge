@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Xunit;
@@ -308,4 +310,69 @@ public class PureLogicTests
 	[InlineData("Seagate External Drive", "SATA", true)]        // the name says so for itself
 	public void IsLikelyUsbOrExternal_OnlyCountsDrivesAttachedByCable(string name, string bus, bool expected) =>
 		Assert.Equal(expected, IsExternal(name, bus));
+
+	// ---------------------------------------------------------------- the clean sweep's reach
+
+	/// <summary>
+	/// REGRESSION (reported from the field, reproduced on this machine): closing DriveForge after cleaning
+	/// traces raised "Dll was not found." out of a mixed-mode module's CRT teardown.
+	///
+	/// The release exe is PublishSingleFile + IncludeNativeLibrariesForSelfExtract, so at startup it unpacks its
+	/// native libraries into %TEMP%\.net\&lt;app&gt;\&lt;hash&gt;\ and RUNS them from there - and the
+	/// "Temporary files" category walks Path.GetTempPath() recursively. Measured on the published build: 12 of
+	/// the 15 extracted files were deletable under the live process, vcruntime140_cor3.dll among them, and the
+	/// crash log that followed matched the user's byte for byte.
+	///
+	/// Both guards are measured here, because they fire on different paths: the extraction base is normally
+	/// reached as a CHILD of the temp folder (the reported case), while a direct call on the base itself is the
+	/// other way in. A test that only did one of them would leave the reported path uncovered.
+	/// </summary>
+	[Fact]
+	public void TheCleanSweepDoesNotCarryOffARunningProgramsOwnCode()
+	{
+		string temp = Path.GetTempPath();
+		string baza = Path.Combine(temp, ".net");   // the single-file extraction base
+		string tag = "dftest-" + Guid.NewGuid().ToString("N");
+		string inCod = Path.Combine(baza, tag);       // stands in for a running app's unpacked code
+		string inGunoi = Path.Combine(temp, tag);     // ordinary temp rubbish, fair game
+		string fCod = Path.Combine(inCod, "vcruntime140_cor3.dll");
+		// A file sitting DIRECTLY in the base. Without it the descent guard hides whether the entry guard
+		// exists at all: the base holds only sub-folders, and those are skipped on the way down anyway -
+		// so "nothing came back" would be true either way. Measured with a mutation, not assumed.
+		string fInBaza = Path.Combine(baza, tag + ".probe");
+		string fGunoi = Path.Combine(inGunoi, "leftover.tmp");
+		try
+		{
+			Directory.CreateDirectory(inCod);
+			Directory.CreateDirectory(inGunoi);
+			File.WriteAllText(fCod, "x");
+			File.WriteAllText(fGunoi, "x");
+			File.WriteAllText(fInBaza, "x");
+			
+			// The sweep, exactly as the Temp category runs it.
+			var swept = new HashSet<string>(
+				Mw.Call<IEnumerable<string>>("SafeFiles", temp, "*", true), StringComparer.OrdinalIgnoreCase);
+			
+			Assert.True(swept.Contains(fGunoi),
+				"The sweep no longer picks up ordinary temp files, so this test is proving nothing. "
+					+ "Re-read it rather than leaving it passing over a scope that has moved.");
+			Assert.False(swept.Contains(fCod),
+				$"The clean sweep still reaches into {baza} - the folder a single-file .NET app unpacks itself "
+					+ "into and runs from. Deleting that under a live process is what made a user's DriveForge throw "
+					+ "DllNotFoundException on exit, and it would do the same to any other single-file app running.");
+			
+			// And the other way in: handed the base directly, it must refuse to enumerate it at all.
+			var direct = new HashSet<string>(
+				Mw.Call<IEnumerable<string>>("SafeFiles", baza, "*", true), StringComparer.OrdinalIgnoreCase);
+			Assert.False(direct.Contains(fInBaza),
+				$"Called straight on {baza}, the sweep handed back a file lying in it - the entry guard is missing, "
+					+ "so any category naming that folder itself would empty a running app's code.");
+		}
+		finally
+		{
+			try { Directory.Delete(inCod, true); } catch { }
+			try { Directory.Delete(inGunoi, true); } catch { }
+			try { File.Delete(fInBaza); } catch { }
+		}
+	}
 }

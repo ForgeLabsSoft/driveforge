@@ -3936,4 +3936,41 @@ public class InvariantTests
 				yield return p.Identifier.Text;
 		}
 	}
+
+	/// <summary>
+	/// RULE - a fault that arrives while the app is closing is not dressed up as a lost operation.
+	///
+	/// ReportCrash opens with "DriveForge hit an unexpected error and had to stop the current operation." and
+	/// invites a bug report. A user met that sentence after simply closing the app: the clean-traces sweep had
+	/// emptied the single-file extraction folder the process was running from, so a mixed-mode module's CRT
+	/// teardown threw during AppDomain unload. Nothing had been stopped - the operation was finished and the
+	/// window was already gone - and there was nothing the person could do, so the dialog bought a support
+	/// email and no information. It is also the one moment a modal can hang the exit, with the UI pump gone.
+	///
+	/// Measured by POSITION, not by presence: a guard written AFTER the dialog guards nothing, and a count of
+	/// occurrences would pass just the same. The log is deliberately NOT gated - every fault is still recorded.
+	/// </summary>
+	[Fact]
+	public void ACrashReportedWhileClosingIsNotDressedUpAsALostOperation()
+	{
+		var hit = SourceModel.Methods().Where(m => m.Name == "ReportCrash").ToArray();
+		Assert.True(hit.Length == 1, $"Expected one ReportCrash, found {hit.Length}.");
+		string code = hit[0].Method.ToString();
+		
+		int gate = code.IndexOf("_shuttingDown", StringComparison.Ordinal);
+		int dialog = code.IndexOf("MessageBox.Show", StringComparison.Ordinal);
+		int log = code.IndexOf("AppendAllText", StringComparison.Ordinal);
+		Assert.True(dialog >= 0, "ReportCrash no longer shows a dialog at all. Re-read this rule rather than "
+			+ "leaving it passing over a scope that has moved.");
+		Assert.True(log >= 0, "ReportCrash no longer writes the crash log. Re-read this rule: the log is the "
+			+ "half that must always happen.");
+		Assert.True(gate >= 0,
+			"ReportCrash does not check whether the app is already closing, so a fault from the runtime's own "
+				+ "teardown is reported as an interrupted operation.");
+		Assert.True(gate < dialog,
+			"The closing check sits AFTER the dialog in ReportCrash, so it prevents nothing.");
+		Assert.True(log < gate,
+			"The crash log is written after the closing check, so a teardown fault would not be recorded at "
+				+ "all. The log must happen for every fault; only the dialog is conditional.");
+	}
 }

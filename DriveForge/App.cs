@@ -30,11 +30,17 @@ public class App : Application
 		app.DispatcherUnhandledException += app.OnDispatcherUnhandledException;
 		AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
 		TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+		// Exit fires once the last window has closed and the app is on its way out. From then on there is no
+		// "current operation" left to interrupt, so a fault thrown by the runtime's own teardown must not be
+		// dressed up as one - see ReportCrash.
+		app.Exit += (_, __) => System.Threading.Interlocked.Exchange(ref _shuttingDown, 1);
 		app.Run();
 	}
 
 	// Reentrancy guard: a fault raised WHILE we are handling a fault (e.g. the dialog itself throws) must not loop.
 	private static int _reporting;
+	// Set when Application.Exit has fired: the app is closing and nothing of the user's is in flight.
+	private static int _shuttingDown;
 
 	// Persist the crash so a user can send it to us, then show a friendly dialog instead of a hard close.
 	private static void ReportCrash(string source, Exception? ex, bool terminating)
@@ -53,6 +59,20 @@ public class App : Application
 				File.AppendAllText(path, "==== " + stamp + "  [" + source + "]  terminating=" + terminating + " ====" + Environment.NewLine + details + Environment.NewLine + Environment.NewLine, Encoding.UTF8);
 			}
 			catch { }
+			// The LOG is written for every fault, always. The DIALOG is not. Once the app is on its way out there
+			// is no operation left to interrupt, nothing for the person to act on, and no window to put a modal
+			// over - and that is also the one moment a modal can hang the exit, because the UI pump may be gone.
+			// A user met exactly this: the clean-traces sweep had emptied the single-file extraction folder this
+			// process was RUNNING from, so a mixed-mode module's CRT teardown threw DllNotFoundException during
+			// AppDomain unload, and what they were shown was "had to stop the current operation" - when the
+			// operation had finished and the window was already closed. The sweep no longer does that (SafeFiles
+			// skips the extraction base); this makes sure a teardown fault is never reported as a lost operation.
+			// ONE condition, and it is the one that was measured: Application.Exit has fired. Environment.
+			// HasShutdownStarted was in here too, and it came out - it is NOT documented to be false inside this
+			// handler for a FATAL exception (IsTerminating=true), which is a genuine mid-operation crash that must
+			// still be shown. A condition that could hide a real crash, and that I could not measure, is worse
+			// than the one line it saves.
+			if (_shuttingDown == 1) return;
 			try
 			{
 				string msg = "DriveForge hit an unexpected error and had to stop the current operation.";
