@@ -1175,6 +1175,80 @@ public class InvariantTests
 	}
 
 	/// <summary>
+	/// RULE - a menu translated by index keeps the index and the label together.
+	///
+	/// The Recover screen's "..." overflow menu is localized by POSITION, not by name, and
+	/// UiCustomization says why: "ContextMenu is a separate namescope, so set by index". That is a
+	/// correspondence between two files, maintained by hand, and nothing checked it. Insert one item into
+	/// the XAML menu and every label after it silently becomes its neighbour's.
+	///
+	/// Who would never see that: an English user. The XAML header IS the English text, so in English the
+	/// menu reads correctly no matter how far the mapping has slipped - and the other sixteen languages
+	/// show the wrong label. A defect the author cannot meet on their own machine.
+	///
+	/// So: for every index UiCustomization assigns, the XAML item at that index must be a MenuItem whose
+	/// own header is the English value of the key assigned to it. The count guard in UiCustomization
+	/// checks how many items there are; this checks that they are the ones it thinks they are.
+	/// </summary>
+	[Fact]
+	public void AMenuTranslatedByIndexKeepsTheIndexAndTheLabelTogether()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		string custom = File.ReadAllText(Path.Combine(Mw.RepoRoot, "DriveForge", "UiCustomization.cs"));
+		
+		// The menu, in XAML order: MenuItem headers and Separators both take a position.
+		int at = xaml.IndexOf("Name=\"RecoverMoreButton\"", StringComparison.Ordinal);
+		Assert.True(at >= 0, "RecoverMoreButton is gone from MainWindow.xaml.");
+		int menuEnd = xaml.IndexOf("</ContextMenu>", at, StringComparison.Ordinal);
+		Assert.True(menuEnd > at, "RecoverMoreButton no longer carries a ContextMenu.");
+		string block = xaml.Substring(at, menuEnd - at);
+		
+		var inXaml = new List<string?>();   // null = a Separator: it takes an index but has no header
+		foreach (Match m in Regex.Matches(block, @"<(MenuItem|Separator)\b([^>]*)>"))
+		{
+			if (m.Groups[1].Value == "Separator") { inXaml.Add(null); continue; }
+			var h = Regex.Match(m.Groups[2].Value, @"Header\s*=\s*""([^""]*)""");
+			inXaml.Add(h.Success ? h.Groups[1].Value : "");
+		}
+		Assert.True(inXaml.Count >= 6,
+			$"The overflow menu has {inXaml.Count} entries; there were six. Re-read this rule rather than "
+			+ "leaving it passing over a scope that has moved.");
+		
+		// What UiCustomization assigns, index by index.
+		var problems = new List<string>();
+		int assigned = 0;
+		foreach (Match m in Regex.Matches(custom,
+			@"ContextMenu\.Items\[(\d+)\][^;]*?\.Header\s*=\s*L\(""([A-Za-z0-9_]+)""\)"))
+		{
+			int idx = int.Parse(m.Groups[1].Value);
+			string key = m.Groups[2].Value;
+			assigned++;
+			if (idx >= inXaml.Count)
+			{
+				problems.Add($"index {idx} -> {key}: the menu has only {inXaml.Count} entries.");
+				continue;
+			}
+			string? header = inXaml[idx];
+			if (header == null)
+			{
+				problems.Add($"index {idx} -> {key}: that position is a Separator, so the label is written "
+					+ "nowhere a person can see it.");
+				continue;
+			}
+			string? english = EnglishOf(key);
+			Assert.True(english != null, $"{key} is not in the English table.");
+			if (!string.Equals(header, english, StringComparison.Ordinal))
+				problems.Add($"index {idx}: XAML says \"{header}\" and {key} says \"{english}\" - so every "
+					+ "language except English shows the wrong label here.");
+		}
+		Assert.True(assigned >= 5,
+			$"Only {assigned} menu label(s) are assigned by index; there were five. Re-read this rule rather "
+			+ "than leaving it passing over a scope that has moved.");
+		Assert.True(problems.Count == 0,
+			"The overflow menu's positions and its labels have come apart:\n  " + string.Join("\n  ", problems));
+	}
+
+	/// <summary>
 	/// Every flow that asks for a partition style must look at the answer.
 	///
 	/// EnsureDiskPartitionStyleAsync returns bool because Windows can refuse. A discarded bool is the same
