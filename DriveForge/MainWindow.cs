@@ -11710,6 +11710,18 @@ exit 0
 		var dlg = new Microsoft.Win32.OpenFileDialog { Title = L("SecureDelTitle"), CheckFileExists = true };
 		if (dlg.ShowDialog(this) != true) return;
 		string path = dlg.FileName;
+		// A LINK is refused outright, exactly as the folder shredder refuses one (ShredOne): overwriting
+		// through it writes the zeroes onto its TARGET, which may be on another drive entirely, destroying a
+		// file the person never selected - and then only the link is deleted, so "File securely deleted."
+		// would be said about a file that is still there, and about a different one that has just been lost.
+		// IsFileLink, not the ReparsePoint attribute, for the reason that guard already records: the
+		// attribute is also set on OneDrive placeholders, which are ordinary files.
+		if (IsFileLink(path))
+		{
+			MessageBox.Show(this, string.Format(L("MbShredLinks"), 1).TrimStart(), L("SecureDelTitle"),
+				MessageBoxButton.OK, MessageBoxImage.Warning);
+			return;
+		}
 		var media = MediaForPath(path);
 		// An in-place overwrite is only meaningful on a spinning disk AND on a file whose clusters it can actually
 		// reach — a compressed/sparse/EFS file gets re-allocated on write, leaving the original clusters intact.
@@ -11750,9 +11762,44 @@ exit 0
 				while (rem > 0) { int chunk = (int)Math.Min(buf.Length, rem); fs.Write(buf, 0, chunk); rem -= chunk; }
 				fs.Flush(flushToDisk: true);
 			}
+			// And every ALTERNATE data stream, for the reason the folder shredder records: an ADS keeps its data
+			// in its OWN clusters, which File.Delete frees WITHOUT overwriting - so zeroing just the main stream
+			// leaves the hidden content fully recoverable under a message that says the file was securely
+			// deleted. Failures here are swallowed, as they are there: a stream that cannot be opened must not
+			// abort a delete whose main stream is already gone.
+			foreach (string adsPath in EnumerateAdsOpenPaths(path))
+			{
+				try
+				{
+					long alen;
+					using (var ain = new FileStream(adsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+						alen = ain.Length;
+					if (alen <= 0) continue;
+					using var afs = new FileStream(adsPath, FileMode.Open, FileAccess.Write, FileShare.None);
+					long arem = alen;
+					while (arem > 0) { int chunk = (int)Math.Min(buf.Length, arem); afs.Write(buf, 0, chunk); arem -= chunk; }
+					afs.Flush(flushToDisk: true);
+				}
+				catch { }
+			}
 		}
 		try { File.SetAttributes(path, FileAttributes.Normal); } catch { }
-		File.Delete(path);
+		// Rename to a random name BEFORE deleting, as the folder shredder does: the file NAME lives in the
+		// directory index and in the MFT record, which File.Delete frees without overwriting either. Without
+		// this the name of the "securely deleted" file is still sitting there to be found - and DriveForge's
+		// own Recover screen is exactly what finds it. Overwriting the bytes and leaving the name is half a
+		// secret. Best effort: if the rename fails the bytes are already gone, so it is deleted under its own
+		// name - but the DELETE itself is not swallowed, because the caller reports what happened.
+		string target = path;
+		try
+		{
+			string dir = Path.GetDirectoryName(path) ?? "";
+			string masked = Path.Combine(dir, Guid.NewGuid().ToString("N"));
+			File.Move(path, masked);
+			target = masked;
+		}
+		catch { }
+		File.Delete(target);
 	}
 
 	// ---------- Disk space analyzer (largest files + duplicates + folder treemap) ----------

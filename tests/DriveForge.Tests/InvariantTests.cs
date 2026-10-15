@@ -4031,4 +4031,65 @@ public class InvariantTests
 				+ "whether anything moved, so measuring the volume again is the only thing that knows - and "
 				+ "without it a no-op is reported as a green success.");
 	}
+
+	/// <summary>
+	/// RULE - both secure-delete paths keep the same three guards.
+	///
+	/// There are two shredders: one for a folder (ShredOne, per file) and one for a single file
+	/// (SecureDeleteFile). They make the SAME promise to the person - "this file's bytes are gone" - and the
+	/// folder one had worked out three ways that promise goes wrong, while the single-file one had none of them:
+	///
+	///   - a LINK: overwriting through it writes the zeroes onto its target, which may be on another drive, so
+	///     a file the person never selected is destroyed and only the link is deleted - and the app then says
+	///     "File securely deleted." about a file that is still there;
+	///   - an ALTERNATE DATA STREAM: it keeps its data in its own clusters, which File.Delete frees without
+	///     overwriting, so zeroing only the main stream leaves the hidden content fully recoverable;
+	///   - the NAME: it lives in the directory index and the MFT record, which File.Delete also frees without
+	///     overwriting - so the name of the "securely deleted" file is still there to be found, and this very
+	///     app's Recover screen is what finds it. Hence the rename to a random name before the delete.
+	///
+	/// Each guard is checked in BOTH paths, so neither can drift from the other again. The reference half is
+	/// asserted too: if the folder shredder loses a guard, this rule says so instead of quietly agreeing.
+	/// </summary>
+	[Fact]
+	public void BothShreddersKeepTheSameThreeGuards()
+	{
+		string Body(string name)
+		{
+			var hit = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			Assert.True(hit.Length == 1, $"Expected one {name}, found {hit.Length}.");
+			// Comments stripped: they NAME these guards, so an unfiltered check passes on its own explanation.
+			return string.Join(" ", hit[0].Method.ToString()
+				.Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+		}
+		
+		string one = Body("SecureDeleteFile") + " " + Body("CleanSecureDelete_Click");
+		string folder = Body("ShredOne");
+		
+		// 1. the link refusal
+		Assert.True(folder.Contains("IsFileLink(", StringComparison.Ordinal),
+			"The folder shredder no longer checks for a link. Re-read this rule rather than leaving it "
+				+ "passing over a scope that has moved.");
+		Assert.True(one.Contains("IsFileLink(", StringComparison.Ordinal),
+			"The single-file secure delete does not check for a link, so overwriting through one would zero the "
+				+ "file it points at - possibly on another drive - and then report a secure delete.");
+		
+		// 2. the alternate data streams
+		Assert.True(folder.Contains("EnumerateAdsOpenPaths", StringComparison.Ordinal),
+			"The folder shredder no longer overwrites alternate data streams. Re-read this rule.");
+		Assert.True(one.Contains("EnumerateAdsOpenPaths", StringComparison.Ordinal),
+			"The single-file secure delete overwrites only the main stream, so an alternate stream's data "
+				+ "survives under a message that says the file was securely deleted.");
+		
+		// 3. the name, masked before the delete - by ROLE: the rename must be what gets deleted
+		Assert.True(folder.Contains("File.Move(", StringComparison.Ordinal),
+			"The folder shredder no longer masks the file name before deleting. Re-read this rule.");
+		Assert.True(one.Contains("File.Move(path, masked)", StringComparison.Ordinal)
+			&& one.Contains("target = masked", StringComparison.Ordinal)
+			&& one.Contains("File.Delete(target)", StringComparison.Ordinal),
+			"The single-file secure delete does not delete the RENAMED file, so the original name is still in "
+				+ "the directory index and the MFT for the Recover screen to list. Overwriting the bytes and "
+				+ "leaving the name is half a secret.");
+	}
 }
