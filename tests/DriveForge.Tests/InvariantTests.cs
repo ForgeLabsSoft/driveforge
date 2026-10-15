@@ -3973,4 +3973,62 @@ public class InvariantTests
 			"The crash log is written after the closing check, so a teardown fault would not be recorded at "
 				+ "all. The log must happen for every fault; only the dialog is conditional.");
 	}
+
+	/// <summary>
+	/// RULE - the resize tool asks Windows, and only falls back to diskpart.
+	///
+	/// MEASURED on a virtual disk with a fresh 1008 MB NTFS volume: Get-PartitionSupportedSize said 622 MB
+	/// could be freed, while diskpart's `shrink querymax` said 0 - and that 0 was the number the prompt showed
+	/// the person, who would read "(max 0 MB)" as "nothing can be freed here". diskpart then refused BOTH
+	/// directions outright with "The system cannot find the file specified", a sentence that names no file and
+	/// explains nothing, leaving the volume untouched at 700 MB while the API reported room to reach 1008.
+	/// Resize-Partition did both jobs on the same volume. A non-zero diskpart exit also THROWS, so an ordinary
+	/// refusal arrived as the crash dialog with a bug-report invitation - the very thing the grow branch's own
+	/// comment says its pre-check exists to prevent.
+	///
+	/// So three things, and the third is the one that keeps the other two honest:
+	///   - the shrink limit comes from the API, never from `shrink querymax`;
+	///   - the API engine is tried BEFORE diskpart (position, not presence: an API call written after the
+	///     diskpart call leads nothing);
+	///   - the before/after size measurement stays, because no engine is believed on its word.
+	/// </summary>
+	[Fact]
+	public void TheResizeToolAsksWindowsBeforeItAsksDiskpart()
+	{
+		var hit = SourceModel.Methods().Where(m => m.Name == "ResizePartitionFlow").ToArray();
+		Assert.True(hit.Length == 1, $"Expected one ResizePartitionFlow, found {hit.Length}.");
+		// Comments stripped: a syntax node's ToString() carries them, and the comment that RECORDS this
+		// measurement names `shrink querymax` itself - so an unfiltered check fails on its own explanation.
+		string code = string.Join(" ", hit[0].Method.ToString()
+			.Split('\n')
+			.Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+		
+		Assert.False(code.Contains("shrink querymax", StringComparison.Ordinal),
+			"The shrink limit is being read from diskpart again. Measured: it answers 0 MB on a volume with "
+				+ "622 MB of headroom, and that number goes straight into the prompt the person reads.");
+		Assert.True(code.Contains("VolumeMinSizeBytesAsync", StringComparison.Ordinal),
+			"The shrink limit no longer comes from Get-PartitionSupportedSize, so the max in the prompt is "
+				+ "nobody's measurement.");
+		
+		int api = code.IndexOf("ResizeVolumeApiAsync", StringComparison.Ordinal);
+		int dp = code.IndexOf("RunDiskpartAsync", StringComparison.Ordinal);
+		Assert.True(api >= 0, "The resize no longer goes through Windows' own partition API, which is the only "
+			+ "engine measured to work on a virtual disk.");
+		Assert.True(dp >= 0, "The diskpart fallback is gone. Re-read this rule rather than leaving it passing "
+			+ "over a scope that has moved.");
+		Assert.True(api < dp, "diskpart is tried before the API. It refuses both directions on a virtual disk, "
+			+ "so leading with it is how the tool came to do nothing at all there.");
+		
+		// The arbiter: the real size, read before AND after, whichever engine ran.
+		//
+		// By ROLE, not by count. "At least two calls to VolumeSizeBytesAsync" passed with the AFTER read
+		// deleted, because the grow branch has one of its own: three minus one is still two. Each read is
+		// named together with the variable it feeds, so removing either one is what fails.
+		Assert.True(code.Contains("sizeBefore = await VolumeSizeBytesAsync(", StringComparison.Ordinal),
+			"The baseline size is no longer read from the volume before the resize runs.");
+		Assert.True(code.Contains("sizeAfter = await VolumeSizeBytesAsync(", StringComparison.Ordinal),
+			"The size is no longer re-read AFTER the resize. Both engines can exit 0 (or throw) without saying "
+				+ "whether anything moved, so measuring the volume again is the only thing that knows - and "
+				+ "without it a no-op is reported as a green success.");
+	}
 }

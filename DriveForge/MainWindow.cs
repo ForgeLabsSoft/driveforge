@@ -15759,8 +15759,52 @@ exit 0
 		return -1L;
 	}
 
-	// Grow or shrink a partition without destroying data, using Windows' own diskpart shrink/extend.
-	// Extend only fills unallocated space immediately AFTER the volume; shrink frees space at its end.
+	/// <summary>
+	/// The smallest the volume can be made, from Get-PartitionSupportedSize - so "how much can be freed" is
+	/// now - min. diskpart's own `shrink querymax` was asked this before and answered 0 MB on a volume where
+	/// Windows reported 622 MB of headroom (measured), and that 0 went straight into the prompt the user reads.
+	/// </summary>
+	private async Task<long> VolumeMinSizeBytesAsync(char letter)
+	{
+		try
+		{
+			string script = "$s = Get-PartitionSupportedSize -DriveLetter " + letter + " -ErrorAction Stop; [int64]$s.SizeMin";
+			string raw = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(script));
+			foreach (string line in raw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+				if (long.TryParse(line.Trim(), out long v) && v > 0) return v;
+		}
+		catch { }
+		return -1L;
+	}
+	
+	/// <summary>
+	/// Resizes the volume with Windows' own partition API. Returns "" on success, else the reason.
+	///
+	/// MEASURED on a virtual disk with a fresh NTFS volume: diskpart refuses BOTH directions with
+	/// "The system cannot find the file specified" - which names no file and explains nothing - while
+	/// Resize-Partition shrinks 1008 MB to 808 MB and grows it back. The old engine stays as a fallback,
+	/// so nothing that worked before stops working.
+	/// </summary>
+	private async Task<string> ResizeVolumeApiAsync(char letter, long targetBytes)
+	{
+		try
+		{
+			// $ErrorActionPreference, not -ErrorAction: a terminating error prints to stderr and that is what
+			// gets captured; a silent cmdlet would look like success to the caller.
+			string script = "$ErrorActionPreference = 'Stop'; try { Resize-Partition -DriveLetter " + letter
+				+ " -Size " + targetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture)
+				+ "; 'DF-RESIZE-OK' } catch { 'DF-RESIZE-FAIL: ' + $_.Exception.Message }";
+			string raw = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(script));
+			if (raw.Contains("DF-RESIZE-OK", StringComparison.Ordinal)) return "";
+			string why = raw.Trim();
+			return why.Length == 0 ? "Resize-Partition produced no output" : why;
+		}
+		catch (Exception ex) { return ex.Message; }
+	}
+	
+	// Grow or shrink a partition without destroying data. Windows' own partition API does the work, with
+	// diskpart shrink/extend kept as a fallback. Extend only fills unallocated space immediately AFTER the
+	// volume; shrink frees space at its end.
 	private async Task ResizePartitionFlow(DiskItem disk)
 	{
 		if (!GuardSystemDisk(disk)) return;   // never shrink/extend the running Windows volume (e.g. C:)
@@ -15775,20 +15819,23 @@ exit 0
 		if (mode == null) return;
 
 		string cmd; string working;
+		// The size to resize TO, for the API engine; 0 means "could not work it out, use diskpart only".
+		long targetBytes = 0;
 		if (mode.Value == 1) // shrink
 		{
-			long maxMb = 0;
-			try
-			{
-				string q = await RunDiskpartAsync($"select volume {letter}\r\nshrink querymax\r\nexit\r\n");
-				var m = Regex.Match(q, @"([0-9][0-9,\.]*)\s*MB");
-				if (m.Success) long.TryParse(m.Groups[1].Value.Replace(",", "").Replace(".", ""), out maxMb);
-			}
-			catch { }
+			// How much can be freed, from WINDOWS, not from diskpart. Measured on a fresh 1008 MB NTFS volume:
+			// Get-PartitionSupportedSize said 622 MB could go, diskpart's `shrink querymax` said 0 - and that 0
+			// was what the prompt below showed the person, who would read it as "nothing can be freed here".
+			long nowBytes = await VolumeSizeBytesAsync(letter);
+			long minBytes = await VolumeMinSizeBytesAsync(letter);
+			long maxMb = (nowBytes > 0 && minBytes > 0 && nowBytes > minBytes)
+				? (nowBytes - minBytes) / (1024 * 1024)
+				: 0;
 			string? amt = ShowInputDialog(L("PtShrink"), string.Format(L("PtShrinkPrompt"), letter, maxMb), maxMb > 0 ? maxMb.ToString() : "1024");
 			if (amt == null) return;
 			if (!long.TryParse(amt.Trim(), out long mb) || mb <= 0) { MessageBox.Show(L("PtBadAmount"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 			if (MessageBox.Show(string.Format(L("PtShrinkConfirm"), letter, mb), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+			if (nowBytes > 0) targetBytes = nowBytes - mb * 1024L * 1024L;
 			cmd = $"select volume {letter}\r\nshrink desired={mb}\r\nexit\r\n";
 			working = string.Format(L("PtResizeWorking"), letter);
 		}
@@ -15815,6 +15862,9 @@ exit 0
 			else if (long.TryParse(amt, out long mb) && mb > 0) extend = $"extend size={mb}";
 			else { MessageBox.Show(L("PtBadAmount"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
 			if (MessageBox.Show(string.Format(L("PtGrowConfirm"), letter), "DriveForge", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) != MessageBoxResult.OK) return;
+			// Empty means "all the free space right after it", which is exactly the API's SizeMax.
+			if (amt.Length == 0) { if (growMax > 0) targetBytes = growMax; }
+			else if (growNow > 0 && long.TryParse(amt, out long addMb)) targetBytes = growNow + addMb * 1024L * 1024L;
 			cmd = $"select volume {letter}\r\n{extend}\r\nexit\r\n";
 			working = string.Format(L("PtResizeWorking"), letter);
 		}
@@ -15823,8 +15873,26 @@ exit 0
 		{
 			SetBusy(busy: true, working);
 			long sizeBefore = await VolumeSizeBytesAsync(letter);   // baseline for the before/after check below
-			string outp = await RunDiskpartAsync(cmd);
-			SetToolOutput("diskpart resize\r\n\r\n" + outp);
+			// Windows' own API first, diskpart only if that could not be used or did not take. On a virtual disk
+			// diskpart refuses both directions outright (measured), so leading with it meant the tool simply did
+			// not work there - and a non-zero exit code THROWS, which turned an ordinary refusal into the crash
+			// dialog with a bug-report invitation. A refusal is not a crash: it is caught here and left to the
+			// before/after measurement below, which is the only arbiter either engine gets.
+			string outp = "";
+			bool apiOk = false;
+			if (targetBytes > 0)
+			{
+				string why = await ResizeVolumeApiAsync(letter, targetBytes);
+				apiOk = why.Length == 0;
+				outp = "Resize-Partition -DriveLetter " + letter + " -Size " + targetBytes
+					+ (apiOk ? "  ->  OK" : "  ->  " + why);
+			}
+			if (!apiOk)
+			{
+				try { outp += (outp.Length > 0 ? "\r\n\r\n" : "") + await RunDiskpartAsync(cmd); }
+				catch (Exception dex) { outp += "\r\n\r\ndiskpart: " + dex.Message; }
+			}
+			SetToolOutput("resize\r\n\r\n" + outp);
 			Log($"Resize volume {letter}: ({(mode.Value == 1 ? "shrink" : "extend")}).");
 			await RefreshDisksAsync();
 			// diskpart exits 0 even when it DECLINED the shrink/extend (not enough reclaimable space, no adjacent free
