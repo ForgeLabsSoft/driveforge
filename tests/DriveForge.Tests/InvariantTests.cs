@@ -3995,6 +3995,29 @@ public class InvariantTests
 	[Fact]
 	public void TheResizeToolAsksWindowsBeforeItAsksDiskpart()
 	{
+		// The same fault was measured in the DELETE tool: diskpart's `delete volume override` refuses on a
+		// virtual disk with the same 0x80070002 and leaves the volume where it was, while Remove-Partition
+		// deletes it. Both tools are held to the same order here, so neither is left on its own.
+		foreach (string flow in new[] { "DeletePartitionFlow" })
+		{
+			var dm = SourceModel.Methods().Where(m => m.Name == flow).ToArray();
+			Assert.True(dm.Length == 1, $"Expected one {flow}, found {dm.Length}.");
+			string dcode = string.Join(" ", dm[0].Method.ToString()
+				.Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+			int dapi = dcode.IndexOf("RemoveVolumeApiAsync", StringComparison.Ordinal);
+			int ddp = dcode.IndexOf("RunDiskpartAsync", StringComparison.Ordinal);
+			Assert.True(dapi >= 0, $"{flow} no longer goes through Windows' own partition API, which is the "
+				+ "only engine measured to work on a virtual disk.");
+			Assert.True(ddp >= 0, $"{flow} lost its diskpart fallback. Re-read this rule rather than leaving "
+				+ "it passing over a scope that has moved.");
+			Assert.True(dapi < ddp, $"{flow} tries diskpart before the API, which is how the tool came to do "
+				+ "nothing at all on a virtual disk.");
+			Assert.True(dcode.Contains("partsBefore = await PartitionCountAsync(", StringComparison.Ordinal)
+				&& dcode.Contains("partsAfter = await PartitionCountAsync(", StringComparison.Ordinal),
+				$"{flow} no longer counts the partitions before AND after. Both engines can refuse without "
+				+ "saying so, and counting twice is the only thing that knows whether anything went.");
+		}
 		var hit = SourceModel.Methods().Where(m => m.Name == "ResizePartitionFlow").ToArray();
 		Assert.True(hit.Length == 1, $"Expected one ResizePartitionFlow, found {hit.Length}.");
 		// Comments stripped: a syntax node's ToString() carries them, and the comment that RECORDS this

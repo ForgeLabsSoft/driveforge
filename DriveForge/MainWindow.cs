@@ -15832,6 +15832,27 @@ exit 0
 	}
 	
 	/// <summary>
+	/// Deletes the volume with Windows' own partition API. Returns "" on success, else the reason.
+	///
+	/// Same measured reason as its resize sibling: on a virtual disk diskpart's `delete volume override`
+	/// refuses with 0x80070002 ("The system cannot find the file specified") and leaves the volume where it
+	/// was, while Remove-Partition deletes it and leaves the neighbouring partition untouched.
+	/// </summary>
+	private async Task<string> RemoveVolumeApiAsync(char letter)
+	{
+		try
+		{
+			string script = "$ErrorActionPreference = 'Stop'; try { Remove-Partition -DriveLetter " + letter
+				+ " -Confirm:$false; 'DF-DELETE-OK' } catch { 'DF-DELETE-FAIL: ' + $_.Exception.Message }";
+			string raw = await RunProcessCaptureAsync("powershell.exe", "-NoProfile -Command " + QuoteArgument(script));
+			if (raw.Contains("DF-DELETE-OK", StringComparison.Ordinal)) return "";
+			string why = raw.Trim();
+			return why.Length == 0 ? "Remove-Partition produced no output" : why;
+		}
+		catch (Exception ex) { return ex.Message; }
+	}
+	
+	/// <summary>
 	/// Resizes the volume with Windows' own partition API. Returns "" on success, else the reason.
 	///
 	/// MEASURED on a virtual disk with a fresh NTFS volume: diskpart refuses BOTH directions with
@@ -16566,8 +16587,22 @@ exit 0
 		{
 			SetBusy(busy: true, string.Format(L("PtWorking"), L("PtDelete")));
 			int partsBefore = await PartitionCountAsync(disk.Number);
-			string outp = await RunDiskpartAsync($"select volume {letter}\r\ndelete volume override\r\nexit\r\n");
-			SetToolOutput("diskpart delete volume\r\n\r\n" + outp);
+			// Windows' own API first, diskpart only as a fallback - the same order, and the same measured
+			// reason, as the resize tool one screen over. On a virtual disk `delete volume override` refuses
+			// with 0x80070002 and the volume stays put, while Remove-Partition removes it and leaves the
+			// neighbour untouched. A refusal is also not a crash: a non-zero diskpart exit THROWS, which turned
+			// an ordinary refusal into "Delete failed:" with a bug-report invitation. It is caught here and
+			// left to the partition count below - the only arbiter either engine gets.
+			string outp;
+			string why = await RemoveVolumeApiAsync(letter);
+			bool apiOk = why.Length == 0;
+			outp = "Remove-Partition -DriveLetter " + letter + (apiOk ? "  ->  OK" : "  ->  " + why);
+			if (!apiOk)
+			{
+				try { outp += "\r\n\r\n" + await RunDiskpartAsync($"select volume {letter}\r\ndelete volume override\r\nexit\r\n"); }
+				catch (Exception dex) { outp += "\r\n\r\ndiskpart: " + dex.Message; }
+			}
+			SetToolOutput("delete volume\r\n\r\n" + outp);
 			Log($"Delete volume {letter}: on Disk {disk.Number}: diskpart finished.");
 			await RefreshDisksAsync();
 			// The exit code is the only signal this gets, and reading the disk back is the cheap second one.
