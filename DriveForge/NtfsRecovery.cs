@@ -147,6 +147,16 @@ public partial class MainWindow
 		public long FatOffset { get; set; }
 		public long ResumeOffset { get; set; }
 		public bool DeepPartial { get; set; }
+		// Truncated is DERIVED from Files.Count in memory, so a reload recomputes it by itself for as long as
+		// the cap is still visible in the count. It is stored anyway for the one case the derivation cannot
+		// see: the NTFS scanner's de-duplication pass can take the count back BELOW the cap after the
+		// truncation has already happened, which is why that site sets it explicitly. Lost on reload, the
+		// screen dropped its "only the first N are listed" suffix and read as "that is all there is" - the
+		// very lie the flag exists to prevent.
+		// Deliberately NOT a version bump: an older DriveForge ignores a field it does not know, whereas
+		// Version = 4 would make it refuse the whole file. A v1-v3 session simply arrives without it, and a
+		// missing value means false - which is exactly what happens today.
+		public bool Truncated { get; set; }
 		public string BootSig { get; set; } = ""; // base64 512-byte boot fingerprint, for stale-session (wrong-disk) detection
 		public List<SessionFileDto> Files { get; set; } = new();
 	}
@@ -160,7 +170,7 @@ public partial class MainWindow
 			ImagePath = _lastScan.ImagePath, IsExFat = _lastScan.IsExFat,
 			ClusterSize = _lastScan.ClusterSize, BytesPerSector = _lastScan.BytesPerSector,
 			DataAreaOffset = _lastScan.DataAreaOffset, FatOffset = _lastScan.FatOffset,
-			ResumeOffset = _lastScan.ResumeOffset, DeepPartial = _lastScan.DeepPartial,
+			ResumeOffset = _lastScan.ResumeOffset, DeepPartial = _lastScan.DeepPartial, Truncated = _lastScan.Truncated,
 			BootSig = _lastScan.BootSig != null ? Convert.ToBase64String(_lastScan.BootSig) : "",
 		};
 		foreach (var f in _lastScan.Files)
@@ -187,7 +197,7 @@ public partial class MainWindow
 			ImagePath = dto.ImagePath ?? "", IsExFat = dto.IsExFat,
 			ClusterSize = dto.ClusterSize, BytesPerSector = dto.BytesPerSector,
 			DataAreaOffset = dto.DataAreaOffset, FatOffset = dto.FatOffset,
-			ResumeOffset = dto.ResumeOffset, DeepPartial = dto.DeepPartial,
+			ResumeOffset = dto.ResumeOffset, DeepPartial = dto.DeepPartial, Truncated = dto.Truncated,
 			BootSig = string.IsNullOrEmpty(dto.BootSig) ? null : Convert.FromBase64String(dto.BootSig),
 		};
 		foreach (var d in dto.Files)

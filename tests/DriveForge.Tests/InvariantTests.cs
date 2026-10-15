@@ -2596,12 +2596,16 @@ public class InvariantTests
 			if (!code.Contains(needle, StringComparison.Ordinal))
 				problems.Add($"says nothing about {what} ({needle})");
 
-		// The cap has to be derived, not a flag a new scanner can forget to raise.
+		// The cap has to be derived, not a flag a new scanner can forget to raise. Scoped to the type the app
+		// itself reads: the .dfscan DTO carries a plain stored Truncated beside it, which is what a serialized
+		// copy is FOR - a reload has no Files list to re-derive from until the rows are back, and the explicit
+		// flag is the only record of a truncation that de-duplication later took back below the cap.
 		var trunc = SourceModel.Parsed
 			.SelectMany(p => p.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
-				.Where(d => d.Identifier.Text == "Truncated"))
+				.Where(d => d.Identifier.Text == "Truncated"
+					&& d.Parent is ClassDeclarationSyntax owner && owner.Identifier.Text == "NtfsScanResult"))
 			.ToArray();
-		Assert.True(trunc.Length == 1, $"Expected one Truncated property, found {trunc.Length}.");
+		Assert.True(trunc.Length == 1, $"Expected one Truncated property on NtfsScanResult, found {trunc.Length}.");
 		if (!trunc[0].ToString().Contains("MaxRecoverEntries", StringComparison.Ordinal))
 			problems.Add("Truncated no longer derives from the entry cap, so a scanner that stops adding "
 				+ "can report a full list as a complete one");
@@ -3852,5 +3856,84 @@ public class InvariantTests
 			"SetToolOutput must record which drive the transcript is about. Without it the clear can only be "
 				+ "keyed on \"the selection changed\" — and seven tools refresh the disk list immediately "
 				+ "after writing their output, so that would erase the result they had just produced.");
+	}
+
+	/// <summary>
+	/// RULE - a saved session carries every field the recovery will read back.
+	///
+	/// A .dfscan file is a STORED COPY of a scan, and the DTO's own history is this defect twice over: v2 had
+	/// to add SourcePath, because without it every Recycle Bin row reloaded with an empty payload, "recovered"
+	/// as a 0-byte file, and still reported success; v3 had to add StatusKey, because without it a reloaded row
+	/// stayed in whatever language the scan had run in. Both times: a field added to the in-memory type and
+	/// forgotten in the DTO sitting right beside it. The third was Truncated, whose loss dropped the "only the
+	/// first N are listed" suffix so the screen read as "that is all there is".
+	///
+	/// So: every WRITABLE public member of DeletedFile / NtfsScanResult must have a same-named member in its
+	/// DTO. Writability is the test rather than a list of names, because a member with no setter cannot be
+	/// restored from a file in the first place - it must already be derived (Status, PercentText), and so it is
+	/// skipped by construction. Three absences are deliberate and carry their reason below; a fourth has to be
+	/// argued for here, in writing.
+	/// </summary>
+	[Fact]
+	public void ASavedSessionCarriesEveryFieldTheRecoveryWillReadBack()
+	{
+		// member name -> why it is deliberately absent from the DTO
+		var deliberate = new Dictionary<string, string>(StringComparer.Ordinal)
+		{
+			["Selected"] = "the grid's tick state: a reopened session starts with nothing ticked, on purpose",
+			["StatusText"] = "persisted under the DTO's older name Status - the sentence a pre-v3 scan rendered",
+			["Files"] = "carried as List<SessionFileDto>, one DTO per row, rather than as a single member",
+		};
+		
+		var pairs = new[] { ("DeletedFile", "SessionFileDto"), ("NtfsScanResult", "SessionDto") };
+		var problems = new List<string>();
+		foreach (var (runtime, dto) in pairs)
+		{
+			ClassDeclarationSyntax? rt = SessionClass(runtime);
+			ClassDeclarationSyntax? st = SessionClass(dto);
+			Assert.True(rt != null, $"{runtime} is gone. Re-read this rule rather than leaving it passing over nothing.");
+			Assert.True(st != null, $"{dto} is gone. Re-read this rule rather than leaving it passing over nothing.");
+			var stored = new HashSet<string>(WritableMemberNames(st!), StringComparer.Ordinal);
+			int seen = 0;
+			foreach (string name in WritableMemberNames(rt!))
+			{
+				if (deliberate.ContainsKey(name)) continue;
+				seen++;
+				if (!stored.Contains(name))
+					problems.Add($"{runtime}.{name} can be written but {dto} has no {name}, so a saved session loses "
+						+ "it and the reopened screen shows the default as though it were the truth.");
+			}
+			Assert.True(seen >= 8,
+				$"Only {seen} member(s) of {runtime} were checked; there were more. Re-read this rule rather than "
+					+ "leaving it passing over a scope that has moved.");
+		}
+		Assert.True(problems.Count == 0, "A .dfscan round trip drops data:\n  " + string.Join("\n  ", problems));
+	}
+
+	private static ClassDeclarationSyntax? SessionClass(string name) =>
+		SourceModel.Parsed.SelectMany(p => p.Root.DescendantNodes().OfType<ClassDeclarationSyntax>())
+			.FirstOrDefault(c => c.Identifier.Text == name);
+
+	/// <summary>
+	/// Public instance members that could be written back from a file: fields that are neither const nor
+	/// readonly, and properties that have a set accessor. A get-only member cannot be restored from a file, so
+	/// it has to be derived from the ones that can - which is why leaving it out of a DTO is correct.
+	/// </summary>
+	private static IEnumerable<string> WritableMemberNames(ClassDeclarationSyntax c)
+	{
+		foreach (MemberDeclarationSyntax m in c.Members)
+		{
+			if (!m.Modifiers.Any(x => x.IsKind(SyntaxKind.PublicKeyword))) continue;
+			if (m.Modifiers.Any(x => x.IsKind(SyntaxKind.StaticKeyword))) continue;
+			if (m is FieldDeclarationSyntax f)
+			{
+				if (f.Modifiers.Any(x => x.IsKind(SyntaxKind.ConstKeyword) || x.IsKind(SyntaxKind.ReadOnlyKeyword))) continue;
+				foreach (var v in f.Declaration.Variables) yield return v.Identifier.Text;
+			}
+			else if (m is PropertyDeclarationSyntax p
+				&& p.AccessorList != null
+				&& p.AccessorList.Accessors.Any(a => a.IsKind(SyntaxKind.SetAccessorDeclaration)))
+				yield return p.Identifier.Text;
+		}
 	}
 }
