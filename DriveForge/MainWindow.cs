@@ -11710,10 +11710,17 @@ exit 0
 		var dlg = new Microsoft.Win32.OpenFileDialog { Title = L("SecureDelTitle"), CheckFileExists = true };
 		if (dlg.ShowDialog(this) != true) return;
 		string path = dlg.FileName;
-		// A LINK is refused outright, exactly as the folder shredder refuses one (ShredOne): overwriting
-		// through it writes the zeroes onto its TARGET, which may be on another drive entirely, destroying a
-		// file the person never selected - and then only the link is deleted, so "File securely deleted."
-		// would be said about a file that is still there, and about a different one that has just been lost.
+		// A LINK is refused outright, as the folder shredder refuses one (ShredOne), whose comment states the
+		// harm: overwriting through a link writes onto its TARGET, which may be on another drive, destroying
+		// a file the person never selected, after which only the link is deleted.
+		//
+		// MEASURED on hardware, and the measurement narrowed the claim: handed a symbolic link, THIS picker
+		// never passes it on. Microsoft.Win32.OpenFileDialog has DereferenceLinks = true by default, so the
+		// path that arrives here is the TARGET's - the confirmation named the target, and the target is what
+		// was erased. Honest, and not the disaster above. So this guard is defence in depth, not a live
+		// bug fix: it covers any other way a path can reach this method (a drop, a path from elsewhere, a
+		// future caller) and keeps the two shredders symmetrical. In the folder shredder the paths come
+		// from walking a directory rather than from a picker, which is where it does happen.
 		// IsFileLink, not the ReparsePoint attribute, for the reason that guard already records: the
 		// attribute is also set on OneDrive placeholders, which are ordinary files.
 		if (IsFileLink(path))
