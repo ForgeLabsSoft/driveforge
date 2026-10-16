@@ -11955,12 +11955,7 @@ exit 0
 			PopulateColorLens();
 			DrawTreemap();
 			// Mark files inside the protected ("master") folder so they can never be deleted.
-			string master = AnalyzeMasterBox?.Text ?? "";
-			if (!string.IsNullOrWhiteSpace(master) && Directory.Exists(master))
-			{
-				string m = Path.GetFullPath(master).TrimEnd('\\');
-				foreach (var d in result.Dupes) d.IsReference = UnderFolder(d.FullPath, m);
-			}
+			StampProtected(result.Dupes);
 			if (BigFilesGrid != null) BigFilesGrid.ItemsSource = result.Big;
 			if (DupesGrid != null) DupesGrid.ItemsSource = result.Dupes;
 			_dupesAreSimilar = false;   // byte-identical duplicates: safe to auto-select a keeper
@@ -12032,6 +12027,28 @@ exit 0
 		catch { return false; }
 	}
 
+	/// <summary>
+	/// Stamps IsReference on every row from the LIVE protected-folder box, and returns that folder's full
+	/// path ("" when none is set). THE only reader of that box, so protection cannot mean one thing on one
+	/// path and something else on another.
+	///
+	/// It has to be re-read, not remembered: the box is a control the user can fill in or change at any moment,
+	/// including long after the scan that first stamped these rows. Measured - a protected folder chosen after
+	/// the scan left "keep one per set" ticking the protected copy red and keeping another, while the delete
+	/// (which did re-read it) then refused to touch it: the screen and the deed disagreed, and "keep 1" quietly
+	/// became "keep 2".
+	///
+	/// Matched by PATH, not by existence: a master drive that is momentarily unplugged still protects.
+	/// </summary>
+	private string StampProtected(IEnumerable<DupRow>? rows)
+	{
+		string raw = AnalyzeMasterBox?.Text ?? "";
+		string full = "";
+		if (!string.IsNullOrWhiteSpace(raw)) { try { full = Path.GetFullPath(raw).TrimEnd('\\'); } catch { full = ""; } }
+		if (rows != null) foreach (var d in rows) d.IsReference = full.Length > 0 && UnderFolder(d.FullPath, full);
+		return full;
+	}
+	
 	[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
 	private static extern uint GetLongPathName(string lpszShortPath, System.Text.StringBuilder lpszLongPath, uint cchBuffer);
 
@@ -12296,6 +12313,9 @@ exit 0
 	private int ApplyKeepRule(int rule)
 	{
 		if (DupesGrid?.ItemsSource is not IEnumerable<DupRow> rows) return 0;
+		// The protected folder as it is RIGHT NOW, not as it was when these rows were scanned. Without this the
+		// rule ticked the user's master copy red and kept a different one.
+		StampProtected(rows);
 		int sets = 0;
 		foreach (var grp in rows.GroupBy(r => r.Group))
 		{
@@ -12375,12 +12395,7 @@ exit 0
 		try
 		{
 			var dupes = await Task.Run(() => FindSimilarImages(root, threshold, progress, bar));
-			string master = AnalyzeMasterBox?.Text ?? "";
-			if (!string.IsNullOrWhiteSpace(master) && Directory.Exists(master))
-			{
-				string m = Path.GetFullPath(master).TrimEnd('\\');
-				foreach (var d in dupes) d.IsReference = UnderFolder(d.FullPath, m);
-			}
+			StampProtected(dupes);
 			if (DupesGrid != null) DupesGrid.ItemsSource = dupes;
 			_dupesAreSimilar = true;   // perceptual near-duplicates: NOT identical — must stay review-only
 			if (AnalyzeDupesTab != null) AnalyzeDupesTab.IsSelected = true;
@@ -12611,6 +12626,7 @@ exit 0
 	private void AnalyzeGallery_Click(object sender, RoutedEventArgs e)
 	{
 		if (DupesGrid?.ItemsSource is not IEnumerable<DupRow> rows) { if (AnalyzeStatusText != null) AnalyzeStatusText.Text = L("AnSmartNoDupes"); return; }
+		StampProtected(rows);   // the tiles colour and lock themselves from this flag - it has to be today's
 		var media = rows.Where(r => { int c = CategoryOf(r.FullPath); return c == 0 || c == 1; }).ToList();
 		if (media.Count == 0) { if (AnalyzeStatusText != null) AnalyzeStatusText.Text = L("AnGalleryNone"); return; }
 		ShowImageGallery(media);
@@ -12655,7 +12671,11 @@ exit 0
 				sp.Children.Add(img);
 				sp.Children.Add(new TextBlock { Text = row.Name, Foreground = white, FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 156 });
 				sp.Children.Add(new TextBlock { Text = row.SizeText + (string.IsNullOrEmpty(row.DateText) ? "" : " · " + row.DateText), Foreground = muted, FontSize = 10, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 156 });
-				var chk = new CheckBox { Content = L("AnGalleryDelete"), Foreground = white, FontSize = 11, Margin = new Thickness(0, 4, 0, 0), IsEnabled = row.CanDelete };
+				// BOUND, not assigned: CanDelete follows IsReference, which the user can change behind this window
+				// (the gallery is modeless) by picking or clearing the protected folder. The grid next door binds it,
+				// and so does the tile's own border - a one-time read left the tick box alone saying yesterday's answer.
+				var chk = new CheckBox { Content = L("AnGalleryDelete"), Foreground = white, FontSize = 11, Margin = new Thickness(0, 4, 0, 0) };
+				chk.SetBinding(UIElement.IsEnabledProperty, new System.Windows.Data.Binding("CanDelete") { Source = row, Mode = System.Windows.Data.BindingMode.OneWay });
 				chk.SetBinding(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, new System.Windows.Data.Binding("Selected") { Source = row, Mode = System.Windows.Data.BindingMode.TwoWay });
 				sp.Children.Add(chk);
 				var tile = new Border { Width = 170, Margin = new Thickness(6), CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(3), Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1E, 0x29, 0x3B)), Padding = new Thickness(6), Child = sp };
@@ -12711,14 +12731,9 @@ exit 0
 	{
 		if (_analyzerBusy) return;
 		if (isBusy) { MessageBox.Show(L("MsgBusyWait"), "DriveForge", MessageBoxButton.OK, MessageBoxImage.Exclamation); return; }
-		// Re-evaluate the master ("protected") folder from the LIVE box: the user may have set or changed it AFTER the
-		// scan (DupRow.IsReference was stamped once, at scan time). Match by path, not existence, so a momentarily
-		// unavailable master drive still protects (empty box = no protection).
-		string amMaster = AnalyzeMasterBox?.Text ?? "";
-		string amMasterFull = "";
-		if (!string.IsNullOrWhiteSpace(amMaster)) { try { amMasterFull = Path.GetFullPath(amMaster).TrimEnd('\\'); } catch { amMasterFull = ""; } }
-		if (DupesGrid?.ItemsSource is IEnumerable<DupRow> drStamp)
-			foreach (var d in drStamp) d.IsReference = amMasterFull.Length > 0 && UnderFolder(d.FullPath, amMasterFull);
+		// The master folder as it is RIGHT NOW. This flow always did re-read it; the rule and the gallery did not,
+		// which is how the grid came to show a protected copy ticked red while this code quietly spared it.
+		string amMasterFull = StampProtected(DupesGrid?.ItemsSource as IEnumerable<DupRow>);
 		// Safety: never tick away the last copy of a set — if a whole set is ticked, un-tick its newest (keeper).
 		var protectedGroups = new HashSet<int>(); // distinct dup-groups where a last copy was kept (for the confirm count)
 		if (DupesGrid?.ItemsSource is IEnumerable<DupRow> drAll)

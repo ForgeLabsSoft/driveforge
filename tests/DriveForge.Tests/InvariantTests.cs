@@ -4115,4 +4115,46 @@ public class InvariantTests
 				+ "the directory index and the MFT for the Recover screen to list. Overwriting the bytes and "
 				+ "leaving the name is half a secret.");
 	}
+	/// <summary>
+	/// The protected ("master") folder is a TEXT BOX the user can change at any moment, so every flow that
+	/// acts on it must re-read it. Measured: a folder chosen after the scan left "keep one per set" ticking the
+	/// protected copy red and keeping a different one, while the delete - the one flow that did re-read it -
+	/// then spared that file. The screen and the deed disagreed, and "keep 1" became "keep 2".
+	/// </summary>
+	[Fact]
+	public void EveryFlowThatHonoursTheProtectedFolderReadsItNow()
+	{
+		string Body(string name)
+		{
+			var hit = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			Assert.True(hit.Length == 1, $"Expected one {name}, found {hit.Length}.");
+			// Comments stripped: they name the helper, so an unfiltered check passes on its own explanation.
+			return string.Join(" ", hit[0].Method.ToString()
+				.Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+		}
+
+		// Each of these decides something from IsReference: which copy survives, which tile is locked, which
+		// file is spared. None of them may do it from a flag stamped at scan time.
+		foreach (string flow in new[] { "ApplyKeepRule", "AnalyzeDelete_Click", "AnalyzeGallery_Click",
+			"RunAnalyzeScanAsync", "AnalyzeSimilar_Click" })
+		{
+			Assert.True(Body(flow).Contains("StampProtected(", StringComparison.Ordinal),
+				$"{flow} acts on the protected folder without re-reading it. The box is a live control: whatever "
+				+ "IsReference was stamped with at scan time can already be wrong by the time this runs.");
+		}
+
+		// And the other half: nobody else may read that box for protection. Three near-copies of this logic
+		// is how they drifted apart in the first place - one of them checking Directory.Exists, which turns an
+		// unplugged master drive into no protection at all.
+		string[] allowed = { "StampProtected", "AnalyzeMasterBrowse_Click", "AnalyzeMasterClear_Click" };
+		var strays = SourceModel.Methods()
+			.Where(m => !allowed.Contains(m.Name))
+			.Where(m => m.Method.ToString().Contains("AnalyzeMasterBox", StringComparison.Ordinal))
+			.Select(m => m.Name).Distinct().ToArray();
+		Assert.True(strays.Length == 0,
+			"These read the protected-folder box directly instead of going through StampProtected, which is "
+			+ "how the rule and the delete came to mean different things by 'protected': "
+			+ string.Join(", ", strays));
+	}
 }
