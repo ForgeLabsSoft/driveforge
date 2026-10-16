@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using System.Collections.Generic;
 using System.Linq;
 using Xunit;
@@ -36,6 +37,14 @@ public class ApiSurfaceTests
 			"Helper(s) renamed, removed, or now overloaded — update the reflection call sites too:\n  "
 			+ string.Join("\n  ", missing));
 	}
+
+	/// <summary>The analyzer's behavioural tests call this one by reflection, and it is an INSTANCE method,
+	/// so <see cref="Mw"/> (static only) cannot pin it with the rest.</summary>
+	[Fact]
+	public void TheAnalyzerScanEngineIsStillReachable() =>
+		Assert.True(typeof(MainWindow).GetMethod("AnalyzeScanCore", BindingFlags.NonPublic | BindingFlags.Instance) != null,
+			"MainWindow.AnalyzeScanCore was renamed or removed - the disk-space analyzer's behavioural tests "
+			+ "call it by reflection and will fail with MissingMethodException until the call sites follow.");
 
 	[Fact]
 	public void TheLocalizationDictionaryIsStillReachable()

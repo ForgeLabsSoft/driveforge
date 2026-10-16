@@ -12156,6 +12156,11 @@ exit 0
 				foreach (var hg in pg.Where(c => full.ContainsKey(c.Path)).GroupBy(c => full[c.Path]))
 				{
 					var list = hg.ToList();
+					// Two names of ONE file are not two copies. Measured: a hard-linked pair came out as a duplicate set
+					// of 2 and pushed "reclaimable" up by the whole file size, while deleting either name frees nothing -
+					// the bytes are held by the name that stays. Collapse by physical identity BEFORE the set is counted,
+					// so a set that was only ever one file disappears instead of being offered for deletion.
+					if (list.Count >= 2) list = OneEntryPerFile(list, c => c.Path);
 					if (list.Count < 2) continue;
 					group++;
 					long size = list[0].Size;
@@ -12216,6 +12221,56 @@ exit 0
 		catch { return ""; }
 	}
 
+	[StructLayout(LayoutKind.Sequential)]
+	private struct BY_HANDLE_FILE_INFORMATION
+	{
+		public uint dwFileAttributes;
+		public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime, ftLastAccessTime, ftLastWriteTime;
+		public uint dwVolumeSerialNumber, nFileSizeHigh, nFileSizeLow, nNumberOfLinks, nFileIndexHigh, nFileIndexLow;
+	}
+	
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION info);
+	
+	/// <summary>
+	/// The file's PHYSICAL identity - volume serial number + file index - or "" when it cannot be read.
+	///
+	/// Two paths that share this key are two NAMES for one file (a hard link, or a symlink and its target),
+	/// not two copies: the bytes exist once, and deleting one name frees nothing at all. Same size and same
+	/// SHA-256 cannot tell them apart - of course they match, they are the same file - so the duplicate finder
+	/// was counting directory entries where it had to measure distinct storage.
+	///
+	/// An unreadable key is deliberately NOT an identity: "" means "could not prove they are the same", and the
+	/// caller then leaves the file where it was rather than quietly dropping a copy it never measured.
+	/// </summary>
+	private static string PhysicalFileKey(string path)
+	{
+		try
+		{
+			using SafeFileHandle h = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+			if (!GetFileInformationByHandle(h, out var inf)) return "";
+			return inf.dwVolumeSerialNumber.ToString("X8") + ":" + inf.nFileIndexHigh.ToString("X8") + inf.nFileIndexLow.ToString("X8");
+		}
+		catch { return ""; }
+	}
+	
+	/// <summary>
+	/// Keeps one entry per PHYSICAL file: a path whose identity was already seen in this set is another name
+	/// for a file that is already listed, so it is dropped. Paths whose identity cannot be read are kept.
+	/// </summary>
+	private static List<T2> OneEntryPerFile<T2>(IEnumerable<T2> items, Func<T2, string> pathOf)
+	{
+		var seenId = new HashSet<string>(StringComparer.Ordinal);
+		var kept = new List<T2>();
+		foreach (T2 it in items)
+		{
+			string id = PhysicalFileKey(pathOf(it));
+			if (id.Length > 0 && !seenId.Add(id)) continue;
+			kept.Add(it);
+		}
+		return kept;
+	}
+	
 	// "Keep 1 per set" with a rule: keep the newest / oldest / shortest-path copy, tick the rest for deletion,
 	// and mark the survivor green (Keep). Never leaves a set with everything ticked.
 	// True when the Dupes grid currently holds perceptual near-duplicates (review-only), not byte-identical ones.
@@ -12403,8 +12458,13 @@ exit 0
 		int group = 0;
 		foreach (var cl in clusters.Values.Where(v => v.Count >= 2))
 		{
+			// Same rule as the byte-identical finder next door: two names of one file are not two photos, and a
+			// cluster that holds nothing else is not a cluster. Leaving this one path unguarded would put the same
+			// picture in the gallery twice, each tile offering to delete "the other copy".
+			var members = OneEntryPerFile(cl.OrderByDescending(i => imgs[i].Mt), i => imgs[i].Path);
+			if (members.Count < 2) continue;
 			group++;
-			foreach (int i in cl.OrderByDescending(i => imgs[i].Mt))
+			foreach (int i in members)
 			{
 				var it = imgs[i];
 				result.Add(new DupRow { Group = group, Name = Path.GetFileName(it.Path), Folder = Path.GetDirectoryName(it.Path) ?? "", Size = it.Size, SizeText = FormatBytes(it.Size), FullPath = it.Path, Modified = it.Mt, DateText = DateCol(it.Mt) });

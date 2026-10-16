@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -373,6 +375,144 @@ public class PureLogicTests
 			try { Directory.Delete(inCod, true); } catch { }
 			try { Directory.Delete(inGunoi, true); } catch { }
 			try { File.Delete(fInBaza); } catch { }
+		}
+	}
+
+	// ---------------------------------------------------------------- the disk-space analyzer
+
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+	private static extern bool CreateHardLinkW(string newName, string existingName, IntPtr sec);
+
+	/// <summary>
+	/// Runs the analyzer's REAL scan engine over a folder and hands back what it found.
+	///
+	/// AnalyzeScanCore is an instance method (it reads the stop flag), so <see cref="Mw"/> - which only reaches
+	/// static members - cannot call it. An uninitialized MainWindow is enough and needs no UI thread: the core
+	/// touches no control and no dispatcher, only static helpers and that one bool, which defaults to false.
+	/// </summary>
+	private static (int Files, long Total, int RedundantCount, long RedundantBytes, List<(int Group, string Path)> Dupes) Scan(string root)
+	{
+		var mw = (MainWindow)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MainWindow));
+		GC.SuppressFinalize(mw);
+		MethodInfo mi = typeof(MainWindow).GetMethod("AnalyzeScanCore", BindingFlags.NonPublic | BindingFlags.Instance)
+			?? throw new MissingMethodException("MainWindow.AnalyzeScanCore (private instance) not found");
+		object res = mi.Invoke(mw, new object[] { root, new Progress<string>(_ => { }), new Progress<double>(_ => { }) })!;
+		Type t = res.GetType();
+		object Fld(string n) => t.GetField(n)!.GetValue(res)!;
+		var dupes = new List<(int, string)>();
+		foreach (object d in (System.Collections.IEnumerable)Fld("Dupes"))
+		{
+			Type dt = d.GetType();
+			dupes.Add(((int)dt.GetProperty("Group")!.GetValue(d)!, (string)dt.GetProperty("FullPath")!.GetValue(d)!));
+		}
+		return ((int)Fld("FileCount"), (long)Fld("TotalSize"), (int)Fld("RedundantCount"), (long)Fld("RedundantBytes"), dupes);
+	}
+
+	private static void Bytes(string path, byte b, int n)
+	{
+		var buf = new byte[n];
+		for (int i = 0; i < n; i++) buf[i] = b;
+		File.WriteAllBytes(path, buf);
+	}
+
+	/// <summary>
+	/// REGRESSION - the duplicate finder offered a hard-linked pair as "2 copies" and added the whole file size
+	/// to the reclaimable total. Deleting either name frees nothing: the bytes are held by the name that stays.
+	/// Measured on a real tree - 28,675 reclaimable claimed where 16,387 was the truth.
+	/// </summary>
+	[Fact]
+	public void TwoNamesForOneFileAreNotOfferedAsTwoCopies()
+	{
+		string root = Path.Combine(Path.GetTempPath(), "df-an-" + Guid.NewGuid().ToString("N")[..8]);
+		try
+		{
+			Directory.CreateDirectory(Path.Combine(root, "a"));
+			Directory.CreateDirectory(Path.Combine(root, "b"));
+			// Two genuine copies - the positive control. If these stop being found the rest proves nothing.
+			string c1 = Path.Combine(root, "a", "copie.bin"), c2 = Path.Combine(root, "b", "copie.bin");
+			Bytes(c1, 0x41, 8192);
+			File.Copy(c1, c2);
+			// One file, two names.
+			string l1 = Path.Combine(root, "legatura1.bin"), l2 = Path.Combine(root, "legatura2.bin");
+			Bytes(l1, 0x5A, 12288);
+			bool linked = CreateHardLinkW(l2, l1, IntPtr.Zero);
+			Assert.True(linked, $"Could not create a hard link in {Path.GetTempPath()} (Win32 {Marshal.GetLastWin32Error()}). "
+				+ "This test measures nothing without one - it needs an NTFS temp folder.");
+
+			var scan = Scan(root);
+
+			var real = scan.Dupes.Where(d => d.Path.Equals(c1, StringComparison.OrdinalIgnoreCase)
+				|| d.Path.Equals(c2, StringComparison.OrdinalIgnoreCase)).ToList();
+			Assert.True(real.Count == 2 && real[0].Group == real[1].Group,
+				"The two genuine copies are no longer reported as one duplicate set, so this test is proving "
+				+ "nothing about hard links. Re-read it rather than leaving it passing over a scope that has moved.");
+
+			Assert.DoesNotContain(scan.Dupes, d => d.Path.Equals(l1, StringComparison.OrdinalIgnoreCase)
+				|| d.Path.Equals(l2, StringComparison.OrdinalIgnoreCase));
+			Assert.True(scan.RedundantBytes == 8192,
+				$"The analyzer says {scan.RedundantBytes} bytes are reclaimable; only 8192 are. Two names for one "
+				+ "file were counted as a second copy, and deleting one of them frees nothing at all.");
+			Assert.True(scan.RedundantCount == 1, $"Expected 1 extra copy, the analyzer counted {scan.RedundantCount}.");
+		}
+		finally { try { Directory.Delete(root, true); } catch { } }
+	}
+
+	/// <summary>
+	/// The funnel (same size -> same head+tail -> same SHA-256) must separate files that only LOOK alike, find
+	/// the tiny ones, ignore the empty ones, and never walk through a junction. All five measured together on
+	/// one real tree, because they are one promise: a row in that grid is a file you can delete.
+	/// </summary>
+	[Fact]
+	public void TheDuplicateFunnelOnlyGroupsFilesThatReallyMatch()
+	{
+		string root = Path.Combine(Path.GetTempPath(), "df-an-" + Guid.NewGuid().ToString("N")[..8]);
+		string outside = Path.Combine(Path.GetTempPath(), "df-afara-" + Guid.NewGuid().ToString("N")[..8]);
+		string junction = Path.Combine(root, "jonctiune");
+		try
+		{
+			Directory.CreateDirectory(root);
+			Directory.CreateDirectory(outside);
+			// Same size, same first 16KB AND same last 16KB, different in the middle: only a FULL hash can tell
+			// these apart, so this is what stops the cheap pre-filter from being trusted as an answer.
+			foreach ((string name, byte mid) in new[] { ("mijloc-A.bin", (byte)0x41), ("mijloc-B.bin", (byte)0x42) })
+			{
+				var buf = new byte[40960];
+				for (int i = 16384; i < 16384 + 8192; i++) buf[i] = mid;
+				File.WriteAllBytes(Path.Combine(root, name), buf);
+			}
+			Bytes(Path.Combine(root, "egal1.bin"), 0x01, 5000);   // same size, different from the first byte
+			Bytes(Path.Combine(root, "egal2.bin"), 0x02, 5000);
+			File.WriteAllText(Path.Combine(root, "mic1.txt"), "abc");  // 3 bytes - the floor is 1, so these count
+			File.WriteAllText(Path.Combine(root, "mic2.txt"), "abc");
+			File.WriteAllBytes(Path.Combine(root, "gol1.dat"), Array.Empty<byte>());
+			File.WriteAllBytes(Path.Combine(root, "gol2.dat"), Array.Empty<byte>());
+			// A junction holding a third copy: walking into it would double-count files that are not in this tree.
+			File.WriteAllText(Path.Combine(outside, "mic3.txt"), "abc");
+			var mk = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
+				$"/c mklink /J \"{junction}\" \"{outside}\"") { UseShellExecute = false, CreateNoWindow = true });
+			mk!.WaitForExit();
+			Assert.True(Directory.Exists(junction), "Could not create the junction, so the walk is unmeasured here.");
+
+			var scan = Scan(root);
+			var paths = scan.Dupes.Select(d => Path.GetFileName(d.Path)).ToList();
+
+			Assert.True(paths.Count(p => p == "mic1.txt" || p == "mic2.txt") == 2,
+				"The two 3-byte duplicates were not found, so nothing below is being measured. The size floor is 1 "
+				+ "byte on purpose: a tiny file is still a duplicate.");
+			Assert.DoesNotContain("mijloc-A.bin", paths);
+			Assert.DoesNotContain("mijloc-B.bin", paths);
+			Assert.DoesNotContain("egal1.bin", paths);
+			Assert.DoesNotContain("egal2.bin", paths);
+			Assert.DoesNotContain("gol1.dat", paths);
+			Assert.DoesNotContain("mic3.txt", paths);
+			Assert.True(scan.Files == 8, $"Expected the 8 files of this tree, the scan counted {scan.Files} - "
+				+ "a junction is a door into another folder, not part of this one.");
+		}
+		finally
+		{
+			try { Directory.Delete(junction); } catch { }
+			try { Directory.Delete(root, true); } catch { }
+			try { Directory.Delete(outside, true); } catch { }
 		}
 	}
 }
