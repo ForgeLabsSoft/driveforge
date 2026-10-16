@@ -4157,4 +4157,39 @@ public class InvariantTests
 			+ "how the rule and the delete came to mean different things by 'protected': "
 			+ string.Join(", ", strays));
 	}
+	/// <summary>
+	/// The Stop confirmation must name the operation it is about to stop. Measured: stopping a backup into a
+	/// FILE asked "Stop the current operation? The USB may be unfinished and need to be formatted again." One
+	/// of two fixed sentences was chosen by whether a child process was alive - which says nothing about what
+	/// is running - and the tools page forwards to this same handler, so a read-only surface test asked it too.
+	/// </summary>
+	[Fact]
+	public void TheStopPromptNamesWhatItIsAboutToStop()
+	{
+		string Body(string name)
+		{
+			var hit = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			Assert.True(hit.Length == 1, $"Expected one {name}, found {hit.Length}.");
+			// Comments stripped: this one quotes the very sentences it forbids.
+			return string.Join(" ", hit[0].Method.ToString()
+				.Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+		}
+
+		string stop = Body("StopButton_Click");
+		Assert.True(stop.Contains("MessageBoxButton.YesNo", StringComparison.Ordinal),
+			"Stop no longer asks before it stops. Re-read this rule rather than leaving it passing over a "
+			+ "scope that has moved.");
+		Assert.True(stop.Contains("StopPromptBody(", StringComparison.Ordinal),
+			"The Stop confirmation does not go through StopPromptBody, so it is back to telling every "
+			+ "operation the same story about a USB.");
+		foreach (string key in new[] { "Mb005", "Mb006" })
+			Assert.False(stop.Contains("MessageBox.Show(L(\"" + key + "\")", StringComparison.Ordinal),
+				$"Stop shows {key} as the question itself. Those two sentences describe writing a drive; they are "
+				+ "the fallback for an operation with no label of its own, not the message.");
+
+		Assert.True(Body("StopPromptBody").Contains("_operationStatusText", StringComparison.Ordinal),
+			"StopPromptBody no longer reads the running operation's label, so it can only ever show the "
+			+ "fallback - which is the defect this rule exists for.");
+	}
 }

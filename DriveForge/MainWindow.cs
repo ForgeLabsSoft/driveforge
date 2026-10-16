@@ -2024,6 +2024,21 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	/// <summary>
+	/// What the Stop confirmation says: the running operation's OWN words.
+	///
+	/// Measured - stopping a backup into a FILE asked "Stop the current operation? The USB may be unfinished
+	/// and need to be formatted again." There is no USB in a backup. One of two fixed sentences was picked by
+	/// whether a child process happened to be alive, which says nothing about what is running, and the tools
+	/// page forwards to this same handler - so a read-only surface test asked it too.
+	///
+	/// _operationStatusText is set by SetBusy, kept current by SetStage and CLEARED by SetBusy(false), so it is
+	/// the live operation's label and never a previous run's. The old sentences stay as the net for the one
+	/// case that has no label at all (a silent refresh holding busy).
+	/// </summary>
+	private string StopPromptBody(string fallbackKey) =>
+		string.IsNullOrWhiteSpace(_operationStatusText) ? L(fallbackKey) : _operationStatusText;
+	
 	private async void StopButton_Click(object sender, RoutedEventArgs e)
 	{
 		Process? process = activeProcess;
@@ -2034,7 +2049,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			if (isBusy)
 			{
-				if (MessageBox.Show(L("Mb005"), L("MbStopTitle"), MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
+				if (MessageBox.Show(StopPromptBody("Mb005"), L("MbStopTitle"), MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
 				{
 					return;
 				}
@@ -2052,7 +2067,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			return;
 		}
-		if (MessageBox.Show(L("Mb006"), L("MbStopTitle"), MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
+		if (MessageBox.Show(StopPromptBody("Mb006"), L("MbStopTitle"), MessageBoxButton.YesNo, MessageBoxImage.Exclamation) != MessageBoxResult.Yes)
 		{
 			return;
 		}
