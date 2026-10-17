@@ -161,6 +161,15 @@ checks before it erases anything and tells you what will be missing if you carry
 drive comes out without those settings, or without a boot record, pausing that protection for
 a few minutes and running the task again is usually all it takes.
 
+A third case affects **scheduled clones** only. A scheduled run starts with no window and erases its
+target drive within seconds of launching — which is, to behaviour-based protection, the shape of a
+wiper. Measured here: Bitdefender's Advanced Threat Defense blocked every application involved and
+quarantined DriveForge's own `settings.json`. What matters is that a scheduled run is unattended
+**by design**, so nothing is on screen to tell you it was stopped — you find out when the backup is
+not there. If your security suite watches behaviour rather than files, add an exclusion for
+`DriveForge.exe` before you rely on a schedule, and check that the first scheduled run really
+happened.
+
 ## License
 
 - DriveForge is **free and open source software**, licensed under the **GNU General
