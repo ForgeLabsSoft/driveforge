@@ -201,7 +201,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
               <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
-                <TextBlock Name="TbExportVhdx" Text="Export to VHDX" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
+                <TextBlock Name="TbExportVhdx" Text="Export VHDX" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
                 <TextBlock Name="SbExportVhdxS" Text="Run this PC in a Hyper-V virtual machine" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
@@ -274,7 +274,7 @@
               <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="17" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1">
                 <TextBlock Name="SbRecoverT" Text="Recover deleted files" FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap" />
-                <TextBlock Name="SbRecoverS" Text="Undelete files from a drive (NTFS)" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+                <TextBlock Name="SbRecoverS" Text="Undelete (NTFS/exFAT/FAT) + deep scan" FontSize="11" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
           </Button>
@@ -307,7 +307,7 @@
         </Border>
         <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
           <StackPanel>
-            <TextBlock Name="Step2Title" Text="2. Windows source" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="Step2Title" Text="Windows source" FontSize="16" FontWeight="SemiBold" />
             <TextBlock Name="SourceHelpText" Text="ISO / WIM / ESD or current Windows." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
             <Grid Name="SourceFileRow">
               <Grid.ColumnDefinitions>
@@ -324,7 +324,7 @@
         </Border>
         <Border Name="TargetSection" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
           <StackPanel>
-            <TextBlock Name="Step3Title" Text="3. Target USB / SSD / HDD" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="Step3Title" Text="Target drive (USB / SSD / HDD)" FontSize="16" FontWeight="SemiBold" />
             <TextBlock Name="Step3Desc" Text="Selected disk will be formatted." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
             <ComboBox Name="DiskBox" Height="30" SelectionChanged="DiskBox_SelectionChanged" ToolTip="Pick the USB stick / SSD / HDD to write to. Everything on it will be erased. Your system disk is hidden so it cannot be picked by mistake." />
             <Border Name="DriveVerdictBorder" CornerRadius="6" Padding="8,5" Margin="0,6,0,0" Visibility="Collapsed">
@@ -365,8 +365,8 @@
         </Border>
         <Border Name="OptionsSection" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
           <StackPanel>
-            <TextBlock Name="Step4Title" Text="4. Options" FontSize="16" FontWeight="SemiBold" />
-            <TextBlock Name="BootModeText" Text="Boot mode: Automatic." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
+            <TextBlock Name="Step4Title" Text="Options" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Name="BootModeText" Text="Boot mode: Automatic (BIOS + UEFI)." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,4" />
             <CheckBox Name="BypassRequirementsCheck" Content="Bypass Windows 11 system requirements" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Writes Microsoft's LabConfig bypass values into the new Windows, so a later in-place upgrade of it is not blocked by the TPM 2.0 / Secure Boot / CPU check.&#10;&#10;It is not what lets this drive start on an unsupported PC: an already-installed Windows does not re-check the requirements at boot, so the drive runs on old hardware whether or not this is ticked." />
             <CheckBox Name="BypassAccountCheck" Content="Bypass Microsoft account requirements" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Skip the Microsoft-account requirement on first boot. You will be asked to choose a local account name and password during creation." />
             <CheckBox Name="DebloatCheck" Content="Apply Microsoft's privacy policies (ads, suggestions, telemetry)" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,3" ToolTip="Writes Microsoft's own group-policy values into the new Windows: advertising ID off, consumer suggestions and Start web search off, the Chat icon hidden, and diagnostic data set to the lowest level the edition allows. Installs nothing and removes no apps, so all of it is reversible.&#10;&#10;Several of these are honoured only on Enterprise and Education: on Home and Pro diagnostic data falls back to 'Required' rather than off, and the Copilot value is a policy Microsoft has deprecated, so it does not remove the Copilot app." />
@@ -386,7 +386,7 @@
         <Border Name="Step5Section" Visibility="Collapsed" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BlueBrush}" BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,6,0,0">
           <StackPanel>
             <TextBlock Name="Step5Title" Text="5. HDD / USB tools" FontSize="16" FontWeight="SemiBold" />
-            <TextBlock Name="Step5Desc" Text="Use the standalone diagnostic center on the right for health, speed, SMART, surface scan, repair, and tool kit." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
+            <TextBlock Name="Step5Desc" Text="Use the diagnostic center on the right for health, speed, SMART, scan, repair, and kit." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
           </StackPanel>
         </Border>
       </StackPanel>
@@ -765,7 +765,7 @@
               <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="24" VerticalAlignment="Center" Margin="0,0,12,0" />
               <TextBlock Name="RecPanelTitle" Text="Recover deleted files" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
             </StackPanel>
-            <TextBlock Grid.Row="1" Name="RecPanelDesc" Text="Scan an NTFS drive for recently deleted files, tick the ones you want, and recover them with their original names. Fast, read-only scan — your drive is never written to." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,10,0,12" />
+            <TextBlock Grid.Row="1" Name="RecPanelDesc" Text="Scan an NTFS, exFAT or FAT drive — or a disk image — for deleted and existing files, preview images, and recover what you want with their original names. Read-only: your drive is never written to." TextWrapping="Wrap" Foreground="{DynamicResource MutedBrush}" FontSize="14" Margin="0,10,0,12" />
             <StackPanel Grid.Row="2" Margin="0,0,0,8">
               <Border Background="#0E1830" BorderBrush="#2A3E5E" BorderThickness="1" CornerRadius="10" Padding="10,7">
                 <Grid>
@@ -1063,7 +1063,7 @@
                 <Grid>
                   <Canvas Name="AnalyzeTreemap" ClipToBounds="True" Background="Transparent" SizeChanged="AnalyzeTreemap_SizeChanged" />
                   <TextBlock Name="AnalyzeEmptyHint" Foreground="{DynamicResource MutedBrush}" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Left" MaxWidth="620" LineHeight="22"
-                             Text="This shows what's filling your disk and the duplicate copies you can safely remove.&#x0a;&#x0a;1.  Pick a folder above and press Scan.&#x0a;2.  The map shows which sub-folders use the most space; the Largest files tab lists the biggest files.&#x0a;3.  Open the Duplicate files tab and click 'Select duplicates (keep 1)' — the green row is kept, the red ones are extra copies.&#x0a;4.  Press 'Delete selected' — files go to the Recycle Bin, so you can restore them if needed.&#x0a;&#x0a;Nothing on your PC is changed until you press Delete." />
+                             Text="This shows what's filling your disk and the duplicate copies you can safely remove.&#x0a;&#x0a;1.  Pick a folder above and press Scan.&#x0a;2.  The map shows which sub-folders use the most space; the Largest files tab lists the biggest files.&#x0a;3.  Open the Duplicate files tab and click '[[AnalyzeKeepFirstButton]]' — the green row is kept, the red ones are extra copies.&#x0a;4.  Press '[[AnalyzeDeleteButton]]' — files go to the Recycle Bin, so you can restore them if needed.&#x0a;&#x0a;Nothing on your PC is changed until you press Delete." />
                 </Grid>
               </Border>
               <Grid Grid.Row="4" Margin="0,10,0,0">
@@ -1220,7 +1220,7 @@
                 <Button Padding="10,0" Name="ThemeLightButton" Content="Light" Tag="light" MinWidth="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
                 <Button Padding="10,0" Name="ThemeSystemButton" Content="System" Tag="system" MinWidth="118" Margin="0,0,8,8" Click="Theme_Click" Style="{StaticResource GhostButtonStyle}" />
               </WrapPanel>
-              <TextBlock Name="SettingsThemeLabel" Text="Base theme (dark accents)" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,8" />
+              <TextBlock Name="SettingsThemeLabel" Text="Base theme" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,8" />
               <WrapPanel>
                 <Button Content="Midnight" Tag="0F172A" Width="120" Margin="0,0,8,8" Click="BaseTheme_Click" Style="{StaticResource GhostButtonStyle}" />
                 <Button Content="Carbon" Tag="0A0A0F" Width="120" Margin="0,0,8,8" Click="BaseTheme_Click" Style="{StaticResource GhostButtonStyle}" />

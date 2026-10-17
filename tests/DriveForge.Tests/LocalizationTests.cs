@@ -1522,4 +1522,64 @@ public class LocalizationTests
 		string t = Regex.Replace(s, @"\s+", " ").Trim();
 		return t.Length > 80 ? t.Substring(0, 80) + "…" : t;
 	}
+	/// <summary>
+	/// The English text written by hand into MainWindow.xaml must BE the English text in the table.
+	///
+	/// ApplyLanguage walks every English key, finds the control by name and writes the table's text into it -
+	/// so the literal in the XAML is a COPY, and a copy that drifts from its source is the fault this whole
+	/// audit kept finding. Measured when this rule was written: 215 named controls carry a literal and a key,
+	/// and ten of them said something else. Three step titles still carried the numbers that left the interface
+	/// in 4.5.0; the Recover panel still described an NTFS-only scan; and the duplicate-files hint named its two
+	/// buttons in frozen English where the table uses [[references]] precisely so the name follows the language.
+	///
+	/// Nobody normally sees the literal - it is overwritten before the window is shown - which is exactly why
+	/// nothing caught it. It is still what the designer renders, what a reader of the XAML believes, and what
+	/// survives if a control is ever missed by the loop.
+	/// </summary>
+	[Fact]
+	public void TheTextWrittenIntoTheXamlIsTheTextInTheTable()
+	{
+		string xaml = File.ReadAllText(Path.Combine(Mw.RepoRoot, "MainWindow.xaml"));
+		var en = Strings[Base];
+
+		// The attribute as XAML stores it, brought back to the plain string the table holds.
+		static string Decode(string a) => a
+			.Replace("&#x0a;", "\n", StringComparison.OrdinalIgnoreCase)
+			.Replace("&#x0d;", "\r", StringComparison.OrdinalIgnoreCase)
+			.Replace("&#x2026;", "\u2026", StringComparison.OrdinalIgnoreCase)
+			.Replace("&#39;", "'", StringComparison.Ordinal)
+			.Replace("&quot;", "\"", StringComparison.Ordinal)
+			.Replace("&lt;", "<", StringComparison.Ordinal)
+			.Replace("&gt;", ">", StringComparison.Ordinal)
+			.Replace("&amp;", "&", StringComparison.Ordinal);
+		// Line endings are a file convention, not a difference in what the sentence says.
+		static string Norm(string v) => v.Replace("\r\n", "\n").Replace("\r", "\n");
+
+		int compared = 0;
+		var drifted = new List<string>();
+		foreach (Match m in Regex.Matches(xaml, @"<(CheckBox|Button|TextBlock|GroupBox|TabItem|Expander)\b(?:[^<>""]|""[^""]*"")*?>"))
+		{
+			string tag = m.Value;
+			Match name = Regex.Match(tag, @"\bName=""([A-Za-z0-9_]+)""");
+			Match text = Regex.Match(tag, @"\b(?:Content|Text|Header)=""([^""]*)""");
+			if (!name.Success || !text.Success) continue;
+			string value = text.Groups[1].Value;
+			// Glyph fonts and icon code points are symbols, not language.
+			if (tag.Contains("Segoe MDL2") || value.StartsWith("&#x") || !Regex.IsMatch(value, "[A-Za-z]{3}")) continue;
+			if (!en.TryGetValue(name.Groups[1].Value, out string? source)) continue;
+
+			compared++;
+			if (string.Equals(Norm(Decode(value)), Norm(source), StringComparison.Ordinal)) continue;
+			drifted.Add($"{name.Groups[1].Value}\n       XAML : \"{Norm(Decode(value))}\"\n       table: \"{Norm(source)}\"");
+		}
+
+		Assert.True(compared >= 150,
+			$"Only {compared} named controls were compared against the table, where 215 were when this "
+			+ "rule was written. "
+			+ "written. Re-read this rule rather than leaving it passing over a scope that has moved.");
+		Assert.True(drifted.Count == 0,
+			"The English written into the XAML no longer matches the table it is a copy of. ApplyLanguage "
+			+ "overwrites it from the table at startup, so whichever you just edited, the OTHER one is what the "
+			+ "app actually shows:\n  " + string.Join("\n  ", drifted));
+	}
 }
