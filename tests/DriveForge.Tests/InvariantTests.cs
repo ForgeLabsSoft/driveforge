@@ -4192,4 +4192,48 @@ public class InvariantTests
 			"StopPromptBody no longer reads the running operation's label, so it can only ever show the "
 			+ "fallback - which is the defect this rule exists for.");
 	}
+	/// <summary>
+	/// "Which connected disk does this schedule belong to?" is asked twice - by the unattended run and by the
+	/// offer at startup - and a wrong answer to either one erases a drive. Measured: the offer asked it on its
+	/// own, matching the friendly name ALONE with FirstOrDefault, and announced a 32 MB disk as "the drive your
+	/// scheduled clone writes to" for a 1 GB schedule, pre-selected and one Yes away from being formatted.
+	/// </summary>
+	[Fact]
+	public void BothPathsAskTheSameQuestionAboutWhichDriveIsScheduled()
+	{
+		string Body(string name)
+		{
+			var hit = SourceModel.Methods().Where(m => m.Name == name).ToArray();
+			Assert.True(hit.Length == 1, $"Expected one {name}, found {hit.Length}.");
+			// Comments stripped: they name the helper and the defect, so an unfiltered check passes on prose.
+			return string.Join(" ", hit[0].Method.ToString()
+				.Split('\n')
+				.Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)
+					&& !l.TrimStart().StartsWith("///", StringComparison.Ordinal)));
+		}
+
+		foreach (string flow in new[] { "TryGetAutoCloneRequest", "OfferScheduledCloneManualRunAsync" })
+		{
+			string body = Body(flow);
+			Assert.True(body.Contains("ResolveScheduledTarget(", StringComparison.Ordinal),
+				$"{flow} picks the scheduled drive its own way instead of through ResolveScheduledTarget. Two "
+				+ "answers to one question is how this screen came to offer the wrong disk for erasing.");
+			// `disks.` on purpose: TryGetAutoCloneRequest also uses FirstOrDefault to pick a command-line
+			// ARGUMENT, which is harmless. What must never happen is picking a DISK that way.
+			foreach (string grab in new[] { "disks.FirstOrDefault", "disks.First(" })
+				Assert.False(body.Contains(grab, StringComparison.Ordinal),
+					$"{flow} settles for the FIRST disk that looks right. When two drives share a name, that is "
+					+ "a coin toss over which one gets erased - the resolver refuses instead, and must stay the "
+					+ "only way in.");
+		}
+
+		string resolver = Body("ResolveScheduledTarget");
+		foreach (string grab in new[] { "disks.FirstOrDefault", "disks.First(", ".FirstOrDefault()" })
+			Assert.False(resolver.Contains(grab, StringComparison.Ordinal),
+				"The resolver itself now takes the first match. It exists precisely to refuse an ambiguous target.");
+		int sizeChecks = System.Text.RegularExpressions.Regex.Matches(resolver, "ScheduledSizeMatches\\(").Count;
+		Assert.True(sizeChecks >= 2,
+			$"Only {sizeChecks} of the resolver's two branches check the recorded size. The serial "
+			+ "branch needs it too: card-reader controllers hand the same serial to different drives.");
+	}
 }

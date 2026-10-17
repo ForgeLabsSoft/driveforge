@@ -515,4 +515,24 @@ public class PureLogicTests
 			try { Directory.Delete(outside, true); } catch { }
 		}
 	}
+
+	/// <summary>
+	/// REGRESSION - the scheduled clone decided "is this my drive?" with a flat ±1 GiB window, so a 32 MB disk
+	/// answered for a 1 GB one and the unattended run took it as its target. Measured on hardware: the offer and
+	/// the headless run both landed on a 32 MB virtual disk that belonged to something else entirely.
+	/// </summary>
+	[Theory]
+	// the measured case: 32 MB is not a 1 GB drive, however generous you are feeling
+	[InlineData(33554432L, 1073741824L, false)]
+	// the same drive, reported by the same API - this has to keep working
+	[InlineData(1073741824L, 1073741824L, true)]
+	// a terabyte drive may report a little differently; 64 MiB of slack is the most it ever gets
+	[InlineData(1000204886016L - 64L * 1024 * 1024, 1000204886016L, true)]
+	[InlineData(1000204886016L - 100L * 1024 * 1024, 1000204886016L, false)]
+	// half a gigabyte apart is two different drives, not reporting jitter
+	[InlineData(1610612736L, 1073741824L, false)]
+	// an old schedule that recorded no size at all: nothing to compare against, so the name has to carry it
+	[InlineData(12345L, 0L, true)]
+	public void AScheduledCloneOnlyRecognisesADriveOfTheRecordedSize(long actual, long recorded, bool expected) =>
+		Assert.Equal(expected, Mw.Call<bool>("ScheduledSizeMatches", actual, recorded));
 }

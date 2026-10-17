@@ -476,9 +476,17 @@ public partial class MainWindow : Window, IComponentConnector
 		if (string.IsNullOrWhiteSpace(name)) name = Regex.Match(cmd, @"--diskname=(\S+)").Groups[1].Value.Trim('"');
 		bool internalMode = Regex.Match(cmd, @"--mode=(\w+)").Groups[1].Value.Equals("internal", StringComparison.OrdinalIgnoreCase);
 		if (string.IsNullOrWhiteSpace(name)) return;
+		// The size and serial are in the same command line this just parsed, and they are what tells two drives of
+		// the same model apart. Reading only the name here - and taking the FIRST match - is how this offer came to
+		// announce a 32 MB disk as "the drive your scheduled clone writes to" for a 1 GB schedule.
+		string serial = Regex.Match(cmd, "--diskserial=\"([^\"]*)\"").Groups[1].Value;
+		if (string.IsNullOrWhiteSpace(serial)) serial = Regex.Match(cmd, @"--diskserial=(\S+)").Groups[1].Value.Trim('"');
+		long.TryParse(Regex.Match(cmd, @"--disksize=(\d+)").Groups[1].Value, out long size);
 
-		DiskItem? target = disks.FirstOrDefault(d => string.Equals(d.FriendlyName, name, StringComparison.OrdinalIgnoreCase) && !d.IsSystem);
-		if (target == null) return; // the scheduled drive is not connected → stay quiet
+		// The same resolver the unattended run uses: one question, one answer. Quiet when it cannot be sure -
+		// an offer to erase the wrong drive is worse than no offer.
+		DiskItem? target = ResolveScheduledTarget(name, serial, size, null);
+		if (target == null) return; // not connected, or not identifiable with certainty → stay quiet
 
 		// Pre-select the scheduled mode + drive so the green Start button is ready either way.
 		ModeBox.SelectedIndex = internalMode ? ModeCloneInternal : ModeCloneCurrentWindows;
@@ -514,45 +522,73 @@ public partial class MainWindow : Window, IComponentConnector
 		string name = GetArg("--diskname");
 		string serial = GetArg("--diskserial").Trim();
 		long.TryParse(GetArg("--disksize"), out long size);
-		// NEVER auto-target the running system disk, and prefer the serial number (the only strong identity) so an
-		// unattended clone can't erase a different, same-named/same-size drive that happens to be connected.
-		// Resolve to EXACTLY ONE matching disk — never FirstOrDefault. Cheap USB sticks / card readers often report an
-		// empty or model-shared (VID/PID-derived) serial, and identical sticks also share FriendlyName+size, so a lone
-		// match could be the wrong physical drive. If two or more connected disks match the recorded identity, the target
-		// is ambiguous → refuse (erasing the wrong data drive unattended is unrecoverable).
+		disk = ResolveScheduledTarget(name, serial, size, Log);
+		return true;
+	}
+	
+	/// <summary>
+	/// How close a connected disk's size must be to the size recorded when the clone was scheduled for it to be
+	/// the SAME drive.
+	///
+	/// Measured: the old window was ±1 GiB, flat. A 32 MB virtual disk therefore answered for a 1 GB one -
+	/// |33,554,432 - 1,073,741,824| is under a gibibyte - and the unattended run took it as its target and went
+	/// on; it survived only because Windows does not fit on 32 MB. A tolerance wider than the thing it measures
+	/// is not a check. Both numbers come from the same property of the same API, so the slack only has to absorb
+	/// reporting jitter: one percent of the recorded size, never more than 64 MiB and never less than 1 MiB.
+	/// </summary>
+	private static bool ScheduledSizeMatches(long actual, long recorded)
+	{
+		if (recorded <= 0) return true;   // only old schedules, which recorded no size at all
+		long slack = Math.Min(64L * 1024 * 1024, Math.Max(1L * 1024 * 1024, recorded / 100));
+		return Math.Abs(actual - recorded) <= slack;
+	}
+	
+	/// <summary>
+	/// The ONE place that decides which connected disk a scheduled clone belongs to. Both the unattended run and
+	/// the offer shown at startup go through it, because they are the same question and a wrong answer to either
+	/// one erases a drive.
+	///
+	/// NEVER the running system disk, and prefer the serial number (the only strong identity) so an unattended
+	/// clone can't erase a different, same-named/same-size drive that happens to be connected. Resolve to EXACTLY
+	/// ONE matching disk - never FirstOrDefault. Cheap USB sticks / card readers often report an empty or
+	/// model-shared (VID/PID-derived) serial, and identical sticks also share FriendlyName+size, so a lone match
+	/// could be the wrong physical drive. If two or more connected disks match the recorded identity, the target
+	/// is ambiguous → refuse (erasing the wrong data drive unattended is unrecoverable).
+	///
+	/// Measured, and the reason this is shared: the startup offer used to match on FriendlyName ALONE, with
+	/// FirstOrDefault, ignoring the size and serial sitting in the very command line it had just parsed. With a
+	/// 1 GB drive scheduled, it announced "The drive your scheduled clone writes to is connected: Msft Virtual
+	/// Disk - 32.0 MB ... It ERASES this drive" - a different disk entirely, pre-selected and one Yes away.
+	/// </summary>
+	private DiskItem? ResolveScheduledTarget(string name, string serial, long size, Action<string>? note)
+	{
+		serial = (serial ?? "").Trim();
 		if (serial.Length > 0)
 		{
-			// Match on serial AND the recorded size (±1 GiB): cheap USB/card-reader controllers report a model-shared
-			// (VID/PID-derived) serial across physically different drives, so a same-serial drive of a DIFFERENT
-			// capacity would otherwise be wiped unattended. (size<=0 only for old schedules that recorded no size.)
-			var matches = disks.Where(d => !d.IsSystem && !string.IsNullOrEmpty(d.Serial)
+			// Serial AND the recorded size: cheap USB/card-reader controllers report a model-shared serial across
+			// physically different drives, so a same-serial drive of a DIFFERENT capacity would otherwise be wiped.
+			var bySerial = disks.Where(d => !d.IsSystem && !string.IsNullOrEmpty(d.Serial)
 				&& string.Equals(d.Serial.Trim(), serial, StringComparison.OrdinalIgnoreCase)
-				&& (size <= 0 || Math.Abs(d.Size - size) < 1024L * 1024 * 1024)).ToList();
-			if (matches.Count == 1) disk = matches[0];
-			else
-			{
-				Log(matches.Count == 0
-					? "Scheduled clone: no connected disk matches the saved serial number AND size. Refusing to guess a target. Nothing to do."
-					: "Scheduled clone: " + matches.Count + " connected disks share the saved serial+size (non-unique / identical drives). Refusing to erase an ambiguous target. Nothing to do.");
-				return true;
-			}
+				&& ScheduledSizeMatches(d.Size, size)).ToList();
+			if (bySerial.Count == 1) return bySerial[0];
+			note?.Invoke(bySerial.Count == 0
+				? "Scheduled clone: no connected disk matches the saved serial number AND size. Refusing to guess a target. Nothing to do."
+				: "Scheduled clone: " + bySerial.Count + " connected disks share the saved serial+size (non-unique / identical drives). Refusing to erase an ambiguous target. Nothing to do.");
+			return null;
 		}
-		else
+		// No serial was captured when scheduling (drive exposes none): fall back to friendly name + size. Do NOT add
+		// a size-less fallback (a same-named drive of a DIFFERENT size would be erased), and refuse if the
+		// (name,size) match is ambiguous across two identical sticks.
+		var byName = disks.Where(d => !d.IsSystem && string.Equals(d.FriendlyName, name, StringComparison.OrdinalIgnoreCase)
+			&& size > 0 && ScheduledSizeMatches(d.Size, size)).ToList();
+		if (byName.Count == 1) return byName[0];
+		if (byName.Count > 1)
 		{
-			// No serial was captured when scheduling (drive exposes none): fall back to friendly name + size (±1 GiB).
-			// Do NOT add a size-less fallback (a same-named drive of a DIFFERENT size would be erased), and refuse if the
-			// (name,size) match is ambiguous across two identical sticks.
-			var matches = disks.Where(d => !d.IsSystem && string.Equals(d.FriendlyName, name, StringComparison.OrdinalIgnoreCase)
-				&& size > 0 && Math.Abs(d.Size - size) < 1024L * 1024 * 1024).ToList();
-			if (matches.Count == 1) disk = matches[0];
-			else if (matches.Count > 1)
-			{
-				Log("Scheduled clone: " + matches.Count + " connected disks share the saved name+size (identical drives, no serial). Refusing to erase an ambiguous target. Nothing to do.");
-				return true;
-			}
+			note?.Invoke("Scheduled clone: " + byName.Count + " connected disks share the saved name+size (identical drives, no serial). Refusing to erase an ambiguous target. Nothing to do.");
+			return null;
 		}
-		if (disk == null) Log("Scheduled clone: target disk '" + name + "' not found / not connected. Nothing to do.");
-		return true;
+		note?.Invoke("Scheduled clone: target disk '" + name + "' not found / not connected. Nothing to do.");
+		return null;
 	}
 
 	// Runs a clone with no dialogs (for Task Scheduler) and then exits the app.
