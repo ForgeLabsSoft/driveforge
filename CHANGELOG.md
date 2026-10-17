@@ -2,6 +2,98 @@
 
 All notable changes to DriveForge are documented here. Dates are ISO (YYYY-MM-DD).
 
+## v4.5.1 — 2026-10-17
+
+The same audit, carried on into the screens 4.5.0 did not reach — and this time every fix was measured on
+real hardware before and after, not read. Nineteen changes, no new features: **updating is safe from any
+4.x, and nothing here changes a file format or a saved setting.**
+
+Two faults in here could have cost someone data. Both were found the same way: by asking the app to do the
+dangerous thing and then checking the disk itself, rather than believing the dialog.
+
+### Fixed — a drive erased that you never chose
+
+- **The scheduled clone offered to erase a drive it was never scheduled for.** With a 1 GB drive scheduled
+  and a second drive of the same model name connected, the next start announced *"The drive your scheduled
+  clone writes to is connected: … 32.0 MB … It ERASES this drive"* — a different disk entirely, already
+  selected, one Yes away from being formatted. The offer matched on the model name alone and took the first
+  hit, ignoring the size and serial number recorded in the very command line it had just read. The
+  unattended run refuses to guess in exactly that situation; the offer guessed. Both now ask the same
+  question in the same place, and the offer stays quiet when it cannot be certain.
+- **"Is this my drive?" was answered with a tolerance wider than most drives.** The size had to be within
+  1 GiB — flat — so a 32 MB disk passed for a 1 GB one and the unattended run took it as its target. It
+  survived only because Windows does not fit on 32 MB. The margin is now one percent of the recorded size,
+  never more than 64 MiB.
+- **Two names for one file were offered as two copies.** The duplicate finder counted directory entries
+  where it had to measure distinct storage: a hard-linked pair came back as a "duplicate set" and pushed the
+  reclaimable total up by a whole file, when deleting either name frees nothing at all. Both finders — exact
+  and "similar photos" — now compare the volume serial and file index.
+- **The protected folder only counted if you picked it before the scan.** Choose it afterwards and the rule
+  ticked your master copy red and kept a different one. The deletion itself re-read the box and spared the
+  file, so the screen and the deed disagreed, and "keep 1 per set" quietly became keep 2.
+
+### Fixed — what the app did behind your back
+
+- **Cleaning traces swept away the code the app was running on.** A single-file .exe unpacks part of itself
+  into the temporary folder and runs from there; "Temporary files" cleared it out, and the next shutdown
+  threw `DllNotFoundException`. Reported by a user, reproduced here byte-for-byte, and it would have
+  happened on every clean. The sweep now leaves that folder alone — for any single-file program on the PC,
+  not only this one.
+- **A fault while the app was closing was dressed up as a lost operation.** The dialog said DriveForge "had
+  to stop the current operation" and invited a bug report, after the work had finished and the window was
+  already gone. It is written to the log now, where it belongs.
+- **Building one drive rewrote the host machine's disk policy.** The setting was changed to get the work
+  done and never put back.
+- **Windows-To-Go read four of its options after the image was already written.** Whatever you ticked, four
+  of them could not affect the drive you got.
+
+### Fixed — tools that refused work they could do
+
+- **Resize and Delete asked diskpart, which answered 0 and then refused everything.** On a virtual disk
+  diskpart reports no shrinkable space and `delete volume override` fails with "The system cannot find the
+  file specified", leaving the partition where it was — while Windows' own partition API does both. Each now
+  asks Windows first and keeps diskpart as the fallback, and a refusal is no longer reported as a crash.
+- **Every 64 GB stick was refused, under a number the image never needed.**
+- **The signature gate on the multi-boot engine could never succeed.**
+- **The size chooser offered a button that did nothing it said.**
+
+### Fixed — what the screen said
+
+- **Stop told every operation the same story about a USB.** Stopping a backup into a *file* asked *"Stop the
+  current operation? The USB may be unfinished and need to be formatted again."* There is no USB in a
+  backup, and the tools page asks through the same handler — so a read-only surface test asked it too. The
+  question now names the operation it is about to stop, in its own words.
+- **The one surface that stayed on screen said your own Stop was a failure.**
+- **A reopened scan session forgot that it had been cut short**, so a partial result read as a complete one.
+- **Secure-deleting a single file skipped all three guards the folder shredder has** — alternate data
+  streams were left unwritten, and the file name stayed in the directory index for a recovery scan to list.
+  A link is refused as well, though the file picker resolves links before the app ever sees one, so that
+  guard is defence in depth rather than a path anyone can reach.
+- **Nothing held the overflow menu's positions to its labels.**
+
+### Verified on hardware
+
+Every fix above was driven through the app on real disks, and judged by reading the disk afterwards rather
+than the dialog: the recovery session and the duplicator, the clean-traces reproduction, the disk-image loop
+(image created, disk detached, files recovered *from the image*, byte-identical), the shredder, **all ten
+partition tools** including Move in both directions and on both partition tables, the disk-space analyser,
+the backup screen, and the scheduled clone — including letting an unattended run actually erase its target
+and confirming that three other disks, among them a second Windows installation, were untouched.
+
+A full backup was captured end to end: 445 GB of Windows into a 331 GiB `.wim` in 1 h 44 m, verified
+independently afterwards, with two files extracted from the image and compared byte for byte against the
+originals.
+
+Not exercised: the shredder's overwrite pass, which needs a spinning disk and this machine has none, and
+the destructive clean, which is deliberately only ever run in Analyze mode here.
+
+### Internal
+
+194 tests, 0 warnings. Each new rule was mutated and watched go red before it was kept — twenty mutations in
+all; one rule was caught matching the command line's own arguments rather than the disk it was supposed to
+guard, and was narrowed. One earlier claim was corrected in the open rather than rewritten: a guard that had
+been described as live was measured to be unreachable through the file picker, and now says so.
+
 ## v4.5.0 — 2026-10-13
 
 A screen-by-screen audit of the whole app, driven on real hardware rather than read. Thirty-eight changes,
