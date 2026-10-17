@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 
 PackageIdentifier: ForgeLabsSoft.DriveForge
-PackageVersion: 4.5.0
+PackageVersion: 4.5.1
 PackageLocale: en-US
 Publisher: ForgeLabsSoft
 PublisherUrl: https://github.com/ForgeLabsSoft
@@ -37,37 +37,37 @@ Tags:
 - portable
 - open-source
 ReleaseNotes: |-
-  A screen-by-screen audit of the whole application, driven on real hardware rather than read.
-  Thirty-eight changes, and nearly all of them are one fault in different clothes: the app knew
-  something and did not say it. Nothing here changes a file format or a saved setting.
+  The second half of the screen-by-screen audit. Nineteen fixes, every one driven on real hardware
+  and judged by reading the disk afterwards rather than the dialog. Nothing is added and nothing
+  moves: updating is safe from any 4.x, and no file format or saved setting changes.
 
-  A run now reports what it actually did. A clone could take back three of the four options it had
-  offered you, into the log alone. Writing an image to several drives reported "6 of 6 written" when
-  it had refused two of them, and also dropped drives that vanished while the confirmation was up and
-  ticks with no drive connected. "Windows is keeping this disk offline" reached one report out of two.
-  A read-only file-system scan could call a drive healthy, as could Create partition and Delete volume,
-  which decided their verdict from a variable set to true and never lowered. The speed test spent 80 MB
-  and spoke for the whole drive; the disk-space analyser counted the Recycle Bin as free space. Clean
-  traces reported a stopped run as a finished one and a plain delete as a secure wipe, and named
-  sanitising standards it does not implement.
+  Two of these could have cost someone data. The scheduled clone's startup offer matched a drive by
+  model name alone and took the first hit, so with a 1 GB drive scheduled it announced a 32 MB one as
+  "the drive your scheduled clone writes to" and offered to erase it. Behind the unattended run, the
+  size test had a flat one-gibibyte tolerance - wide enough that the same 32 MB disk passed for the
+  1 GB one and the headless run took it as its target. Both paths now ask the same question in the
+  same place, with a tolerance of one percent, and the offer stays quiet when it cannot be certain.
 
-  Screens that hid the thing they exist for. Recover would not list the one volume it exists for.
-  Cleanup gave four different answers to "what is on screen". Three finished tools had no button
-  anywhere. The file-system menu stopped repeating the 32 GB FAT32 limit, which was measured to be
-  wrong, and now asks rather than refusing.
+  The DllNotFoundException reported on 4.5.0 is fixed. A single-file .exe unpacks part of itself into
+  the temporary folder and runs from there; "Clean traces" was clearing that out, and the next
+  shutdown threw. It would have happened on every clean. The sweep now leaves that folder alone for
+  any single-file program on the PC, not only this one. Reported by Keith Weisshar. A fault that
+  arrives while the app is closing also goes to the log now, instead of a dialog claiming an
+  operation was lost.
 
-  Stop is answered as a Stop on every path behind the Start button; several treated it as a failure,
-  and one saved a log file to the Desktop on the way out.
+  Duplicate files: two names for one file were offered as two copies, and deleting either frees
+  nothing. The protected folder now counts even if you choose it after the scan, where it used to
+  tick your master copy red and keep a different one.
 
-  Download an ISO: "Get latest" for Ubuntu was two LTS releases behind and could not have caught up,
-  with 24.04 written into the entry three times over. It now reads Ubuntu's release server and takes
-  the newest LTS. Reported by Keith Weisshar. The SHA-256 check is now offered where a download
-  finishes, which is the one screen that did not have it.
+  Resize and Delete asked diskpart, which on a virtual disk reports no free space and then refuses -
+  while Windows' own partition API does both. They ask Windows first now, and a refusal is no longer
+  reported as a crash. Secure-deleting a single file gained the three guards the folder shredder
+  already had. Building a drive no longer leaves the host machine's disk policy rewritten, and
+  Windows-To-Go reads its options before writing the image rather than after.
 
-  Also: the step numbers are gone from the interface, sentences that point at a button now name it,
-  and 46 of the 84 error sentences a person could see are translated, along with four dialogs that
-  were English end to end - including the one shown before erasing a drive.
+  Stop told every operation the same story about a USB - including a backup into a file and a
+  read-only surface test. It names the operation it is about to stop now.
 
-ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.5.0
+ReleaseNotesUrl: https://github.com/ForgeLabsSoft/driveforge/releases/tag/v4.5.1
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0

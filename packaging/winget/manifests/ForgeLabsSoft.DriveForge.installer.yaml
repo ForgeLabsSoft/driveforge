@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 
 PackageIdentifier: ForgeLabsSoft.DriveForge
-PackageVersion: 4.5.0
+PackageVersion: 4.5.1
 Platform:
 - Windows.Desktop
 MinimumOSVersion: 10.0.0.0
@@ -11,8 +11,8 @@ Commands:
 - driveforge
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.5.0/DriveForge.exe
-  InstallerSha256: BCFF7AA71B1E64BDAB19899145FF7C7553B769589B6A997D845804BF3BFCEFB1
+  InstallerUrl: https://github.com/ForgeLabsSoft/driveforge/releases/download/v4.5.1/DriveForge.exe
+  InstallerSha256: 46E9318B229CDE2560C44C0A13E9BACF7E5E12DA21C8D2DC416663A4A807FD07
 ManifestType: installer
 ManifestVersion: 1.12.0
-ReleaseDate: 2026-10-13
+ReleaseDate: 2026-10-17
