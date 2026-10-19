@@ -73,6 +73,10 @@ scoop bucket add forgelabs https://github.com/ForgeLabsSoft/scoop-bucket
 scoop install forgelabs/driveforge
 ```
 
+The manifest lives in [its own bucket](https://github.com/ForgeLabsSoft/scoop-bucket) — hence the first
+line — and is [listed on scoop.sh](https://scoop.sh/#/apps?q=driveforge&o=false). That link turns off the
+site's *official buckets only* filter, which is on by default and hides every community bucket.
+
 > **Not code-signed.** Windows SmartScreen warns on first run — click **More info → Run anyway**. Why, and
 > what is offered instead, is in [Code signing policy](#code-signing-policy) below.
 
