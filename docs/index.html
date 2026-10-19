@@ -221,6 +221,12 @@ footer a{color:var(--muted)}
       <a class="btn btn-primary" href="https://github.com/ForgeLabsSoft/driveforge/releases/latest">Get the latest release</a>
     </p>
 
+    <h3 style="margin-top:34px">Or install it with a package manager</h3>
+    <p>Both fetch the same published <code>.exe</code> from the release above, and both can update it later:</p>
+    <pre><code>winget install ForgeLabsSoft.DriveForge</code></pre>
+    <pre><code>scoop bucket add forgelabs https://github.com/ForgeLabsSoft/scoop-bucket
+scoop install forgelabs/driveforge</code></pre>
+
     <h3 style="margin-top:34px">Check the file is the one that was published</h3>
     <p>Compare the SHA-256 in <code>SHA256SUMS.txt</code> with the file you downloaded:</p>
     <pre><code>Get-FileHash DriveForge.exe -Algorithm SHA256</code></pre>
@@ -265,8 +271,9 @@ footer a{color:var(--muted)}
     <p class="lead">There is no installer, so there is nothing to uninstall — but here is everything DriveForge can leave behind, so you can be certain none of it stays.</p>
 
     <h3 style="margin-top:34px">The program</h3>
-    <p>Delete <code>DriveForge.exe</code>. That is the whole thing: one file, never copied into Program Files, never registered with Windows. If you installed it with the Windows Package Manager instead:</p>
+    <p>Delete <code>DriveForge.exe</code>. That is the whole thing: one file, never copied into Program Files, never registered with Windows. If you installed it with a package manager instead, remove it with the same one:</p>
     <pre><code>winget uninstall ForgeLabsSoft.DriveForge</code></pre>
+    <pre><code>scoop uninstall driveforge</code></pre>
 
     <h3>Settings and logs</h3>
     <p>Settings, drive-health history and logs live in one folder. Delete it and nothing of the app remains:</p>
