@@ -66,6 +66,13 @@ Or with the Windows Package Manager:
 winget install ForgeLabsSoft.DriveForge
 ```
 
+Or with [Scoop](https://scoop.sh):
+
+```
+scoop bucket add forgelabs https://github.com/ForgeLabsSoft/scoop-bucket
+scoop install forgelabs/driveforge
+```
+
 > **Not code-signed.** Windows SmartScreen warns on first run — click **More info → Run anyway**. Why, and
 > what is offered instead, is in [Code signing policy](#code-signing-policy) below.
 
@@ -104,7 +111,8 @@ There is no installer, so there is nothing to uninstall — but everything Drive
 listed here, so none of it has to stay.
 
 1. **The program.** Delete `DriveForge.exe`. It is never copied to Program Files and never registered with
-   Windows. Installed through the Windows Package Manager instead? `winget uninstall ForgeLabsSoft.DriveForge`
+   Windows. Installed through a package manager instead? `winget uninstall ForgeLabsSoft.DriveForge`,
+   or `scoop uninstall driveforge`
 2. **Settings and logs.** Delete `%LocalAppData%\DriveForge` — it holds `settings.json`,
    `health-history.json`, `crash.log` and `dism.log`, and nothing else.
 3. **A scheduled clone, only if you made one.** An ordinary Windows scheduled task named
